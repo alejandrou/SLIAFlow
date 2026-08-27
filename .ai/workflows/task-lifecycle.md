@@ -18,3 +18,5 @@ Every task uses this lifecycle:
 - `tasks/active/`: the single task currently being implemented.
 - `tasks/review/`: the single task awaiting independent review or human approval.
 - `tasks/completed/`: finished tasks with completion evidence.
+- `tasks/superseded/`: preserved historical cards that have been replaced by an
+  approved roadmap. These cards are never eligible for activation.

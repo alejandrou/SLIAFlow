@@ -1,7 +1,7 @@
 ---
 id: BSSL-007
 title: Implement the first mock vertical slice
-status: backlog
+status: superseded
 branch:
 priority: high
 depends_on: BSSL-006
@@ -11,6 +11,9 @@ related_adrs: []
 ---
 
 # BSSL-007 - Implement the first mock vertical slice
+
+> Superseded on 2026-08-26. The approved demonstrator uses a real laptop-camera
+> feed and keeps the result view black until genuine UC1 output is available.
 
 ## Goal
 

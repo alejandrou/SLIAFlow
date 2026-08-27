@@ -1,7 +1,7 @@
 ---
 id: BSSL-008
 title: Persist and summarize mock workflow results
-status: backlog
+status: superseded
 branch:
 priority: medium
 depends_on: BSSL-007
@@ -11,6 +11,9 @@ related_adrs: []
 ---
 
 # BSSL-008 - Persist and summarize mock workflow results
+
+> Superseded on 2026-08-26. Mock diagnostic result persistence and reporting are
+> not part of the approved SLIAFlow Slicer demonstrator.
 
 ## Goal
 

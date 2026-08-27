@@ -1,7 +1,7 @@
 ---
 id: BSSL-005
 title: Introduce persistent module state and rebrand as SLIAFlow
-status: active
+status: superseded
 branch: feature/BSSL-005-persistent-module-state
 priority: high
 depends_on: BSSL-004
@@ -11,6 +11,10 @@ related_adrs: []
 ---
 
 # BSSL-005 - Introduce persistent module state and rebrand as SLIAFlow
+
+> Superseded on 2026-08-26 by the approved STRATUM SLIAFlow implementation
+> roadmap. The card is retained as historical context, but its generic
+> volume-inspection workflow is not part of the new demonstrator.
 
 ## Scope expansion
 

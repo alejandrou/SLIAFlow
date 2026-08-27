@@ -1,7 +1,7 @@
 ---
 id: BSSL-006
 title: Define algorithm provider boundary
-status: backlog
+status: superseded
 branch:
 priority: high
 depends_on: BSSL-005
@@ -11,6 +11,10 @@ related_adrs: []
 ---
 
 # BSSL-006 - Define algorithm provider boundary
+
+> Superseded on 2026-08-26 by SLIA-006 and SLIA-008. The previous mock-provider
+> direction conflicts with the approved rule that the demonstrator must not show
+> simulated diagnostic results.
 
 ## Goal
 
