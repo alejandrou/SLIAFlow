@@ -3,8 +3,8 @@ $ErrorActionPreference = "Stop"
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $configPath = Join-Path $repositoryRoot "config\local.json"
 $modulePath = Join-Path $repositoryRoot "extensions\SLIAFlow\SLIAFlow"
-$testPath = Join-Path $modulePath "Testing\Python"
-$testName = "SLIAFlowModuleTest"
+$launcherPath = Join-Path $repositoryRoot "build\SLIAFlow\SlicerWithSLIAFlow.exe"
+$testName = "SLIAFlow"
 
 function Stop-WithError {
     param([string]$Message)
@@ -14,39 +14,44 @@ function Stop-WithError {
     exit 1
 }
 
-if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-    Stop-WithError "Configuration file is missing: $configPath. Create it from config/local.example.json and set slicerExecutable."
+if (Test-Path -LiteralPath $launcherPath -PathType Leaf) {
+    $slicerExecutable = $launcherPath
 }
-
-try {
-    $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-}
-catch {
-    Stop-WithError "Configuration file is malformed JSON: $configPath. Correct the JSON and verify slicerExecutable."
-}
-
-$configuredExecutable = $config.slicerExecutable
-if ($null -eq $configuredExecutable -or $configuredExecutable -isnot [string] -or [string]::IsNullOrWhiteSpace($configuredExecutable)) {
-    Stop-WithError "Configuration field 'slicerExecutable' is absent or empty in $configPath. Set it to an absolute or repository-relative Slicer executable path."
-}
-
-try {
-    if ([System.IO.Path]::IsPathRooted($configuredExecutable)) {
-        $slicerExecutable = [System.IO.Path]::GetFullPath($configuredExecutable)
+else {
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        Stop-WithError "SLIAFlow launcher and configuration file are missing. Build the extension or create $configPath from config/local.example.json."
     }
-    else {
-        $slicerExecutable = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $configuredExecutable))
+
+    try {
+        $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        Stop-WithError "Configuration file is malformed JSON: $configPath. Correct the JSON and verify slicerExecutable."
+    }
+
+    $configuredExecutable = $config.slicerExecutable
+    if ($null -eq $configuredExecutable -or $configuredExecutable -isnot [string] -or [string]::IsNullOrWhiteSpace($configuredExecutable)) {
+        Stop-WithError "Configuration field 'slicerExecutable' is absent or empty in $configPath. Set it to an absolute or repository-relative Slicer executable path."
+    }
+
+    try {
+        if ([System.IO.Path]::IsPathRooted($configuredExecutable)) {
+            $slicerExecutable = [System.IO.Path]::GetFullPath($configuredExecutable)
+        }
+        else {
+            $slicerExecutable = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $configuredExecutable))
+        }
+    }
+    catch {
+        Stop-WithError "Configured slicerExecutable path cannot be resolved: '$configuredExecutable'."
+    }
+
+    if (-not (Test-Path -LiteralPath $slicerExecutable -PathType Leaf)) {
+        Stop-WithError "Configured Slicer executable does not exist: $slicerExecutable. Update config/local.json."
     }
 }
-catch {
-    Stop-WithError "Configured slicerExecutable path cannot be resolved: '$configuredExecutable'."
-}
 
-if (-not (Test-Path -LiteralPath $slicerExecutable -PathType Leaf)) {
-    Stop-WithError "Configured Slicer executable does not exist: $slicerExecutable. Update config/local.json."
-}
-
-$pythonPaths = @($testPath, $modulePath) | ConvertTo-Json -Compress
+$pythonPaths = @($modulePath) | ConvertTo-Json -Compress
 $pythonTestName = $testName | ConvertTo-Json -Compress
 $pythonCode = "import slicer.testing; slicer.testing.runUnitTest($pythonPaths, $pythonTestName)"
 $slicerArguments = @(
