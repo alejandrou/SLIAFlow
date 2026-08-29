@@ -121,10 +121,14 @@ Complete or refine the task card so it contains:
 - relevant skills and references;
 - a concrete implementation plan;
 - verifiable acceptance criteria;
-- an automated test plan;
-- manual verification instructions;
+- a `## Test plan` table with one row per acceptance criterion;
+- a numbered `## Manual verification` table;
 - risks;
 - documentation impact.
+
+Report the test plan and the manual steps to the project owner before writing
+any implementation code. See `.ai/workflows/implementation-workflow.md` and
+`docs/development/testing_strategy.md`.
 
 Keep the specification proportional to the task.
 

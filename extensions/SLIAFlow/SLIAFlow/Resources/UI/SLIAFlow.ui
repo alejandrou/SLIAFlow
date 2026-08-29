@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>420</width>
-    <height>300</height>
+    <width>440</width>
+    <height>420</height>
    </rect>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
@@ -22,70 +22,143 @@
     </widget>
    </item>
    <item>
-    <widget class="QGroupBox" name="volumeReferencesGroupBox">
+    <widget class="QGroupBox" name="presentationControlsGroupBox">
      <property name="title">
-      <string>Volume references</string>
+      <string>Presentation controls</string>
      </property>
-     <layout class="QFormLayout" name="volumeReferencesFormLayout">
+     <layout class="QFormLayout" name="presentationControlsFormLayout">
       <item row="0" column="0">
-       <widget class="QLabel" name="liveVolumeLabel">
+       <widget class="QLabel" name="liveSourceLabel">
         <property name="text">
-         <string>Live volume:</string>
+         <string>Live source:</string>
         </property>
        </widget>
       </item>
       <item row="0" column="1">
-       <widget class="qMRMLNodeComboBox" name="liveVolumeSelector">
+       <widget class="QComboBox" name="liveSourceSelector">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
         <property name="toolTip">
-         <string>Select the volume reserved for a future live image source.</string>
-        </property>
-        <property name="nodeTypes">
-         <stringlist notr="true">
-          <string>vtkMRMLScalarVolumeNode</string>
-         </stringlist>
-        </property>
-        <property name="noneEnabled">
-         <bool>true</bool>
-        </property>
-        <property name="addEnabled">
-         <bool>false</bool>
-        </property>
-        <property name="removeEnabled">
-         <bool>false</bool>
+         <string>Choose the live image source when a later task provides capture or LiveView support.</string>
         </property>
         <property name="SlicerParameterName" stdset="0">
-         <string>liveVolume</string>
+         <string>liveSource</string>
         </property>
        </widget>
       </item>
       <item row="1" column="0">
-       <widget class="QLabel" name="resultVolumeLabel">
+       <widget class="QLabel" name="cameraIndexLabel">
         <property name="text">
-         <string>UC1 result volume:</string>
+         <string>Camera index:</string>
         </property>
        </widget>
       </item>
       <item row="1" column="1">
-       <widget class="qMRMLNodeComboBox" name="resultVolumeSelector">
+       <widget class="QSpinBox" name="cameraIndexSpinBox">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
         <property name="toolTip">
-         <string>Select a genuine UC1 result volume. This scaffold does not generate results.</string>
+         <string>Camera index used by the later laptop-camera task.</string>
         </property>
-        <property name="nodeTypes">
-         <stringlist notr="true">
-          <string>vtkMRMLScalarVolumeNode</string>
-         </stringlist>
+        <property name="minimum">
+         <number>0</number>
         </property>
-        <property name="noneEnabled">
-         <bool>true</bool>
+        <property name="maximum">
+         <number>99</number>
         </property>
-        <property name="addEnabled">
-         <bool>false</bool>
-        </property>
-        <property name="removeEnabled">
-         <bool>false</bool>
+        <property name="value">
+         <number>0</number>
         </property>
         <property name="SlicerParameterName" stdset="0">
-         <string>resultVolume</string>
+         <string>cameraIndex</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="captureActionsLabel">
+        <property name="text">
+         <string>Capture:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <layout class="QHBoxLayout" name="captureActionsLayout">
+        <item>
+         <widget class="QPushButton" name="startButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Start the live source after a later task provides capture support.</string>
+          </property>
+          <property name="text">
+           <string>Start</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="stopButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Stop the live source after a later task provides capture support.</string>
+          </property>
+          <property name="text">
+           <string>Stop</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="resultMapLabel">
+        <property name="text">
+         <string>Result map:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QComboBox" name="resultMapSelector">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Select a genuine UC1 result map when a later task provides result presentation.</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>resultMap</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="resultClassLabel">
+        <property name="text">
+         <string>Result class:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QSpinBox" name="resultClassSpinBox">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Class component used by a later genuine-result task.</string>
+        </property>
+        <property name="minimum">
+         <number>1</number>
+        </property>
+        <property name="maximum">
+         <number>4</number>
+        </property>
+        <property name="value">
+         <number>1</number>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>resultClass</string>
         </property>
        </widget>
       </item>
@@ -93,13 +166,22 @@
     </widget>
    </item>
    <item>
-    <widget class="QLabel" name="scaffoldStatusLabel">
-     <property name="text">
-      <string>The clean scaffold is loaded. Visualization behavior will be added in later tasks.</string>
+    <widget class="QGroupBox" name="statusGroupBox">
+     <property name="title">
+      <string>Status</string>
      </property>
-     <property name="wordWrap">
-      <bool>true</bool>
-     </property>
+     <layout class="QVBoxLayout" name="statusLayout">
+      <item>
+       <widget class="QLabel" name="statusLabel">
+        <property name="text">
+         <string>Camera capture and genuine UC1 result display are reserved for later tasks. This task only provides the two-pane presentation; no image data is captured or displayed.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
     </widget>
    </item>
    <item>
@@ -119,11 +201,6 @@
  </widget>
  <customwidgets>
   <customwidget>
-   <class>qMRMLNodeComboBox</class>
-   <extends>QWidget</extends>
-   <header>qMRMLNodeComboBox.h</header>
-  </customwidget>
-  <customwidget>
    <class>qMRMLWidget</class>
    <extends>QWidget</extends>
    <header>qMRMLWidget.h</header>
@@ -131,20 +208,5 @@
   </customwidget>
  </customwidgets>
  <resources/>
- <connections>
-  <connection>
-   <sender>SLIAFlow</sender>
-   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
-   <receiver>liveVolumeSelector</receiver>
-   <slot>setMRMLScene(vtkMRMLScene*)</slot>
-   <hints/>
-  </connection>
-  <connection>
-   <sender>SLIAFlow</sender>
-   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
-   <receiver>resultVolumeSelector</receiver>
-   <slot>setMRMLScene(vtkMRMLScene*)</slot>
-   <hints/>
-  </connection>
- </connections>
+ <connections/>
 </ui>

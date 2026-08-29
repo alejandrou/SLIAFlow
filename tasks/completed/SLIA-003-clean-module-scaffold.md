@@ -1,7 +1,7 @@
 ---
 id: SLIA-003
 title: Create a clean SLIAFlow scripted-module scaffold
-status: active
+status: completed
 branch: feature/SLIA-003-clean-module-scaffold
 priority: high
 depends_on: SLIA-002

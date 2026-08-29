@@ -1,9 +1,18 @@
+[CmdletBinding()]
+param(
+    # Source runs the tests against the working tree under extensions/.
+    # Build runs them against the compiled copy under build/SLIAFlow/.
+    [ValidateSet("Source", "Build")]
+    [string]$Target = "Source"
+)
+
 $ErrorActionPreference = "Stop"
 
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $configPath = Join-Path $repositoryRoot "config\local.json"
-$modulePath = Join-Path $repositoryRoot "extensions\SLIAFlow\SLIAFlow"
-$launcherPath = Join-Path $repositoryRoot "build\SLIAFlow\SlicerWithSLIAFlow.exe"
+$moduleSourcePath = Join-Path $repositoryRoot "extensions\SLIAFlow\SLIAFlow"
+$buildRootPath = Join-Path $repositoryRoot "build\SLIAFlow"
+$launcherPath = Join-Path $buildRootPath "SlicerWithSLIAFlow.exe"
 $testName = "SLIAFlow"
 
 function Stop-WithError {
@@ -14,12 +23,9 @@ function Stop-WithError {
     exit 1
 }
 
-if (Test-Path -LiteralPath $launcherPath -PathType Leaf) {
-    $slicerExecutable = $launcherPath
-}
-else {
+function Get-ConfiguredSlicerExecutable {
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-        Stop-WithError "SLIAFlow launcher and configuration file are missing. Build the extension or create $configPath from config/local.example.json."
+        Stop-WithError "Configuration file is missing: $configPath. Create it from config/local.example.json."
     }
 
     try {
@@ -36,34 +42,74 @@ else {
 
     try {
         if ([System.IO.Path]::IsPathRooted($configuredExecutable)) {
-            $slicerExecutable = [System.IO.Path]::GetFullPath($configuredExecutable)
+            $resolved = [System.IO.Path]::GetFullPath($configuredExecutable)
         }
         else {
-            $slicerExecutable = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $configuredExecutable))
+            $resolved = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $configuredExecutable))
         }
     }
     catch {
         Stop-WithError "Configured slicerExecutable path cannot be resolved: '$configuredExecutable'."
     }
 
-    if (-not (Test-Path -LiteralPath $slicerExecutable -PathType Leaf)) {
-        Stop-WithError "Configured Slicer executable does not exist: $slicerExecutable. Update config/local.json."
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        Stop-WithError "Configured Slicer executable does not exist: $resolved. Update config/local.json."
     }
+
+    return $resolved
 }
 
-$pythonPaths = @($modulePath) | ConvertTo-Json -Compress
+# The build launcher embeds its own copy of the scripted module, and that copy
+# shadows anything passed through --additional-module-paths. Using the launcher
+# for the Source target would silently test the last compiled snapshot instead
+# of the files being edited, so each target gets the executable that can
+# actually load the code it claims to exercise.
+if ($Target -eq "Source") {
+    if (-not (Test-Path -LiteralPath (Join-Path $moduleSourcePath "SLIAFlow.py") -PathType Leaf)) {
+        Stop-WithError "Module source is missing: $moduleSourcePath\SLIAFlow.py."
+    }
+    $slicerExecutable = Get-ConfiguredSlicerExecutable
+    $modulePaths = @($moduleSourcePath)
+    $expectedModuleRoot = $moduleSourcePath
+}
+else {
+    if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
+        Stop-WithError "Build launcher is missing: $launcherPath. Build the extension, or run with -Target Source."
+    }
+    $slicerExecutable = $launcherPath
+    $modulePaths = @()
+    $expectedModuleRoot = $buildRootPath
+}
+
+# Fail loudly when the module that Slicer actually loaded is not the one this
+# invocation was supposed to test. Without this guard a stale build copy
+# produces a green run that says nothing about the working tree.
+$pythonExpectedRoot = $expectedModuleRoot | ConvertTo-Json -Compress
 $pythonTestName = $testName | ConvertTo-Json -Compress
-$pythonCode = "import slicer.testing; slicer.testing.runUnitTest($pythonPaths, $pythonTestName)"
+$pythonStatements = @(
+    "import os, slicer, slicer.testing, slicer.util",
+    "expectedRoot = os.path.normcase(os.path.realpath($pythonExpectedRoot))",
+    "loadedPath = os.path.realpath(slicer.util.modulePath($pythonTestName))",
+    "print('SLIAFlow module loaded from: ' + loadedPath)",
+    "os.path.normcase(loadedPath).startswith(expectedRoot) or slicer.testing.exitFailure('SLIAFlow was loaded from ' + loadedPath + ' but this run must exercise ' + expectedRoot + '. A built-in module of a build launcher shadows --additional-module-paths.')",
+    # Run the tests from the directory the module was actually loaded from, so
+    # the reported test path can never disagree with the checked module path.
+    "slicer.testing.runUnitTest([os.path.dirname(loadedPath)], $pythonTestName)"
+)
+$pythonCode = $pythonStatements -join "; "
+
 $slicerArguments = @(
     "--testing",
     "--no-splash",
     "--no-main-window",
-    "--disable-cli-modules",
-    "--additional-module-paths",
-    $modulePath,
-    "--python-code",
-    $pythonCode
+    "--disable-cli-modules"
 )
+if ($modulePaths.Count -gt 0) {
+    $slicerArguments += "--additional-module-paths"
+    $slicerArguments += $modulePaths
+}
+$slicerArguments += "--python-code"
+$slicerArguments += $pythonCode
 
 function ConvertTo-WindowsCommandLineArgument {
     param([string]$Argument)
@@ -100,8 +146,10 @@ function ConvertTo-WindowsCommandLineArgument {
     return $builder.ToString()
 }
 
+Write-Host "Target:            $Target"
 Write-Host "Slicer executable: $slicerExecutable"
-Write-Host "Test: $testName"
+Write-Host "Expected module:   $expectedModuleRoot"
+Write-Host "Test:              $testName"
 
 $process = [System.Diagnostics.Process]::new()
 $process.StartInfo = [System.Diagnostics.ProcessStartInfo]::new()

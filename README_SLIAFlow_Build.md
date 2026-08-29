@@ -22,7 +22,8 @@ Machine-specific paths belong in the ignored `config/local.json`; use
 - Visual Studio 2022 with the Desktop development with C++ workload.
 - CMake 3.28 or newer.
 - The existing Release base Slicer build at `apps/SR/Slicer-build`.
-- Ruff and Pyright on `PATH` for Python quality checks.
+- Ruff for Python quality checks. `scripts/development/run-python-quality.ps1`
+  finds it in the ignored root `.venv` or on `PATH`.
 
 Run configure and build commands from an x64 Native Tools Command Prompt for
 Visual Studio 2022 when the compiler environment is not already active.
