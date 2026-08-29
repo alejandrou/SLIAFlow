@@ -1,54 +1,80 @@
 $ErrorActionPreference = "Stop"
 
+# Ruff is the only static analysis gate for this project.
+#
+# A static type checker (Pyright) was evaluated and removed. Slicer injects
+# `slicer.app`, `slicer.util`, `slicer.mrmlScene`, and the VTK bindings into the
+# module namespace at runtime from C++, so a type checker either fails to
+# resolve them - in which case every expression that touches Slicer becomes
+# `Unknown` and is not checked at all - or resolves the package and then reports
+# the injected attributes as errors. Neither outcome produces usable signal.
+# See docs/development/testing_strategy.md for the recorded evidence.
+
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
-$ruffCommand = Get-Command ruff -ErrorAction SilentlyContinue
-$pyrightCommand = Get-Command pyright -ErrorAction SilentlyContinue
-$missingCommands = @()
+$moduleSourcePath = "extensions/SLIAFlow/SLIAFlow"
 
-Write-Host "== Python quality tool preflight =="
+# Prefer the repository-local virtual environment over PATH. A PATH-only lookup
+# reports the tool as missing on any shell where `.venv` was never activated,
+# which previously made this script exit without checking anything.
+$candidatePaths = @(
+    (Join-Path $repositoryRoot ".venv\Scripts\ruff.exe"),
+    (Join-Path $repositoryRoot ".venv\bin\ruff")
+)
 
-if ($null -eq $ruffCommand) {
-    $missingCommands += "ruff"
-    Write-Host "ERROR: Required command 'ruff' is unavailable." -ForegroundColor Red
+$ruffPath = $null
+foreach ($candidate in $candidatePaths) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $ruffPath = $candidate
+        break
+    }
 }
 
-if ($null -eq $pyrightCommand) {
-    $missingCommands += "pyright"
-    Write-Host "ERROR: Required command 'pyright' is unavailable." -ForegroundColor Red
+if ($null -eq $ruffPath) {
+    $pathCommand = Get-Command ruff -ErrorAction SilentlyContinue
+    if ($null -ne $pathCommand) {
+        $ruffPath = $pathCommand.Source
+    }
 }
 
-if ($missingCommands.Count -gt 0) {
-    Write-Host "No tools were installed or updated. Install the missing development prerequisites and run this script again."
+if ($null -eq $ruffPath) {
+    Write-Host "ERROR: Ruff was not found." -ForegroundColor Red
+    Write-Host "Looked in the repository virtual environment and on PATH:"
+    foreach ($candidate in $candidatePaths) {
+        Write-Host "  $candidate"
+    }
+    Write-Host "  PATH"
+    Write-Host ""
+    Write-Host "Create the ignored root virtual environment and install Ruff into it:"
+    Write-Host "  py -3 -m venv .venv"
+    Write-Host "  .\.venv\Scripts\python.exe -m pip install ruff"
+    Write-Host ""
+    Write-Host "No tools were installed or modified."
     exit 1
 }
 
-$ruffExitCode = 0
-$pyrightExitCode = 0
+Write-Host "== Ruff =="
+Write-Host "Executable: $ruffPath"
+& $ruffPath --version
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: '$ruffPath --version' failed with exit code $LASTEXITCODE." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Target:     $moduleSourcePath"
+Write-Host ""
 
 Push-Location -LiteralPath $repositoryRoot
 try {
-    Write-Host ""
-    Write-Host "== Ruff =="
-    & $ruffCommand check "extensions/SLIAFlow/SLIAFlow"
+    & $ruffPath check $moduleSourcePath
     $ruffExitCode = $LASTEXITCODE
-    if ($ruffExitCode -ne 0) {
-        Write-Host "ERROR: Ruff failed with exit code $ruffExitCode." -ForegroundColor Red
-    }
-
-    Write-Host ""
-    Write-Host "== Pyright =="
-    & $pyrightCommand --project "pyrightconfig.json"
-    $pyrightExitCode = $LASTEXITCODE
-    if ($pyrightExitCode -ne 0) {
-        Write-Host "ERROR: Pyright failed with exit code $pyrightExitCode." -ForegroundColor Red
-    }
 }
 finally {
     Pop-Location
 }
 
-if ($ruffExitCode -ne 0 -or $pyrightExitCode -ne 0) {
-    Write-Host "ERROR: Python quality checks failed." -ForegroundColor Red
+if ($ruffExitCode -ne 0) {
+    Write-Host ""
+    Write-Host "ERROR: Ruff failed with exit code $ruffExitCode." -ForegroundColor Red
     exit 1
 }
 

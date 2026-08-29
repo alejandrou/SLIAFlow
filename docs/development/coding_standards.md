@@ -17,13 +17,21 @@ Do not optimize for performance before the behavior and boundaries are clear.
 From the repository root, run:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
 .\scripts\development\run-python-quality.ps1
 ```
 
-Create the ignored root `.venv` and install Ruff and Pyright there before the first run. Activate that environment in each new PowerShell session. The command runs Ruff and Pyright against project-owned Python under `extensions/SLIAFlow/`; they are development tools, not Slicer runtime dependencies, and the script does not install them.
+Ruff is the only static analysis gate. The script resolves it from the ignored root `.venv` first and from `PATH` second, so activating the environment is optional; it prints the executable and version it used and exits nonzero when Ruff is missing or reports a finding. Ruff is a development tool, not a Slicer runtime dependency, and the script does not install it.
 
-Pyright uses `basic` checking. Missing imports from Slicer's runtime-provided modules are warnings because normal system Python does not provide the real `slicer`, `qt`, `ctk`, and Slicer-bundled `vtk` environment. `reportMissingModuleSource` is disabled because several of these modules are compiled or injected at runtime. Project files remain included, `SLIAFlowLib` is resolved through the repository configuration, and other basic diagnostics remain enabled.
+Create the environment once:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install ruff
+```
+
+The configured rule set is `E4`, `E7`, `E9`, `F`, `I`, and `B` over `extensions/SLIAFlow/**/*.py`, defined in `pyproject.toml`.
+
+There is deliberately no static type checker. `docs/development/testing_strategy.md` records the measured reason: Slicer injects `slicer.app`, `slicer.util`, `slicer.mrmlScene`, and the VTK bindings into the module namespace at runtime, so a type checker either resolves nothing and silently checks nothing, or resolves the package and reports the injected attributes as errors.
 
 ## Separate Responsibilities
 

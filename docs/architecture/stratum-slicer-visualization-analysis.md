@@ -113,7 +113,8 @@ en `extensions/SLIAFlow/SLIAFlow/Testing/Python/SLIAFlowModuleTest.py`, registra
 
 `scripts/development/run-slicer-tests.ps1` (lanza Slicer con `--testing
 --no-main-window --disable-cli-modules`), `scripts/development/run-python-quality.ps1`,
-Ruff `py312` + Pyright.
+Ruff `py312`. No hay comprobador de tipos estatico; el motivo medido esta en
+`docs/development/testing_strategy.md`.
 
 ### Lo que no existe
 
