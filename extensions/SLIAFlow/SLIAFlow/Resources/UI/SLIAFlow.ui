@@ -40,7 +40,7 @@
          <bool>false</bool>
         </property>
         <property name="toolTip">
-         <string>Choose the live image source when a later task provides capture or LiveView support.</string>
+         <string>Laptop Camera is the active source. A later task provides OpenIGTLink LiveView support.</string>
         </property>
         <property name="SlicerParameterName" stdset="0">
          <string>liveSource</string>
@@ -60,7 +60,7 @@
          <bool>false</bool>
         </property>
         <property name="toolTip">
-         <string>Camera index used by the later laptop-camera task.</string>
+         <string>Windows camera device index. The built-in laptop camera is normally index 0.</string>
         </property>
         <property name="minimum">
          <number>0</number>
@@ -77,13 +77,33 @@
        </widget>
       </item>
       <item row="2" column="0">
+       <widget class="QLabel" name="cameraSupportLabel">
+        <property name="text">
+         <string>Camera support:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QPushButton" name="installCameraSupportButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Install the pinned OpenCV package into Slicer's Python environment. Slicer must be restarted afterward.</string>
+        </property>
+        <property name="text">
+         <string>Install Camera Support</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
        <widget class="QLabel" name="captureActionsLabel">
         <property name="text">
          <string>Capture:</string>
         </property>
        </widget>
       </item>
-      <item row="2" column="1">
+      <item row="3" column="1">
        <layout class="QHBoxLayout" name="captureActionsLayout">
         <item>
          <widget class="QPushButton" name="startButton">
@@ -91,7 +111,7 @@
            <bool>false</bool>
           </property>
           <property name="toolTip">
-           <string>Start the live source after a later task provides capture support.</string>
+           <string>Start the selected Windows laptop camera.</string>
           </property>
           <property name="text">
            <string>Start</string>
@@ -104,7 +124,7 @@
            <bool>false</bool>
           </property>
           <property name="toolTip">
-           <string>Stop the live source after a later task provides capture support.</string>
+           <string>Stop capture and release the Windows camera.</string>
           </property>
           <property name="text">
            <string>Stop</string>
@@ -113,14 +133,14 @@
         </item>
        </layout>
       </item>
-      <item row="3" column="0">
+      <item row="4" column="0">
        <widget class="QLabel" name="resultMapLabel">
         <property name="text">
          <string>Result map:</string>
         </property>
        </widget>
       </item>
-      <item row="3" column="1">
+      <item row="4" column="1">
        <widget class="QComboBox" name="resultMapSelector">
         <property name="enabled">
          <bool>false</bool>
@@ -133,14 +153,14 @@
         </property>
        </widget>
       </item>
-      <item row="4" column="0">
+      <item row="5" column="0">
        <widget class="QLabel" name="resultClassLabel">
         <property name="text">
          <string>Result class:</string>
         </property>
        </widget>
       </item>
-      <item row="4" column="1">
+      <item row="5" column="1">
        <widget class="QSpinBox" name="resultClassSpinBox">
         <property name="enabled">
          <bool>false</bool>
@@ -174,7 +194,7 @@
       <item>
        <widget class="QLabel" name="statusLabel">
         <property name="text">
-         <string>Camera capture and genuine UC1 result display are reserved for later tasks. This task only provides the two-pane presentation; no image data is captured or displayed.</string>
+         <string>Camera support is checked when SLIAFlow opens. Genuine UC1 result display is provided by a later task.</string>
         </property>
         <property name="wordWrap">
          <bool>true</bool>
