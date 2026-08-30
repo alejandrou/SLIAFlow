@@ -172,6 +172,25 @@ is registered against the standalone SLIAFlow extension build under
 Rebuild Slicer only when C++, CMake, generated wrapping, or dependency changes
 require it.
 
+### Refreshing the launcher
+
+Run this whenever you want `build\SLIAFlow\SlicerWithSLIAFlow.exe` to show
+your edits: before a demonstration, before manual verification, and before
+`run-slicer-tests.ps1 -Target Build`.
+
+1. Edit and test against the working tree as above.
+2. Run `.\scripts\developmentuild-sliaflow.ps1` from the repository root.
+3. Read the `Verify` section; every module file must be listed as `ok`.
+4. On `not deployed`, add that file to `MODULE_PYTHON_SCRIPTS` or
+   `MODULE_PYTHON_RESOURCES` in the module `CMakeLists.txt` and run it again.
+5. Start the launcher, or pass `-Launch` to have the script start it.
+
+Add `-Configure` only after deleting `build\SLIAFlow` or changing the Slicer
+build named in `config/local.json`; adding, renaming, or deleting module files
+does not need it. The script rebuilds the deployed copy from scratch on every
+run and then compares both trees by SHA-256, so a green run is evidence that
+the launcher runs the files you just edited.
+
 ## What to test first
 
 When the module gains behaviour beyond presentation, prioritise:
