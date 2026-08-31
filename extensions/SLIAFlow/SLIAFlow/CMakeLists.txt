@@ -2,6 +2,11 @@ set(MODULE_NAME SLIAFlow)
 
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
+  ${MODULE_NAME}Lib/__init__.py
+  ${MODULE_NAME}Lib/${MODULE_NAME}Logic.py
+  ${MODULE_NAME}Lib/${MODULE_NAME}ParameterNode.py
+  ${MODULE_NAME}Lib/${MODULE_NAME}Widget.py
+  ${MODULE_NAME}Lib/${MODULE_NAME}Test.py
   )
 
 set(MODULE_PYTHON_RESOURCES
