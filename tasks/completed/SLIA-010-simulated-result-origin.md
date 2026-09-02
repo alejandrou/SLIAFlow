@@ -1,7 +1,7 @@
 ---
 id: SLIA-010
 title: Simulated result origin, demo mode, and simulated banner
-status: active
+status: completed
 branch: feature/SLIA-010-simulated-result-origin
 priority: high
 depends_on: SLIA-006
@@ -253,6 +253,10 @@ Python console. This must not become a user-interface affordance.
 | 4 | Set the node origin to `external-genuine`, untick demo mode, press Refresh Result | The map displays with no banner and a normal status, even though the detail attribute is still set | |
 | 5 | Switch to Welcome and return to SLIAFlow | Demo mode is unchecked, the result pane is black, and the waiting status is shown | |
 
+The `Result` column is empty because this procedure was not run, not because
+any step failed. The task was closed with the owner's explicit approval on
+that basis; see `## Human approval`.
+
 ## Risks
 
 Widening `findResultSource` is the one change that could fail open, because it
@@ -282,7 +286,11 @@ transient widget state at the cost of manual checkbox wiring.
 
 ## Completion evidence
 
-Branch: `feature/SLIA-010-simulated-result-origin`. Nothing is committed.
+Branch: `feature/SLIA-010-simulated-result-origin`, committed as `c3902b2`
+"ENH: Display externally simulated UC1 results under a banner". The branch
+carried exactly one commit relative to `main`, needed no rebase because it was
+already based on `13c9386`, and `main` was fast-forwarded onto it without a
+merge commit.
 
 ### Files modified
 
@@ -383,19 +391,29 @@ the result renderer with the expected strings, both still attached after the
 slice node and composite node were modified and the view rebuilt, and both gone
 from the renderer once demo mode was switched off.
 
-### Not done here
+### Not covered by automated tests
 
-Manual verification is a separate lifecycle stage and has not been performed;
-the `## Manual verification` table below is still unfilled. Review, human
-approval, and any commit or branch movement also remain outstanding.
+The `## Manual verification` table above was never filled in. Its `Result`
+column is empty because the procedure was not run, not because it failed. The
+GUI self-test run recorded above exercises the same banner behaviour as manual
+steps 2 and 3 through the test suite, but it does not replace a human looking
+at the rendered pane. See `## Human approval` for how this was closed.
 
 ## Review findings
 
-Reserved for review.
+An independent review of the working tree raised four findings, all of them
+fixed before completion. They are recorded with their fixes in
+`### Code review findings and fixes` below.
 
 ## Human approval
 
-Required before review and completion.
+Approved for completion by the project owner on 2026-09-02, who moved this
+card to `tasks/completed/` and authorized the commit and the fast-forward of
+`main`.
+
+The approval was given with the `## Manual verification` table unfilled. That
+is an explicit owner decision, not an omission discovered later, and it is
+recorded here so no reader mistakes the empty column for a passed check.
 
 ### Automated test evidence
 
@@ -427,9 +445,15 @@ so nothing can be seen unbannered and the result is not withheld. The failure
 guarded against is the one that was reported: the view is on screen and about
 to receive the volume, and the banner cannot be attached to it.
 
-## Remaining before review
+## Carried forward
 
-Manual verification has not been performed. It needs a GUI Slicer session, and
-the two banner tests skip in the headless runner, so the `Result` column above
-and the equivalent table in `docs/development/simulated_result_verification.md`
-are still empty. This task stays in `tasks/active/` until they are filled in.
+Manual verification of the banner in a GUI Slicer session remains outstanding.
+The procedure is preserved in `docs/development/simulated_result_verification.md`
+and stays runnable against the merged module at any time; `SLIA-014` is the
+task that exercises this path end to end once the stand-in producers of
+`SLIA-011` to `SLIA-013` exist.
+
+SLIAFlow and UC1 disagree on the class palette: `_getOrCreateClassColorNode`
+uses orange for class 3 and dark grey for class 4 where UC1 writes blue and
+black. This was found during this task and is out of its scope; it is filed as
+`SLIA-015`.
