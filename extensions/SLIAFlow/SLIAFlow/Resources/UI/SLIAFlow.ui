@@ -212,10 +212,30 @@
          <bool>false</bool>
         </property>
         <property name="toolTip">
-         <string>Find the marked external-genuine result and validate it before display.</string>
+         <string>Find the marked external result and validate it before display. A genuine result is always preferred over a simulated one.</string>
         </property>
         <property name="text">
-         <string>Refresh Genuine Result</string>
+         <string>Refresh Result</string>
+        </property>
+       </widget>
+      </item>
+      <item row="8" column="0">
+       <widget class="QLabel" name="demoModeLabel">
+        <property name="text">
+         <string>Demo mode:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="8" column="1">
+       <widget class="QCheckBox" name="demoModeCheckBox">
+        <property name="toolTip">
+         <string>Allow an externally produced simulated result to be displayed, always under the SIMULATED banner. Never saved with the scene.</string>
+        </property>
+        <property name="text">
+         <string>Allow externally simulated result</string>
+        </property>
+        <property name="checked">
+         <bool>false</bool>
         </property>
        </widget>
       </item>
@@ -242,6 +262,22 @@
        <widget class="QLabel" name="resultStatusLabel">
         <property name="text">
          <string>WARN: Waiting for genuine UC1 result.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="simulatedBannerLabel">
+        <property name="visible">
+         <bool>false</bool>
+        </property>
+        <property name="text">
+         <string>Demo mode is on. An externally produced simulated result may be displayed, always under the SIMULATED banner.</string>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">color: #8B1E1E; font-weight: bold;</string>
         </property>
         <property name="wordWrap">
          <bool>true</bool>

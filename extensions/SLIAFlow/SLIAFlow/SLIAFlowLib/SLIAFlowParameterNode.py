@@ -39,6 +39,12 @@ RESULT_SOURCE_ROLE_ATTRIBUTE = "SLIAFlow.ResultMap"
 RESULT_SOURCE_ORIGIN_ATTRIBUTE = "SLIAFlow.DataOrigin"
 RESULT_SOURCE_DEVICE_ATTRIBUTE = "SLIAFlow.DeviceName"
 RESULT_SOURCE_GENUINE_ORIGIN = "external-genuine"
+RESULT_SOURCE_SIMULATED_ORIGIN = "simulated"
+RESULT_SOURCE_DETAIL_ATTRIBUTE = "SLIAFlow.SimulationDetail"
+
+# Displayed over any simulated result. Kept next to the origin values it
+# qualifies so the marker cannot drift away from the boundary it marks.
+SIMULATED_BANNER_MESSAGE = "SIMULATED - NOT A GENUINE UC1 RESULT"
 
 
 @parameterNodeWrapper

@@ -42,11 +42,84 @@ For compatibility with a producer that has not yet added the optional device
 attribute, the implementation accepts the exact device name as the MRML node
 name when `SLIAFlow.DeviceName` is absent. A wrong or present-but-mismatched
 device attribute is rejected. A generic volume picker is intentionally not
-part of the module UI, so unmarked test, simulated, or ordinary scene volumes
-are not selectable through the normal result workflow.
+part of the module UI, so unmarked test or ordinary scene volumes are not
+selectable through the normal result workflow.
 
 The attributes are a provenance contract between the future external sender
 and this prototype; they are not cryptographic authentication.
+
+### Simulated origin
+
+`SLIAFlow.DataOrigin = simulated` marks data produced by a process standing
+where a real component will stand, rather than by the real component. It is
+never discovered or displayed unless the operator has ticked the module's demo
+mode, which is transient widget state, defaults to off, is reset on entering
+the module and on scene close, and is never written to the parameter node or a
+saved scene.
+
+Real-algorithm-on-synthetic-input is still `simulated`. A genuine PCA, SVM or
+KNN run over an invented brain is not a genuine clinical result, so the origin
+gate stays binary: `external-genuine` or nothing.
+
+Only two origin values are recognized. Absent, empty or unrecognized
+provenance is invalid, not a default, and reaches the result view under
+neither setting.
+
+### Precedence
+
+Discovery searches for a genuine source for the requested map role first, and
+only then, and only in demo mode, for a simulated one. A genuine source
+therefore always wins for the same role, so a simulated node left in the scene
+cannot displace a real result merely by being created later.
+
+Discovery considers only nodes produced outside SLIAFlow. The module's own
+presentation volume carries the role, device and origin attributes copied from
+whatever it last displayed, so it is excluded by its `SLIAFlow.Owner`
+attribute; without that exclusion the module would rediscover its own output
+and re-present stale data as an external result after the real source had left
+the scene.
+
+### Simulation detail
+
+```text
+SLIAFlow.SimulationDetail = <free text, display-only>
+```
+
+The detail is optional and describes *how* a simulated result was produced -
+for example, `real UC1 pipeline, synthetic input` against `arithmetic stand-in,
+not a classifier`. Both are fake; they are not equally fake, and the second
+banner line is what lets a viewer tell them apart.
+
+It is read only once the origin is already `simulated`, is collapsed to a
+single line and truncated before it reaches a text actor, and never appears in
+any condition that decides whether something is displayable. A node carrying
+the detail attribute with a genuine origin is discovered normally and shows no
+banner; a node carrying it with no origin at all is never discovered.
+
+### On-screen marking
+
+Whenever a displayed result's origin is simulated, the result view carries a
+red banner reading `SIMULATED - NOT A GENUINE UC1 RESULT` with the truncated
+detail on a smaller second line beneath it, and the panel status is prefixed
+`SIMULATED: `. The banner is a pair of text actors, because one text actor
+carries a single text property for its whole string and so cannot render a
+second line at a smaller size. The pair is added, removed and re-asserted as a
+unit, and is re-asserted on every successful refresh, because the slice view
+rebuilds its actors and a lost banner would present simulated data as genuine.
+
+The banner is asserted before the result volume reaches the view, and the view
+is flushed once afterwards, so no frame is ever painted with the banner state
+and the volume state disagreeing: neither a simulated map before its banner,
+nor a genuine map still under one. If the result view is on screen and the
+banner cannot be attached to it, the result is withheld and the panel status
+says so. A banner that cannot be drawn is a reason not to display, not a
+cosmetic loss.
+
+The presented module-owned volume is stamped with the origin it came from and
+is named `SLIAFlow UC1 Result (SIMULATED)` while it holds simulated data. It is
+renamed on every presentation, not only when simulated, so a node that once
+carried simulated data cannot keep the marker while displaying a genuine
+result.
 
 ## Validation and ownership
 
@@ -55,6 +128,10 @@ node type, positive image dimensions, component count, VTK/NumPy scalar type,
 finite values, probability range, and class values. Validation has no MRML
 side effects. Invalid or missing data clears the result view and reports a
 waiting/invalid status.
+
+Provenance and validation are orthogonal. Simulated data passes through the
+identical checks and produces the identical messages, so a malformed simulated
+map is rejected exactly as a malformed genuine one is.
 
 The external source node is never modified or deleted. SLIAFlow owns a
 transient scalar display volume for scalar maps and selected SVM/KNN channels,

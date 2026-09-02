@@ -12,6 +12,8 @@ from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
     RESULT_MAP_KNN_PROB,
     RESULT_MAP_SVM_PROB,
+    RESULT_SOURCE_SIMULATED_ORIGIN,
+    SIMULATED_BANNER_MESSAGE,
     SLIAFlowParameterNode,
 )
 
@@ -49,7 +51,22 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         "package installation error."
     )
     RESULT_WAITING_STATUS = _("Waiting for genuine UC1 result.")
+    SIMULATED_STATUS_PREFIX = _("SIMULATED: ")
+    DEMO_MODE_ACTIVE_STATUS = _(
+        "Demo mode is on. An externally produced simulated result may be "
+        "displayed, always under the SIMULATED banner."
+    )
+    SIMULATED_BANNER_FONT_SIZE = 16
+    SIMULATED_DETAIL_FONT_SIZE = 11
+    SIMULATED_BANNER_POSITION = (0.5, 0.94)
+    SIMULATED_DETAIL_POSITION = (0.5, 0.90)
+    SIMULATED_BANNER_BACKGROUND = (0.45, 0.0, 0.0)
     RESULT_INVALID_STATUS = _("Invalid genuine UC1 result.")
+    RESULT_INVALID_SIMULATED_STATUS = _("Invalid simulated UC1 result.")
+    BANNER_UNAVAILABLE_STATUS = _(
+        "The SIMULATED banner could not be drawn, so the simulated result was "
+        "withheld."
+    )
     CUSTOM_LAYOUT_DESCRIPTION = (
         '<layout type="horizontal" split="true">'
         "<item>"
@@ -78,6 +95,13 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._presentationActive = False
         self._waitingAnnotationActor = None
         self._waitingAnnotationRenderer = None
+        # Demo mode is deliberately transient widget state and is never
+        # written to the parameter node, so no saved scene can reopen with
+        # simulated results already permitted.
+        self._demoModeEnabled = False
+        self._simulatedBannerActor = None
+        self._simulatedDetailActor = None
+        self._simulatedBannerRenderer = None
         self._cameraSupportAvailable = False
         self._cameraRestartRequired = False
 
@@ -114,11 +138,16 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.refreshResultButton.connect(
             "clicked()", self._refreshResultPresentation
         )
+        demoModeCheckBox = getattr(self.ui, "demoModeCheckBox", None)
+        if demoModeCheckBox is not None:
+            demoModeCheckBox.connect("toggled(bool)", self._onDemoModeToggled)
+        self._resetDemoMode()
         self.initializeParameterNode()
         self._setCameraSupportState(self.logic.openCVAvailable())
         self._setResultStatus("WARN", self.RESULT_WAITING_STATUS)
 
     def cleanup(self) -> None:
+        self._resetDemoMode()
         self._stopCamera(clearLiveView=True)
         self._deactivatePresentation(restore=True)
         if self.logic is not None and self._parameterNode is not None:
@@ -127,6 +156,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.removeObservers()
 
     def enter(self) -> None:
+        self._resetDemoMode()
         self.initializeParameterNode()
         self._activatePresentation()
         if self.logic is not None:
@@ -138,6 +168,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.setParameterNode(None)
 
     def onSceneStartClose(self, caller=None, event=None) -> None:
+        self._resetDemoMode()
         self._rememberLayoutBeforeSceneClose()
         self._stopCamera(clearLiveView=True)
         self._deactivatePresentation(restore=False)
@@ -201,6 +232,35 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if refreshButton is not None:
             refreshButton.setEnabled(self._presentationActive)
         self._refreshCameraControls()
+
+    def _onDemoModeToggled(self, enabled=None) -> None:
+        checkBox = getattr(self.ui, "demoModeCheckBox", None)
+        if enabled is None:
+            enabled = False if checkBox is None else checkBox.isChecked()
+        self._demoModeEnabled = bool(enabled)
+        if not self._demoModeEnabled:
+            self._removeSimulatedBanner()
+        self._updateDemoModeIndicator()
+        if self._presentationActive:
+            self._refreshResultPresentation()
+
+    def _resetDemoMode(self) -> None:
+        """Return demo mode to off without re-entering the toggle handler."""
+        self._demoModeEnabled = False
+        self._removeSimulatedBanner()
+        checkBox = getattr(getattr(self, "ui", None), "demoModeCheckBox", None)
+        if checkBox is not None:
+            blocked = checkBox.blockSignals(True)
+            checkBox.setChecked(False)
+            checkBox.blockSignals(blocked)
+        self._updateDemoModeIndicator()
+
+    def _updateDemoModeIndicator(self) -> None:
+        label = getattr(getattr(self, "ui", None), "simulatedBannerLabel", None)
+        if label is None:
+            return
+        label.setText(self.DEMO_MODE_ACTIVE_STATUS)
+        label.setVisible(self._demoModeEnabled)
 
     def _refreshCameraControls(self) -> None:
         if self.logic is None:
@@ -357,21 +417,51 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.logic is None or self._parameterNode is None:
             return {"summaryStatus": "WARN", "summaryMessage": "No parameter node."}
 
-        report = self.logic.presentSelectedResult(self._parameterNode)
+        report = self.logic.presentSelectedResult(
+            self._parameterNode, allowSimulated=self._demoModeEnabled
+        )
+        simulated = report.get("dataOrigin") == RESULT_SOURCE_SIMULATED_ORIGIN
         if report["summaryStatus"] == "PASS":
+            # The banner is asserted before the volume reaches the view, and
+            # re-asserted on every PASS refresh because the slice view rebuilds
+            # its actors. A banner that cannot be drawn is fatal rather than
+            # cosmetic: an unbannered frame of simulated data is precisely what
+            # the medical-data policy forbids, so the result is withheld.
+            if not self._updateSimulatedBanner(
+                simulated, report.get("simulationDetail")
+            ):
+                self.logic.clearResultReferences(self._parameterNode)
+                self._clearResultView()
+                self._setResultStatus("FAIL", self.BANNER_UNAVAILABLE_STATUS)
+                return dict(
+                    report,
+                    summaryStatus="FAIL",
+                    summaryMessage=self.BANNER_UNAVAILABLE_STATUS,
+                )
+            # The single flush of the view. _displayResultVolume renders once
+            # the banner state and the volume state already agree, so neither
+            # can be painted without the other.
             self._displayResultVolume()
+            message = report["summaryMessage"]
+            if simulated:
+                message = self.SIMULATED_STATUS_PREFIX + message
             self._setResultStatus(
                 "PASS",
-                report["summaryMessage"],
+                message,
                 report.get("sourceNodeName"),
             )
         else:
             self.logic.clearResultReferences(self._parameterNode)
             self._clearResultView()
             if report["summaryStatus"] == "FAIL":
+                invalidStatus = (
+                    self.RESULT_INVALID_SIMULATED_STATUS
+                    if simulated
+                    else self.RESULT_INVALID_STATUS
+                )
                 self._setResultStatus(
                     "FAIL",
-                    f"{self.RESULT_INVALID_STATUS} {report['summaryMessage']}",
+                    f"{invalidStatus} {report['summaryMessage']}",
                 )
             else:
                 self._setResultStatus("WARN", report["summaryMessage"])
@@ -387,6 +477,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if resultWidget is None:
                 return
             self._clearSliceLayers(resultWidget)
+            self._removeSimulatedBanner()
             self._showWaitingAnnotation(resultWidget)
             resultView = resultWidget.sliceView()
             if resultView is not None:
@@ -512,6 +603,147 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return None
         return renderWindow.GetRenderers().GetFirstRenderer()
 
+    @staticmethod
+    def _placeAnnotationActor(renderer, actor, previousRenderer=None):
+        """Attach one annotation actor to the renderer now on screen.
+
+        A slice view rebuilds its renderer, so an actor can still be held by
+        a renderer that is no longer displayed; it is detached from that one
+        before being added to the current one.
+        """
+        if renderer is None or actor is None:
+            return None
+        if previousRenderer is not None and previousRenderer is not renderer:
+            try:
+                previousRenderer.RemoveActor2D(actor)
+            except (RuntimeError, ValueError):
+                pass
+        if not renderer.HasViewProp(actor):
+            renderer.AddActor2D(actor)
+        return renderer
+
+    @classmethod
+    def _createBannerActor(cls, text, fontSize, position, bold):
+        actor = vtk.vtkTextActor()
+        actor.SetInput(text)
+        actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        actor.SetPosition(position[0], position[1])
+        textProperty = actor.GetTextProperty()
+        textProperty.SetFontSize(fontSize)
+        textProperty.SetBold(bool(bold))
+        textProperty.SetColor(1.0, 1.0, 1.0)
+        textProperty.SetBackgroundColor(*cls.SIMULATED_BANNER_BACKGROUND)
+        textProperty.SetBackgroundOpacity(1.0)
+        textProperty.SetFrame(1)
+        textProperty.SetFrameColor(1.0, 1.0, 1.0)
+        textProperty.SetJustificationToCentered()
+        textProperty.SetVerticalJustificationToTop()
+        return actor
+
+    def _showSimulatedBanner(self, sliceWidget, detail=None) -> bool:
+        """Draw the simulated banner, and its detail line when there is one.
+
+        A vtkTextActor carries one text property for its whole string, so the
+        smaller second line has to be a second actor. The two are placed,
+        re-asserted and removed together, so the detail can never outlive the
+        banner that qualifies it.
+        """
+        renderer = self._sliceViewRenderer(sliceWidget)
+        if renderer is None:
+            return False
+
+        if self._simulatedBannerActor is None:
+            self._simulatedBannerActor = self._createBannerActor(
+                SIMULATED_BANNER_MESSAGE,
+                self.SIMULATED_BANNER_FONT_SIZE,
+                self.SIMULATED_BANNER_POSITION,
+                bold=True,
+            )
+
+        if not detail:
+            self._detachSimulatedDetail()
+        elif self._simulatedDetailActor is None:
+            self._simulatedDetailActor = self._createBannerActor(
+                detail,
+                self.SIMULATED_DETAIL_FONT_SIZE,
+                self.SIMULATED_DETAIL_POSITION,
+                bold=False,
+            )
+        else:
+            self._simulatedDetailActor.SetInput(detail)
+
+        previousRenderer = self._simulatedBannerRenderer
+        self._simulatedBannerRenderer = self._placeAnnotationActor(
+            renderer, self._simulatedBannerActor, previousRenderer
+        )
+        if self._simulatedDetailActor is not None:
+            self._placeAnnotationActor(
+                renderer, self._simulatedDetailActor, previousRenderer
+            )
+        return self._simulatedBannerRenderer is not None
+
+    def _updateSimulatedBanner(
+        self, simulated: bool, detail=None, layoutManager=None
+    ) -> bool:
+        """Bring the banner into agreement with the origin about to be shown.
+
+        Nothing is rendered here. The caller flushes the view once, after the
+        result volume is in place, so no frame can be painted with the banner
+        state and the volume state disagreeing: neither a simulated map before
+        its banner, nor a genuine map still under one.
+
+        Returns whether the view now matches the requested state. False means
+        the banner was required and could not be drawn.
+        """
+        if not simulated:
+            self._removeSimulatedBanner()
+            return True
+        if layoutManager is None:
+            layoutManager = slicer.app.layoutManager()
+        resultWidget = None
+        if layoutManager is not None:
+            try:
+                resultWidget = layoutManager.sliceWidget(self.RESULT_VIEW_NAME)
+            except RuntimeError:
+                resultWidget = None
+        if resultWidget is None:
+            # There is no result view, so _displayResultVolume paints nothing
+            # into one either. Nothing can be seen unbannered, so this is not
+            # the failure the caller has to withhold a result over.
+            self._removeSimulatedBanner()
+            return True
+        if not self._showSimulatedBanner(resultWidget, detail):
+            self._removeSimulatedBanner()
+            return False
+        return True
+
+    def _detachSimulatedDetail(self) -> None:
+        renderer = self._simulatedBannerRenderer
+        actor = self._simulatedDetailActor
+        self._simulatedDetailActor = None
+        if renderer is None or actor is None:
+            return
+        try:
+            renderer.RemoveActor2D(actor)
+        except (RuntimeError, ValueError):
+            pass
+
+    def _removeSimulatedBanner(self) -> None:
+        renderer = self._simulatedBannerRenderer
+        actors = (self._simulatedBannerActor, self._simulatedDetailActor)
+        self._simulatedBannerRenderer = None
+        self._simulatedBannerActor = None
+        self._simulatedDetailActor = None
+        if renderer is None:
+            return
+        for actor in actors:
+            if actor is None:
+                continue
+            try:
+                renderer.RemoveActor2D(actor)
+            except (RuntimeError, ValueError):
+                pass
+
     def _showWaitingAnnotation(self, sliceWidget) -> bool:
         renderer = self._sliceViewRenderer(sliceWidget)
         if renderer is None:
@@ -529,14 +761,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             textProperty.SetVerticalJustificationToCentered()
             self._waitingAnnotationActor = actor
 
-        previousRenderer = self._waitingAnnotationRenderer
-        if previousRenderer is not None and previousRenderer is not renderer:
-            previousRenderer.RemoveActor2D(self._waitingAnnotationActor)
-        self._waitingAnnotationRenderer = renderer
-
-        if not renderer.HasViewProp(self._waitingAnnotationActor):
-            renderer.AddActor2D(self._waitingAnnotationActor)
-        return True
+        self._waitingAnnotationRenderer = self._placeAnnotationActor(
+            renderer, self._waitingAnnotationActor, self._waitingAnnotationRenderer
+        )
+        return self._waitingAnnotationRenderer is not None
 
     def _removeWaitingAnnotation(self) -> None:
         renderer = self._waitingAnnotationRenderer
@@ -593,6 +821,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             previousLayout = None
 
         self._removeWaitingAnnotation()
+        self._removeSimulatedBanner()
         if layoutManager is not None:
             layoutNode = layoutManager.layoutLogic().GetLayoutNode()
             if int(layoutNode.GetViewArrangement()) == self.CUSTOM_LAYOUT_ID:

@@ -14,10 +14,13 @@ from .SLIAFlowParameterNode import (
     RESULT_MAP_MV_CLASS,
     RESULT_MAP_SVM_PROB,
     RESULT_MAP_TMD,
+    RESULT_SOURCE_DETAIL_ATTRIBUTE,
     RESULT_SOURCE_DEVICE_ATTRIBUTE,
     RESULT_SOURCE_GENUINE_ORIGIN,
     RESULT_SOURCE_ORIGIN_ATTRIBUTE,
     RESULT_SOURCE_ROLE_ATTRIBUTE,
+    RESULT_SOURCE_SIMULATED_ORIGIN,
+    SIMULATED_BANNER_MESSAGE,
 )
 
 
@@ -32,6 +35,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         "_previousLayout",
         "_layoutBeforeSceneClose",
         "_presentationActive",
+        "_demoModeEnabled",
         "_cameraSupportAvailable",
         "_cameraRestartRequired",
     )
@@ -103,6 +107,25 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 RESULT_SOURCE_ORIGIN_ATTRIBUTE, RESULT_SOURCE_GENUINE_ORIGIN
             )
             volumeNode.SetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE, deviceName)
+        return volumeNode
+
+    @staticmethod
+    def _createSimulatedResultVolume(resultMap: str, values, *, detail=None, name=None):
+        """Create the kind of node an external stand-in producer would send."""
+        values = np.ascontiguousarray(values)
+        className = (
+            "vtkMRMLVectorVolumeNode" if values.ndim == 4 else "vtkMRMLScalarVolumeNode"
+        )
+        deviceName = RESULT_MAP_DEVICE_NAMES[resultMap]
+        volumeNode = slicer.mrmlScene.AddNewNodeByClass(className, name or deviceName)
+        slicer.util.updateVolumeFromArray(volumeNode, values)
+        volumeNode.SetAttribute(RESULT_SOURCE_ROLE_ATTRIBUTE, resultMap)
+        volumeNode.SetAttribute(
+            RESULT_SOURCE_ORIGIN_ATTRIBUTE, RESULT_SOURCE_SIMULATED_ORIGIN
+        )
+        volumeNode.SetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE, deviceName)
+        if detail is not None:
+            volumeNode.SetAttribute(RESULT_SOURCE_DETAIL_ATTRIBUTE, detail)
         return volumeNode
 
     @staticmethod
@@ -871,3 +894,384 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             if resultWidget is not None:
                 compositeNode = resultWidget.sliceLogic().GetSliceCompositeNode()
                 self.assertIsNone(compositeNode.GetBackgroundVolumeID())
+
+    SIMULATION_DETAIL = "arithmetic stand-in, not a classifier"
+
+    def test_simulatedSourceIsNotGenuine(self) -> None:
+        logic = SLIAFlowLogic()
+        simulated = self._createSimulatedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            detail=self.SIMULATION_DETAIL,
+        )
+        self.assertFalse(logic.isGenuineResultSource(RESULT_MAP_TMD, simulated))
+        self.assertTrue(logic.isSimulatedResultSource(RESULT_MAP_TMD, simulated))
+        self.assertIsNone(logic.findResultSource(RESULT_MAP_TMD))
+        self.assertIs(
+            logic.findResultSource(RESULT_MAP_TMD, allowSimulated=True), simulated
+        )
+
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self.assertFalse(widget._demoModeEnabled)
+        report = widget._refreshResultPresentation()
+        self.assertEqual(report["summaryStatus"], "WARN", report)
+        self.assertIsNone(widget._parameterNode.resultSourceVolume)
+        self.assertIsNone(widget._parameterNode.resultVolume)
+        self.assertIn("waiting", widget.ui.resultStatusLabel.text.lower())
+        self.assertIsNone(widget._simulatedBannerActor)
+
+    def test_demoModeDiscoversSimulatedSource(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self._createSimulatedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            detail=self.SIMULATION_DETAIL,
+        )
+
+        self.assertEqual(
+            widget._refreshResultPresentation()["summaryStatus"], "WARN"
+        )
+
+        widget._demoModeEnabled = True
+        report = widget._refreshResultPresentation()
+        self.assertEqual(report["summaryStatus"], "PASS", report)
+        self.assertEqual(report["dataOrigin"], RESULT_SOURCE_SIMULATED_ORIGIN)
+        self.assertEqual(report["simulationDetail"], self.SIMULATION_DETAIL)
+        self.assertIsNotNone(widget._parameterNode.resultVolume)
+        self.assertIn("SIMULATED", widget.ui.resultStatusLabel.text)
+
+    def test_genuinePreferredOverSimulated(self) -> None:
+        logic = SLIAFlowLogic()
+        self._createSimulatedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            detail=self.SIMULATION_DETAIL,
+            name="simulated-tmd",
+        )
+        genuine = self._createResultVolume(
+            RESULT_MAP_TMD, self._validResultValues(RESULT_MAP_TMD)
+        )
+        self.assertIs(logic.findResultSource(RESULT_MAP_TMD), genuine)
+        self.assertIs(
+            logic.findResultSource(RESULT_MAP_TMD, allowSimulated=True), genuine
+        )
+
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        widget._demoModeEnabled = True
+        report = widget._refreshResultPresentation()
+        self.assertEqual(report["summaryStatus"], "PASS", report)
+        self.assertEqual(report["dataOrigin"], RESULT_SOURCE_GENUINE_ORIGIN)
+        self.assertIsNone(report["simulationDetail"])
+        self.assertIsNone(widget._simulatedBannerActor)
+        self.assertNotIn("SIMULATED", widget.ui.resultStatusLabel.text)
+
+    def test_simulatedResultStillValidatedAgainstContract(self) -> None:
+        logic = SLIAFlowLogic()
+        malformed = self._createSimulatedResultVolume(
+            RESULT_MAP_TMD,
+            np.array([[[1.5]]], dtype=np.float32),
+            detail=self.SIMULATION_DETAIL,
+        )
+        self.assertTrue(logic.isSimulatedResultSource(RESULT_MAP_TMD, malformed))
+
+        report = logic.presentSelectedResult(
+            parameterNode=logic.getParameterNode(),
+            resultMap=RESULT_MAP_TMD,
+            allowSimulated=True,
+        )
+        self.assertEqual(report["summaryStatus"], "FAIL", report)
+        self.assertEqual(
+            report["summaryMessage"],
+            logic.validateResultVolume(RESULT_MAP_TMD, malformed)["summaryMessage"],
+            "Simulated data must fail the identical contract, with the identical message",
+        )
+
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        widget._demoModeEnabled = True
+        widgetReport = widget._refreshResultPresentation()
+        self.assertEqual(widgetReport["summaryStatus"], "FAIL", widgetReport)
+        self.assertIsNone(widget._simulatedBannerActor)
+        self.assertIn("invalid", widget.ui.resultStatusLabel.text.lower())
+
+    def test_simulationDetailNeverAffectsDiscovery(self) -> None:
+        logic = SLIAFlowLogic()
+        genuine = self._createResultVolume(
+            RESULT_MAP_TMD, self._validResultValues(RESULT_MAP_TMD)
+        )
+        genuine.SetAttribute(RESULT_SOURCE_DETAIL_ATTRIBUTE, "should be ignored")
+        self.assertIs(logic.findResultSource(RESULT_MAP_TMD), genuine)
+        self.assertIsNone(logic._simulationDetail(genuine))
+        slicer.mrmlScene.RemoveNode(genuine)
+
+        deviceName = RESULT_MAP_DEVICE_NAMES[RESULT_MAP_TMD]
+        originless = self._createResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            marked=False,
+            name=deviceName,
+        )
+        originless.SetAttribute(RESULT_SOURCE_ROLE_ATTRIBUTE, RESULT_MAP_TMD)
+        originless.SetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE, deviceName)
+        originless.SetAttribute(RESULT_SOURCE_DETAIL_ATTRIBUTE, self.SIMULATION_DETAIL)
+        self.assertIsNone(logic.findResultSource(RESULT_MAP_TMD))
+        self.assertIsNone(logic.findResultSource(RESULT_MAP_TMD, allowSimulated=True))
+        self.assertIsNone(logic._simulationDetail(originless))
+
+        verbose = self._createSimulatedResultVolume(
+            RESULT_MAP_MV_CLASS,
+            self._validResultValues(RESULT_MAP_MV_CLASS),
+            detail="real UC1 pipeline\n over a synthetic cube " + "x" * 120,
+        )
+        detail = logic._simulationDetail(verbose)
+        self.assertNotIn("\n", detail)
+        self.assertLessEqual(len(detail), logic.SIMULATION_DETAIL_MAX_CHARS)
+        self.assertTrue(detail.startswith("real UC1 pipeline over a synthetic cube"))
+
+    def test_demoModeIsNotPersisted(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        self.assertFalse(
+            hasattr(widget._parameterNode, "demoMode"),
+            "Demo mode must not become a persisted parameter-node field",
+        )
+
+        layoutManager = slicer.app.layoutManager()
+        layoutNode = (
+            None
+            if layoutManager is None
+            else layoutManager.layoutLogic().GetLayoutNode()
+        )
+        previousLayout = (
+            None if layoutNode is None else int(layoutNode.GetViewArrangement())
+        )
+        checkBox = getattr(widget.ui, "demoModeCheckBox", None)
+        self.assertIsNotNone(checkBox)
+        try:
+            widget._onDemoModeToggled(True)
+            self.assertTrue(widget._demoModeEnabled)
+
+            widget.enter()
+            self.assertFalse(widget._demoModeEnabled)
+            self.assertFalse(checkBox.isChecked())
+
+            widget._onDemoModeToggled(True)
+            widget.onSceneStartClose()
+            self.assertFalse(widget._demoModeEnabled)
+            self.assertFalse(checkBox.isChecked())
+        finally:
+            widget._deactivatePresentation(restore=True)
+            widget._resetDemoMode()
+            if layoutNode is not None and (
+                int(layoutNode.GetViewArrangement()) != previousLayout
+            ):
+                layoutManager.setLayout(previousLayout)
+
+    def test_simulatedProvenanceReachesResultNode(self) -> None:
+        logic = SLIAFlowLogic()
+        parameters = logic.getParameterNode()
+        parameters.resultMap = RESULT_MAP_TMD
+        self._createSimulatedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            detail=self.SIMULATION_DETAIL,
+            name="simulated-tmd",
+        )
+
+        report = logic.presentSelectedResult(
+            parameterNode=parameters, resultMap=RESULT_MAP_TMD, allowSimulated=True
+        )
+        self.assertEqual(report["summaryStatus"], "PASS", report)
+        resultNode = parameters.resultVolume
+        self.assertEqual(
+            resultNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE),
+            RESULT_SOURCE_SIMULATED_ORIGIN,
+        )
+        self.assertEqual(resultNode.GetName(), logic.SIMULATED_RESULT_VOLUME_NAME)
+
+        genuine = self._createResultVolume(
+            RESULT_MAP_TMD, self._validResultValues(RESULT_MAP_TMD)
+        )
+        genuineReport = logic.presentSelectedResult(
+            parameterNode=parameters, resultMap=RESULT_MAP_TMD, allowSimulated=True
+        )
+        self.assertEqual(genuineReport["summaryStatus"], "PASS", genuineReport)
+        self.assertIs(parameters.resultSourceVolume, genuine)
+        self.assertEqual(
+            parameters.resultVolume.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        self.assertEqual(
+            parameters.resultVolume.GetName(),
+            logic.RESULT_VOLUME_NAME,
+            "A node that once carried simulated data must not keep the marker",
+        )
+
+    def test_simulatedResultShowsPersistentBanner(self) -> None:
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            self.skipTest("This Slicer session has no layout manager")
+
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self._createSimulatedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            detail=self.SIMULATION_DETAIL,
+        )
+
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        previousLayout = int(layoutNode.GetViewArrangement())
+        try:
+            self.assertTrue(widget._activatePresentation())
+            widget._onDemoModeToggled(True)
+
+            resultWidget = layoutManager.sliceWidget(widget.RESULT_VIEW_NAME)
+            renderer = widget._sliceViewRenderer(resultWidget)
+            self.assertIsNotNone(renderer)
+            bannerActor = widget._simulatedBannerActor
+            detailActor = widget._simulatedDetailActor
+            self.assertIsNotNone(bannerActor)
+            self.assertIsNotNone(detailActor)
+            self.assertEqual(bannerActor.GetInput(), SIMULATED_BANNER_MESSAGE)
+            self.assertEqual(detailActor.GetInput(), self.SIMULATION_DETAIL)
+            self.assertTrue(renderer.HasViewProp(bannerActor))
+            self.assertTrue(renderer.HasViewProp(detailActor))
+
+            self._settleEventLoop()
+            resultWidget.mrmlSliceNode().Modified()
+            resultWidget.sliceLogic().GetSliceCompositeNode().Modified()
+            self._settleEventLoop()
+            self.assertEqual(
+                widget._refreshResultPresentation()["summaryStatus"], "PASS"
+            )
+            renderer = widget._sliceViewRenderer(resultWidget)
+            self.assertTrue(renderer.HasViewProp(widget._simulatedBannerActor))
+            self.assertTrue(renderer.HasViewProp(widget._simulatedDetailActor))
+
+            widget._onDemoModeToggled(False)
+            self.assertIsNone(widget._simulatedBannerActor)
+            self.assertIsNone(widget._simulatedDetailActor)
+            self.assertFalse(renderer.HasViewProp(bannerActor))
+            self.assertFalse(renderer.HasViewProp(detailActor))
+        finally:
+            widget._deactivatePresentation(restore=True)
+            widget._resetDemoMode()
+            if int(layoutNode.GetViewArrangement()) != previousLayout:
+                layoutManager.setLayout(previousLayout)
+
+    def test_presentedResultIsNotRediscoveredAsSource(self) -> None:
+        """The module's own output must never re-enter discovery as a source.
+
+        The presentation node carries the role, device and origin attributes
+        copied from whatever it last displayed, so it satisfies every other
+        condition in the source match. Only its SLIAFlow ownership keeps it
+        out, and without that a stale presentation would be re-presented as an
+        external result long after the real source left the scene.
+        """
+        logic = SLIAFlowLogic()
+        parameters = logic.getParameterNode()
+        for resultMap, allowSimulated, create in (
+            (RESULT_MAP_TMD, False, self._createResultVolume),
+            (RESULT_MAP_MV_CLASS, False, self._createResultVolume),
+            (RESULT_MAP_SVM_PROB, False, self._createResultVolume),
+            (RESULT_MAP_TMD, True, self._createSimulatedResultVolume),
+        ):
+            sourceNode = create(resultMap, self._validResultValues(resultMap))
+            parameters.resultMap = resultMap
+            report = logic.presentSelectedResult(
+                parameterNode=parameters,
+                resultMap=resultMap,
+                allowSimulated=allowSimulated,
+            )
+            self.assertEqual(report["summaryStatus"], "PASS", report)
+            resultNode = parameters.resultVolume
+            self.assertIsNotNone(resultNode)
+            self.assertFalse(
+                logic.isGenuineResultSource(resultMap, resultNode),
+                f"{resultMap}: the presentation node matched as a genuine source",
+            )
+            self.assertFalse(
+                logic.isSimulatedResultSource(resultMap, resultNode),
+                f"{resultMap}: the presentation node matched as a simulated source",
+            )
+
+            slicer.mrmlScene.RemoveNode(sourceNode)
+            self.assertIsNone(
+                logic.findResultSource(resultMap, allowSimulated=allowSimulated),
+                f"{resultMap}: discovery found the module's own output",
+            )
+            staleReport = logic.presentSelectedResult(
+                parameterNode=parameters,
+                resultMap=resultMap,
+                allowSimulated=allowSimulated,
+            )
+            self.assertEqual(
+                staleReport["summaryStatus"],
+                "WARN",
+                f"{resultMap}: stale output was re-presented as a result",
+            )
+            self.assertIsNone(parameters.resultSourceVolume)
+
+    def test_bannerFailureWithholdsSimulatedResult(self) -> None:
+        """A banner that cannot be drawn withholds the result, not the banner.
+
+        The result view exists here, so _displayResultVolume would paint the
+        simulated map into it. If the banner cannot be attached to that view,
+        displaying anyway is exactly the unmarked simulated output the
+        medical-data policy forbids.
+        """
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            self.skipTest("This Slicer session has no layout manager")
+
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self._createSimulatedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            detail=self.SIMULATION_DETAIL,
+        )
+
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        previousLayout = int(layoutNode.GetViewArrangement())
+        try:
+            self.assertTrue(widget._activatePresentation())
+            resultWidget = layoutManager.sliceWidget(widget.RESULT_VIEW_NAME)
+            self.assertIsNotNone(resultWidget)
+
+            # The reported condition: the result view is on screen but has no
+            # renderer yet to carry the banner.
+            widget._sliceViewRenderer = lambda sliceWidget: None
+            widget._demoModeEnabled = True
+            report = widget._refreshResultPresentation()
+
+            self.assertEqual(report["summaryStatus"], "FAIL", report)
+            self.assertEqual(
+                report["summaryMessage"], widget.BANNER_UNAVAILABLE_STATUS
+            )
+            self.assertIsNone(widget._simulatedBannerActor)
+            self.assertIsNone(widget._simulatedDetailActor)
+            self.assertIsNone(widget._parameterNode.resultSourceVolume)
+            self.assertIsNone(
+                resultWidget.sliceLogic()
+                .GetSliceCompositeNode()
+                .GetBackgroundVolumeID(),
+                "The simulated map was displayed without its banner",
+            )
+            self.assertIn("withheld", widget.ui.resultStatusLabel.text.lower())
+        finally:
+            del widget._sliceViewRenderer
+            widget._deactivatePresentation(restore=True)
+            widget._resetDemoMode()
+            if int(layoutNode.GetViewArrangement()) != previousLayout:
+                layoutManager.setLayout(previousLayout)

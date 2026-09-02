@@ -16,10 +16,12 @@ from .SLIAFlowParameterNode import (
     RESULT_MAP_MV_PROB,
     RESULT_MAP_SVM_PROB,
     RESULT_MAP_TMD,
+    RESULT_SOURCE_DETAIL_ATTRIBUTE,
     RESULT_SOURCE_DEVICE_ATTRIBUTE,
     RESULT_SOURCE_GENUINE_ORIGIN,
     RESULT_SOURCE_ORIGIN_ATTRIBUTE,
     RESULT_SOURCE_ROLE_ATTRIBUTE,
+    RESULT_SOURCE_SIMULATED_ORIGIN,
     SLIAFlowParameterNode,
 )
 
@@ -43,6 +45,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     CAMERA_TIMER_INTERVAL_MS = 66
     LIVE_VOLUME_NAME = "SLIAFlow Laptop Camera"
     RESULT_VOLUME_NAME = "SLIAFlow UC1 Result"
+    SIMULATED_RESULT_VOLUME_NAME = "SLIAFlow UC1 Result (SIMULATED)"
+    SIMULATION_DETAIL_MAX_CHARS = 80
     RESULT_OWNER = "ResultPresentation"
     COLOR_OWNER = "ResultPresentation"
     RESULT_CLASS_MIN = 1
@@ -298,8 +302,35 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     def resultDescriptor(cls, resultMap: str) -> ResultMapDescriptor | None:
         return cls.RESULT_MAP_DESCRIPTORS.get(resultMap)
 
-    @staticmethod
+    @classmethod
+    def _simulationDetail(cls, volumeNode) -> str | None:
+        """Return the display-only detail of an already-simulated node.
+
+        The detail is read only once the origin is simulated, so it can never
+        become part of what decides whether something is displayable. It is
+        free text from outside SLIAFlow, so it is collapsed to a single line
+        and truncated before it can reach a text actor.
+        """
+        if volumeNode is None:
+            return None
+        origin = volumeNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE)
+        if origin != RESULT_SOURCE_SIMULATED_ORIGIN:
+            return None
+        detail = volumeNode.GetAttribute(RESULT_SOURCE_DETAIL_ATTRIBUTE)
+        if not detail:
+            return None
+        singleLine = " ".join(str(detail).split())
+        if not singleLine:
+            return None
+        if len(singleLine) > cls.SIMULATION_DETAIL_MAX_CHARS:
+            singleLine = (
+                singleLine[: cls.SIMULATION_DETAIL_MAX_CHARS - 3].rstrip() + "..."
+            )
+        return singleLine
+
+    @classmethod
     def _resultReport(
+        cls,
         status: str,
         message: str,
         resultMap: str | None = None,
@@ -313,6 +344,12 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             "resultMap": resultMap,
             "sourceNodeID": sourceNode.GetID() if sourceNode is not None else None,
             "sourceNodeName": sourceNode.GetName() if sourceNode is not None else None,
+            "dataOrigin": (
+                None
+                if sourceNode is None
+                else sourceNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE)
+            ),
+            "simulationDetail": cls._simulationDetail(sourceNode),
         }
         if descriptor is not None:
             report.update(
@@ -486,15 +523,23 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         )
 
     @classmethod
-    def isGenuineResultSource(cls, resultMap: str, volumeNode) -> bool:
+    def _matchesResultSource(
+        cls, resultMap: str, volumeNode, requiredOrigin: str
+    ) -> bool:
         descriptor = cls.resultDescriptor(resultMap)
         if descriptor is None or volumeNode is None:
             return False
         if not volumeNode.IsA("vtkMRMLVolumeNode"):
             return False
+        # A result source comes from outside SLIAFlow. The presentation node
+        # carries the role, device and origin attributes copied from whatever
+        # it last displayed, so without this check the module would rediscover
+        # its own output and re-present stale data as an external result.
+        if volumeNode.GetAttribute("SLIAFlow.Owner") is not None:
+            return False
         if volumeNode.GetAttribute(RESULT_SOURCE_ROLE_ATTRIBUTE) != resultMap:
             return False
-        if volumeNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE) != RESULT_SOURCE_GENUINE_ORIGIN:
+        if volumeNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE) != requiredOrigin:
             return False
         deviceName = volumeNode.GetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE)
         if deviceName is not None:
@@ -502,9 +547,33 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         return volumeNode.GetName() == descriptor.deviceName
 
     @classmethod
-    def findResultSource(cls, resultMap: str):
-        for volumeNode in slicer.util.getNodesByClass("vtkMRMLVolumeNode"):
+    def isGenuineResultSource(cls, resultMap: str, volumeNode) -> bool:
+        return cls._matchesResultSource(
+            resultMap, volumeNode, RESULT_SOURCE_GENUINE_ORIGIN
+        )
+
+    @classmethod
+    def isSimulatedResultSource(cls, resultMap: str, volumeNode) -> bool:
+        return cls._matchesResultSource(
+            resultMap, volumeNode, RESULT_SOURCE_SIMULATED_ORIGIN
+        )
+
+    @classmethod
+    def findResultSource(cls, resultMap: str, allowSimulated: bool = False):
+        """Find a source for one map role, preferring a genuine one.
+
+        The two passes are deliberate: a genuine source always wins, so a
+        simulated node left in the scene can never displace a real result
+        merely by being created later.
+        """
+        volumeNodes = slicer.util.getNodesByClass("vtkMRMLVolumeNode")
+        for volumeNode in volumeNodes:
             if cls.isGenuineResultSource(resultMap, volumeNode):
+                return volumeNode
+        if not allowSimulated:
+            return None
+        for volumeNode in volumeNodes:
+            if cls.isSimulatedResultSource(resultMap, volumeNode):
                 return volumeNode
         return None
 
@@ -672,6 +741,16 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             resultNode.SetAttribute("SLIAFlow.ResultMap", resultMap)
             resultNode.SetAttribute("SLIAFlow.DeviceName", descriptor.deviceName)
             resultNode.SetAttribute("SLIAFlow.ResultClass", str(int(resultClass)))
+            dataOrigin = sourceNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE)
+            resultNode.SetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE, dataOrigin)
+            # Renamed on every presentation, not only when simulated, so a node
+            # that once carried simulated data cannot keep the marker while
+            # displaying a genuine result.
+            resultNode.SetName(
+                self.SIMULATED_RESULT_VOLUME_NAME
+                if dataOrigin == RESULT_SOURCE_SIMULATED_ORIGIN
+                else self.RESULT_VOLUME_NAME
+            )
             displayNode = self._configureResultDisplay(resultNode, descriptor)
         except Exception as exc:
             return self._resultReport(
@@ -695,7 +774,13 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             resultClass=int(resultClass),
         )
 
-    def presentSelectedResult(self, parameterNode=None, resultMap=None, resultClass=None):
+    def presentSelectedResult(
+        self,
+        parameterNode=None,
+        resultMap=None,
+        resultClass=None,
+        allowSimulated: bool = False,
+    ):
         if isinstance(parameterNode, str):
             resultMap = parameterNode
             parameterNode = None
@@ -706,13 +791,18 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         if resultClass is None:
             resultClass = parameterNode.resultClass
 
-        sourceNode = self.findResultSource(resultMap)
+        sourceNode = self.findResultSource(resultMap, allowSimulated=allowSimulated)
         if sourceNode is None:
             self.clearResultReferences(parameterNode)
             descriptor = self.resultDescriptor(resultMap)
+            # The message names the provenance actually being waited for, so a
+            # demo-mode operator is never told a simulated source is missing
+            # under the word "genuine".
+            accepted = "genuine or simulated" if allowSimulated else "genuine"
+            deviceName = descriptor.deviceName if descriptor else "UC1"
             return self._resultReport(
                 "WARN",
-                f"Waiting for genuine {descriptor.deviceName if descriptor else 'UC1'} result.",
+                f"Waiting for {accepted} {deviceName} result.",
                 resultMap,
                 descriptor=descriptor,
             )

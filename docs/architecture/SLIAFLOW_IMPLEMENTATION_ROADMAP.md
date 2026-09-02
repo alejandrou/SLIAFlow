@@ -33,8 +33,15 @@ regenerated when the SLIAFlow extension source changes.
 5. Keep the right `UC1 Result` view black and display
    `Waiting for genuine UC1 result` until a real result arrives.
 
-The module must never create or present a simulated tumour classification,
-probability map, heatmap, or diagnostic result.
+SLIAFlow must never *create* a tumour classification, probability map,
+heatmap, or diagnostic result. It only presents data produced outside the
+module.
+
+Data that an external producer marks as simulated is displayed only under a
+transient, never-persisted operator opt-in and a permanent on-view banner
+(`SLIA-010`). A genuine source always takes precedence over a simulated one for
+the same map role, and provenance travels with the data, never with the endpoint
+it arrived on. Absent or unrecognized provenance is invalid, not a default.
 
 ```mermaid
 flowchart LR
@@ -59,9 +66,23 @@ flowchart LR
 | 4 | `SLIA-004` | Two black side-by-side image views and basic controls |
 | 5 | `SLIA-005` | Live Windows laptop-camera image in the left view |
 | 6 | `SLIA-006` | Validated presentation of genuine UC1 result volumes |
-| 7 | `SLIA-007` | Independently built SlicerOpenIGTLink dependency |
-| 8 | `SLIA-008` | LiveView and UC1 OpenIGTLink reception |
-| 9 | `SLIA-009` | Camera-only demonstration and operator runbook |
+| 7 | `SLIA-010` | Simulated result origin, demo mode, and simulated banner |
+| 8 | `SLIA-011` | Simulator toolchain and acquisition simulator |
+| 9 | `SLIA-012` | Stand-in UC1 maps and map sender |
+| 10 | `SLIA-013` | Real UC1 build, runner, and MV class sender |
+| 11 | `SLIA-007` | Independently built SlicerOpenIGTLink dependency |
+| 12 | `SLIA-008` | LiveView and UC1 OpenIGTLink reception |
+| 13 | `SLIA-014` | End-to-end hardware-free workflow verification |
+| 14 | `SLIA-009` | Camera-only demonstration and operator runbook |
+
+SLIA-010 to SLIA-013 stand in for the unavailable hyperspectral camera. The
+stand-ins are separate processes outside `extensions/`, so the rule that SLIAFlow
+never generates a result is unchanged; SLIAFlow only gains the ability to display
+externally produced simulated data under an explicit, non-persisted opt-in and a
+permanent on-view banner. SLIA-013 runs the genuine UC1 CUDA pipeline on a
+synthetic cube, so only the scene is simulated. Swapping a stand-in for the real
+application is a matter of stopping one process and starting another on the same
+port.
 
 The first demonstrable checkpoint is reached after SLIA-005. Tasks are completed
 one at a time so that each visible behavior can be verified in Slicer before the
