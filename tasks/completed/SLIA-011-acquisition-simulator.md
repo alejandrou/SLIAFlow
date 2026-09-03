@@ -1,8 +1,8 @@
 ---
 id: SLIA-011
 title: Simulator toolchain and acquisition simulator
-status: backlog
-branch:
+status: active
+branch: feature/SLIA-011-acquisition-simulator
 priority: high
 depends_on: SLIA-010
 required_skills: []
@@ -321,6 +321,21 @@ evidence must not claim Slicer test coverage.
 | `DatasetRef` round-trips and loads a contract-shaped cube | `test_contract.test_datasetRefRoundTripsFromWrittenFolder` | automated |
 | Ruff checks a non-zero file count for both targets | Manual step 1 | manual |
 
+Tests added beyond the planned set, and why:
+
+| Test | Why it exists |
+| --- | --- |
+| `test_spectra.test_channelOnlyBasisIsRankDeficient` | Pins the measured rank of the channel-only basis at 3, which is what makes the rank floor non-vacuous |
+| `test_spectra.test_bandGridMatchesTheHeadwallRange` | Pins the 400.482-1000.73 nm grid and the 6.5244 nm step against the real sensor header |
+| `test_envi.test_weightVectorMatchesTheBandCount` | The `w_vector.bin` size interlock the requirements list |
+| `test_envi.test_datasetFolderNameUsesTheAgreedStamp` | The `sim-YYYYMMDD-HHMMSS` naming rule |
+| `test_igtl_transport.test_defaultHeaderVersionSilentlyDropsMetadata` | Keeps the silent-drop failure mode itself under test, not just its absence |
+| `test_igtl_transport.test_imageMessageMirrorsTheCppSender` | Dimensions, components, identity matrix and LPS, against `OpenIGTLinkServer.cpp` |
+| `test_igtl_transport.test_frameIsPreparedAsKjiComponentsAndRotates` | The BGR-to-RGB swap and the 180-degree rotation `std::reverse` performs in one pass |
+| `test_igtl_transport.test_installedVersionIsReadFromDistributionMetadata` | `pyigtl.__version__` reports 0.3.2 for the 0.3.4 release, so the check reads distribution metadata |
+| `test_contract.*` (protocol and optional-map tests) | That an array-only producer does *not* satisfy `Classifier`, and that one map of five is representable |
+| `test_config.*` (preset, override and rejection tests) | Preset sizes, BMP row alignment, `local.json` overriding defaults, and named rejection of unknown values |
+
 Tests to add or change, and how each one will be shown to fail first:
 
 - Every test above is new and fails with `ModuleNotFoundError` for `stratum_sim`
@@ -341,11 +356,11 @@ Tests to add or change, and how each one will be shown to fail first:
 
 | # | Action | Expected observation | Result |
 | --- | --- | --- | --- |
-| 1 | Run `scripts/development/run-python-quality.ps1` | Both targets are linted, each reports a non-zero checked-file count, and the script exits 0 | |
-| 2 | Run `scripts/development/run-acquisition-simulator.ps1` with the `demo` preset | A `sim-YYYYMMDD-HHMMSS` folder appears under `workspace/simulators/datasets/` with `raw.hdr`, `raw.dat`, `whiteReference.dat` and `darkReference.dat`, and the console states the data is simulated and non-clinical | |
-| 3 | With the simulator running, connect the small pyigtl client from `tools/simulators/tests/` | Frames arrive with device name `LiveView`, three uint8 components and the configured dimensions; the achieved frame rate is printed and recorded | |
-| 4 | Point the simulator at an existing non-simulated dataset folder | It refuses to overwrite and explains that the folder lacks the `STRATUM SIMULATED CUBE` marker | |
-| 5 | Stop the simulator with Ctrl-C | It shuts the server socket down cleanly and leaves the written dataset intact | |
+| 1 | Run `scripts/development/run-python-quality.ps1` | Both targets are linted, each reports a non-zero checked-file count, and the script exits 0 | PASS - 6 files in `extensions/SLIAFlow/SLIAFlow`, 18 in `tools/simulators`, exit 0 |
+| 2 | Run `scripts/development/run-acquisition-simulator.ps1` with the `demo` preset | A `sim-YYYYMMDD-HHMMSS` folder appears under `workspace/simulators/datasets/` with `raw.hdr`, `raw.dat`, `whiteReference.dat` and `darkReference.dat`, and the console states the data is simulated and non-clinical | PASS - `sim-20260902-133645`, three `.dat` files of 3,571,200 bytes each, non-clinical notice printed first |
+| 3 | With the simulator running, connect the small pyigtl client from `tools/simulators/tests/` | Frames arrive with device name `LiveView`, three uint8 components and the configured dimensions; the achieved frame rate is printed and recorded | PASS - `LiveView`, `(1, 120, 160, 3)` uint8, LPS, header version 2, all three provenance keys; 12.74 fps enqueue-side, 12.50 fps receiver-side |
+| 4 | Point the simulator at an existing non-simulated dataset folder | It refuses to overwrite and explains that the folder lacks the `STRATUM SIMULATED CUBE` marker | PASS - refused with the marker named, exit 1, folder left holding only its original `raw.hdr` |
+| 5 | Stop the simulator with Ctrl-C | It shuts the server socket down cleanly and leaves the written dataset intact | PASS via scripted `CTRL_BREAK_EVENT` - clean shutdown message, exit 0, dataset intact. A literal console keypress is still worth one owner confirmation |
 
 ## Risks
 
@@ -386,11 +401,223 @@ source of truth.
 
 ## Completion evidence
 
-Reserved for implementation evidence.
+Branch: `feature/SLIA-011-acquisition-simulator`.
+
+### Automated tests
+
+Runner: `tools/simulators/tests/run_tests.py` (standard-library `unittest`,
+**not** the Slicer test runner - nothing under `stratum_sim` imports `slicer`).
+
+```text
+.\.venv\Scripts\python.exe tools\simulators\tests\run_tests.py
+Ran 33 tests in 0.132s
+OK
+exit code 0
+```
+
+26 of those were the original set; the remaining 7 were added by the review
+round recorded under `## Review findings`.
+
+### Static analysis
+
+```text
+.\scripts\development\run-python-quality.ps1
+ruff 0.15.21
+-- Target: extensions/SLIAFlow/SLIAFlow   Files checked: 6    All checks passed!
+-- Target: tools/simulators               Files checked: 19   All checks passed!
+Python quality checks passed.
+exit code 0
+```
+
+Both targets report a non-zero checked-file count, which is the emptiness guard
+the task asked for.
+
+### Red-first evidence
+
+Each test was recorded failing before the code that satisfies it existed, and
+the three tests the card singles out were additionally recorded failing against
+a deliberately weakened implementation.
+
+1. Before the package existed, all five test modules failed to import:
+   `ImportError: cannot import name 'spectra' from 'stratum_sim' (unknown
+   location)`, `Ran 5 tests`, `FAILED (errors=5)`.
+2. Rank test against the three-Gaussian-plus-one-envelope basis
+   (`DEFAULT_TEXTURE_FEATURE_COUNT = 0`):
+   `AssertionError: 3 not greater than or equal to 8`.
+3. Metadata test against pyigtl's default header version (the
+   `message.header_version = 2` assignment removed):
+   `AssertionError: 1 != 2`.
+4. Interlock test against a writer with `_assertTargetIsSafe` emptied:
+   `AssertionError: DatasetWriteError not raised`.
+
+The tests added by the review round were recorded the same way, each against the
+behaviour it replaces:
+
+5. Occupied-folder interlock, with the new branch of `_assertTargetIsSafe`
+   replaced by `return`: `AssertionError: DatasetWriteError not raised`.
+6. Configuration floors, with the two checks replaced by the previous
+   `bands < 1` test: `AssertionError: ConfigurationError not raised`.
+7. Device-name agreement, with `liveViewMetadata` hard-coding the constant:
+   `AssertionError: 'LiveView' != 'LiveView_Bench2'`.
+8. Rank enforcement and the rate divisor, with the guard disabled and the
+   divisor returned to the frame count: `AssertionError:
+   SpectralRankTooLowError not raised` and `AssertionError: 11.1111037037241 !=
+   10.0 within 1 places`.
+
+### Measured numbers
+
+- Achieved frame rate, `demo` preset, 15 fps target: **12.74 fps** enqueue-side
+  over the first 30 frames, **12.50 fps** receiver-side over 60 frames. The
+  enqueue figure now sits just above the receiver figure, which is the
+  relationship it should have; the 13.35 fps recorded before the review round
+  was inflated by dividing 30 frames by the 29 intervals they span.
+- Band covariance rank of the written cube: **9**, condition number over the
+  retained subspace **8.648e+02** (finite).
+- Dataset file sizes, `demo` preset: 3,571,200 bytes each for `raw.dat`,
+  `whiteReference.dat` and `darkReference.dat`, which is
+  `160 * 120 * 93 * 2` exactly.
+- `svm_model/w_vector.bin`: **2232 bytes** = `93 * 6 * 4`, byte-for-byte the
+  size of the shipped model, which is the second confirmation of 93 bands.
+- Installed pins verified through `importlib.metadata`: `pyigtl 0.3.4`
+  (its in-package `__version__` still reports 0.3.2), `numpy 2.2.6`,
+  `crcmod 1.7`, `opencv-python-headless 5.0.0.93`.
+
+### Findings that changed the specification
+
+**The rank criterion as written was vacuous, and was strengthened.** The card
+asked for the numerical rank of the *calibrated* cube's band covariance,
+measured with `numpy.linalg.matrix_rank`. Measured: rounding `raw` to uint16
+lifts every singular value of that covariance to about `8e-11` of the largest,
+so `matrix_rank` at its default tolerance returns **93 for every scene**,
+including one mixed from three curves. The exact, unquantized cube has rank 3
+and 9 respectively. `spectralRankReport` therefore measures against a
+documented relative tolerance of `1e-8`, which sits roughly three orders below
+the smallest genuine direction (`5.45e-6`) and three orders above the
+quantization floor. Without this the criterion would have passed on any input
+at all.
+
+**The vendored `parameters.txt` requests 1 PCA band, not more than 4.** The card
+assumed the PCA component count would be a meaningful floor. In
+`gpu_single_bsq/source/parameters.txt` the second value - `numberOfPcaBands`,
+read by `main.cu` - is `1`, and `checkHySime` is `0`, so it is used directly.
+The literal criterion (`rank >= pcaBandCount`) is therefore trivially satisfied
+and could never have been shown red. The test still asserts it, against the
+value read from the file rather than an assumed one, and skips that half when
+the ignored `workspace/` tree is absent. The floor that actually does the work
+is the named `MINIMUM_SPECTRAL_RANK = 8`.
+
+**The channel-only basis is rank 3, not the rank 4 the card predicted.** The
+near-infrared envelope is driven by luminance, and luminance is a fixed linear
+combination of the B, G and R weight maps, so the envelope contributes a curve
+but no new direction. This is recorded in `spectra.py` and pinned by
+`test_channelOnlyBasisIsRankDeficient`.
+
+**pyigtl's server installs its own SIGINT handler after ours.**
+`OpenIGTLinkServer.__init__` registers SIGINT and SIGTERM handlers that close
+the socket and re-send the signal to the default handler. An interrupt flag
+installed before the server is therefore silently replaced, and Ctrl-C would
+have bypassed the clean-shutdown path entirely. `_InterruptFlag` is now
+installed after the server starts, and handles SIGBREAK alongside SIGINT
+because on Windows Ctrl-C and Ctrl-Break arrive as different signals.
+
+**Two small additions the manual steps required.** `--dataset-folder`
+(`-DatasetFolder` on the launcher) names an exact folder, without which manual
+step 4 could not be performed at all: folders are otherwise named
+`sim-YYYYMMDD-HHMMSS` and an operator cannot land on an existing one. And each
+dataset carries an `svm_model/` sized for its band count, because the
+`w_vector.bin` interlock the card specifies is only meaningful against a file
+this process generates, and because the shipped model is sized for 93 bands and
+would not fit a different preset.
+
+### Manual verification
+
+Performed on this machine; results are in the table above. Two notes on how
+steps were carried out:
+
+- Step 3 used `tools/simulators/tests/liveview_client.py`, which is deliberately
+  not named `test_*` so `run_tests.py` never collects it. It reported device
+  name `LiveView`, shape `(1, 120, 160, 3)`, `uint8`, LPS, header version 2, and
+  all three LiveView provenance keys.
+- Step 5 was driven by a scripted `CTRL_BREAK_EVENT` to a new process group
+  rather than a literal keypress in an interactive console. Both signals reach
+  the same handler and the same shutdown path; the difference is delivery only.
+  A literal Ctrl-C in an interactive console has not been keyed by hand and is
+  worth one confirming keypress by the project owner.
+
+`workspace/simulators/foreign-dataset/` was left in place. It is the unmarked
+folder step 4 uses, it is inside the already-ignored `workspace/` tree, and
+keeping it makes that step repeatable.
+
+### Not done
+
+- `Classifier` has no implementation. It is the seam SLIA-012 and SLIA-013 plug
+  into, as the card specifies.
+- No Slicer-side change, and no Slicer test coverage is claimed.
+- Human approval and completion remain outstanding. One independent review round
+  has been run and its findings are recorded and addressed below. No Git mutation
+  beyond creating and switching to the task branch has been made: the work is
+  uncommitted.
+- End-to-end verification against the genuine UC1 binary and against the real
+  acquisition application's simulated-capture mode has not been performed, and
+  no claim of it is made here. See review finding 3.
 
 ## Review findings
 
-Reserved for review.
+An independent review raised five findings. Four were defects and are fixed; the
+fifth is a real gap that belongs to a later card and is now recorded rather than
+left implicit. Every fix carries a test, and each of those tests was recorded
+failing against the behaviour it replaces (red-first entries 5 to 8 above).
+
+**1 (high) - an existing headerless folder could be overwritten.** The interlock
+only rejected an existing `raw.hdr` without the marker. A folder with no header
+at all had no marker to check and was accepted, and `raw.dat`,
+`whiteReference.dat` and `darkReference.dat` were then replaced. `--dataset-folder`
+takes an arbitrary path, so a typo reached it. Fixed in
+`envi._assertTargetIsSafe`: an empty folder is still a fresh target, but a
+folder with no header that holds anything at all is refused by name. Verified
+end to end - a folder holding a sentinel `raw.dat` produced
+`ERROR: Refusing to overwrite ... it is not empty (holds raw.dat)`, exit code 1,
+sentinel byte-for-byte intact.
+
+**2 (high) - settings could produce a dataset that violates the contract.**
+`bands = 1` passed validation and crashed later in `bandWavelengthsNm`;
+`textureFeatureCount = 0` wrote a rank-3 cube, printed the rank, and exited 0.
+Both are now rejected where they are set, against floors derived from the
+contract rather than picked: `MINIMUM_BAND_COUNT` because a rank cannot exceed
+the band count, and `MINIMUM_TEXTURE_FEATURE_COUNT` because the channel basis
+reaches `CHANNEL_BASIS_RANK` alone. The prediction is not trusted on its own -
+`assertSpectralRankIsSufficient` now checks the rank *measured* on the written
+dataset and exits non-zero below the floor, so a degenerate dataset can no
+longer look like a successful run.
+
+**3 (medium) - real-consumer compatibility is inferred, not measured.**
+Correct, and it stays that way within this card's scope: the tests re-implement
+UC1's and `HSCubeLoader`'s parsing rules from the vendored source, and neither
+real application has been run against a generated dataset. The review also
+found a concrete instance - `main.cu` opens the SVM model as the literal
+relative paths `../../svm_model/*.bin`, resolved against the binary's working
+directory, while this writer puts the model inside the dataset folder. Both
+facts are now stated in `envi.py` and in the README rather than left to be
+discovered, and both are SLIA-013's to settle, since that is the card where the
+binary is actually invoked. The `w_vector.bin` size interlock still binds
+wherever the file is eventually read from.
+
+**4 (medium) - a renamed stream produced self-contradictory metadata.** The
+message header used the configured device name while `SLIAFlow.DeviceName` was
+hard-coded to `LiveView`. Since the metadata is the half a consumer is asked to
+trust, `liveViewMetadata` now takes the device name as a parameter and the
+caller passes the configured one.
+
+**5 (low) - the sender-side rate was optimistic.** Two causes, both real:
+`send_message(wait=False)` returns on enqueue rather than on delivery, and the
+divisor was the frame count rather than the intervals those frames span. The
+divisor is fixed in `enqueueRate`; the enqueue-versus-delivery distinction
+cannot be fixed from the sender, so it is named instead - in the function, in
+`sendImage`, in the printed line, and in the README - and the receiver-side
+figure is stated as the one that settles the criterion.
+
+Both gates were re-run after the fixes: 33 tests OK, exit 0; Ruff 6 and 19 files
+across the two targets, all checks passed, exit 0.
 
 ## Human approval
 

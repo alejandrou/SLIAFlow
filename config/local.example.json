@@ -2,5 +2,21 @@
   "slicerSourceDirectory": "C:/path/to/Slicer/source",
   "slicerBuildDirectory": "C:/path/to/Slicer/build",
   "slicerExecutable": "C:/path/to/Slicer-build/Slicer.exe",
-  "slicerSkillDirectory": "C:/path/to/slicer-skill"
+  "slicerSkillDirectory": "C:/path/to/slicer-skill",
+
+  "simulators": {
+    "preset": "demo",
+    "bands": 93,
+    "frameSource": "synthetic",
+    "webcamIndex": 0,
+    "liveViewPort": 18944,
+    "liveViewDeviceName": "LiveView",
+    "targetFrameRate": 10.0,
+    "rotate180": true,
+    "seed": 20260902,
+    "noiseCounts": 0,
+    "textureFeatureCount": 6,
+    "frameCount": 0,
+    "datasetRoot": null
+  }
 }

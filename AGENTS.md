@@ -14,6 +14,8 @@ Codex may normally edit:
 - `.ai/`
 - `tasks/`
 - `config/`
+- `scripts/`
+- `tools/`
 
 Codex must not edit unless explicitly requested:
 

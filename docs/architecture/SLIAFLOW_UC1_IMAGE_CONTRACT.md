@@ -121,6 +121,73 @@ renamed on every presentation, not only when simulated, so a node that once
 carried simulated data cannot keep the marker while displaying a genuine
 result.
 
+## Wire metadata
+
+The provenance attributes above describe MRML node attributes. This section
+defines what goes on the OpenIGTLink wire, which is not the same thing.
+
+A producer sends exactly these four string keys:
+
+| Wire key | Value |
+| --- | --- |
+| `SLIAFlow.ResultMap` | one exact map key from the result-roles table |
+| `SLIAFlow.DeviceName` | the exact producer device for that map |
+| `SLIAFlow.DataOrigin` | `external-genuine` or `simulated` |
+| `SLIAFlow.SimulationDetail` | free text, display-only, optional |
+
+`findResultSource` matches on role, device **and** origin together. A producer
+that sends origin alone is received and then never discovered, which looks
+exactly like a transport failure and is not one.
+
+The `LiveView` stream carries no `SLIAFlow.ResultMap`. It is the live pane, not
+a result map, and claiming a result role for it would make it discoverable as
+one.
+
+### Header version 2 is required
+
+Every message must be sent with OpenIGTLink header version 2. This is measured,
+not assumed. On pyigtl 0.3.4 a freshly constructed `ImageMessage` has
+`header_version = 1`, and packing the four keys at version 1 emits only a
+`logger.warning` - "Metadata will not be packed" - then returns a well-formed
+146-byte message whose metadata unpacks to `{}`. The identical message at
+version 2 packs to 316 bytes and round-trips all four keys.
+
+A version-1 send therefore drops every provenance attribute silently, behind a
+successful-looking send and a warning on the wrong side of the wire.
+
+Note also that `metadata` is not a pyigtl constructor argument.
+`ImageMessage.__init__` takes only `image`, `ijk_to_world_matrix`,
+`world_coordinate_system`, `timestamp` and `device_name`; both `metadata` and
+`header_version` are plain attributes assigned after construction.
+
+### The receiver does not see these names verbatim
+
+SLIAFlow's receiving side renames every incoming key.
+`vtkMRMLIGTLConnectorNode.cxx` copies incoming metadata onto the MRML node as
+
+```cpp
+std::string tag = "OpenIGTLink." + iter->first;
+```
+
+unconditionally, so the wire key `SLIAFlow.DataOrigin` arrives as the MRML
+attribute `OpenIGTLink.SLIAFlow.DataOrigin`.
+
+Producers send the bare names anyway. The prefix is the receiver's business,
+and changing what goes on the wire to pre-compensate would break the real
+applications the stand-ins imitate. Reconciling the two names is SLIA-008's
+job, and the attribute names SLIAFlow actually reads are established there
+rather than assumed here.
+
+The line above was read at commit
+`85e5f764f3ad3d4adbaa568db0104b2b8f5998e8`, which is the commit SLIA-007 pins,
+so it describes the build SLIAFlow will actually run against.
+
+### Provenance never travels with the endpoint
+
+SLIAFlow must never infer `simulated` from a port or a hostname. A stand-in and
+the real application use the same port; the difference between them is what the
+metadata says, and nothing else.
+
 ## Validation and ownership
 
 Before any result is assigned to the result slice view, SLIAFlow checks the
