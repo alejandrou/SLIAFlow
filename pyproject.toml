@@ -1,6 +1,6 @@
 [tool.ruff]
 target-version = "py312"
-include = ["extensions/SLIAFlow/**/*.py"]
+include = ["extensions/SLIAFlow/**/*.py", "tools/simulators/**/*.py"]
 extend-exclude = [
   "apps",
   "knowledge",

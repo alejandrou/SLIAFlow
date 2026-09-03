@@ -10,6 +10,8 @@ This repository contains the SLIAFlow-related 3D Slicer development prototype. I
 - `docs/`: developer and technical documentation.
 - `config/`: portable local configuration template and ignored local configuration.
 - `extensions/`: SLIAFlow-specific Slicer extension and module source.
+- `scripts/`: developer automation for building, testing, and running the project.
+- `tools/`: standalone developer processes that are not part of the Slicer extension.
 - `source/`: local upstream Slicer source reference.
 - `apps/`: local Slicer application and build outputs.
 - `workspace/`: temporary work, experiments, scripts, and local generated artifacts.
@@ -32,6 +34,30 @@ extensions/SLIAFlow/SLIAFlow/
 ```
 
 Keep final module source in `extensions/`, not in `workspace/`.
+
+## Stand-In Simulators
+
+```text
+tools/simulators/
+```
+
+`tools/simulators/` holds the stand-in processes that stand where the missing
+acquisition system and the UC1 pipeline stand. They are separate processes, not
+Slicer code: nothing under them imports `slicer`, and they run under the
+repository-root `.venv` rather than inside Slicer's interpreter.
+
+They live outside `extensions/` deliberately. The seam between a stand-in and a
+real component is the network boundary the architecture already has, so
+replacing one with the other is stopping a process and starting another on the
+same port, with no change inside `extensions/`.
+
+Their dependencies are pinned in `tools/simulators/requirements.txt` and are
+never added to `extensions/SLIAFlow/SLIAFlow/Resources/requirements.txt`, which
+is the Slicer-runtime file. Their tests run under the standard-library
+`unittest` runner, not the Slicer test runner. See `tools/simulators/README.md`.
+
+Generated datasets are written under `workspace/simulators/`, which is already
+ignored by Git.
 
 ## Local Slicer Source And Build Outputs
 

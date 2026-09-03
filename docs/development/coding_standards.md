@@ -29,7 +29,9 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install ruff
 ```
 
-The configured rule set is `E4`, `E7`, `E9`, `F`, `I`, and `B` over `extensions/SLIAFlow/**/*.py`, defined in `pyproject.toml`.
+The script lints two targets and fails if either one reports a finding: `extensions/SLIAFlow/SLIAFlow`, configured by the root `pyproject.toml`, and `tools/simulators`, configured by `tools/simulators/ruff.toml`. Both use the same rule set - `E4`, `E7`, `E9`, `F`, `I`, and `B` - but they target different Python versions, because the Slicer module runs inside Slicer's interpreter and the simulators run under the repository `.venv` (3.10).
+
+The script also fails a target that matches zero files. `include` in `pyproject.toml` narrows Ruff's discovery, so a target it does not cover would otherwise exit 0 and report green having checked nothing. Ruff is the project's only static gate, so an empty run is a failure rather than a pass.
 
 There is deliberately no static type checker. `docs/development/testing_strategy.md` records the measured reason: Slicer injects `slicer.app`, `slicer.util`, `slicer.mrmlScene`, and the VTK bindings into the module namespace at runtime, so a type checker either resolves nothing and silently checks nothing, or resolves the package and reports the injected attributes as errors.
 
