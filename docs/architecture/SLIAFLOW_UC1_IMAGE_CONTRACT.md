@@ -188,6 +188,37 @@ SLIAFlow must never infer `simulated` from a port or a hostname. A stand-in and
 the real application use the same port; the difference between them is what the
 metadata says, and nothing else.
 
+## SLIA-012 arithmetic stand-in
+
+No UC1-to-OpenIGTLink wrapper exists upstream. The project therefore supplies a
+CUDA-free arithmetic stand-in under `tools/simulators/stratum_sim/uc1_sim.py` to
+prove the producer/consumer seam before SLIA-013 connects the genuine binary.
+It listens on `127.0.0.1:18945` and sends these five exact device names:
+
+| Map role | Device name |
+| --- | --- |
+| `tmdMap` | `UC1_TMD` |
+| `majorityVotingMap` | `UC1_MV_CLASS` |
+| `majorityVotingProbabilityMap` | `UC1_MV_PROB` |
+| `svmProbability` | `UC1_SVM_PROB` |
+| `knnProbability` | `UC1_KNN_PROB` |
+
+The stand-in derives a redness-index map and a luminance map from the calibrated
+cube, feeds those two maps to four fixed logits, and produces the two
+probability maps first. `knnProbability` is the same arithmetic at temperature
+`1.6`, not a second algorithm. The elementwise mean of those probability maps
+then defines the class map, majority-voting probability map and tumour map. The
+rule has hand-chosen constants, was not fitted or validated, and has no
+diagnostic meaning.
+
+Before each image send, the producer re-checks finite values, contract ranges,
+probability sums, class values, and the relationships among all five maps. The
+sender also requires `STRATUM SIMULATED CUBE` in `raw.hdr`; the explicit
+`--force-unmarked` switch is reserved for an approved synthetic test folder.
+That interlock is a data-safety boundary, not evidence that any result is
+clinical. An optional `UC1_SIM_NOTICE` STRING message repeats the simulated
+provenance on the wire.
+
 ## Validation and ownership
 
 Before any result is assigned to the result slice view, SLIAFlow checks the

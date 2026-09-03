@@ -30,10 +30,13 @@ if sys.version_info < MINIMUM_PYTHON_VERSION:  # pragma: no cover - guard, not b
 
 __all__ = [
     "acquisition_sim",
+    "bmp",
     "config",
     "contract",
     "envi",
     "frames",
     "igtl_transport",
     "spectra",
+    "uc1_maps",
+    "uc1_sim",
 ]
