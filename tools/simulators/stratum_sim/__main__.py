@@ -3,16 +3,17 @@
 Usage:
 
     python -m stratum_sim acquisition [options]
+    python -m stratum_sim uc1 [options]
 
-More simulators join this dispatch as they are written: the stand-in UC1 map
-sender in SLIA-012 and the genuine UC1 runner in SLIA-013.
+The UC1 command is the CUDA-free arithmetic stand-in from SLIA-012. The genuine
+UC1 runner in SLIA-013 will use the same producer/consumer seam.
 """
 
 from __future__ import annotations
 
 import sys
 
-SIMULATOR_NAMES = ("acquisition",)
+SIMULATOR_NAMES = ("acquisition", "uc1")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,6 +30,10 @@ def main(argv: list[str] | None = None) -> int:
         from .acquisition_sim import main as acquisitionMain
 
         return acquisitionMain(remaining)
+    if simulatorName == "uc1":
+        from .uc1_sim import main as uc1Main
+
+        return uc1Main(remaining)
 
     print(
         f"Unknown simulator {simulatorName!r}. Choose one of: {', '.join(SIMULATOR_NAMES)}.",

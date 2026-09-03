@@ -35,6 +35,7 @@ DATA_ORIGIN_SIMULATED = "simulated"
 DATA_ORIGIN_EXTERNAL_GENUINE = "external-genuine"
 
 LIVE_VIEW_DEVICE_NAME = "LiveView"
+UC1_MAP_PORT = 18945
 
 # SLIAFlow's `findResultSource` matches on role, device and origin together, so
 # a producer that sends origin alone is received and then never discovered.

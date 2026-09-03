@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import signal
 import sys
 import time
 from pathlib import Path
@@ -38,43 +37,6 @@ RATE_MEASUREMENT_FRAME_COUNT = 30
 
 class SpectralRankTooLowError(RuntimeError):
     """The dataset was written, but it is spectrally degenerate."""
-
-
-class _InterruptFlag:
-    """Turn Ctrl-C into a clean shutdown rather than a traceback.
-
-    This must be installed *after* the OpenIGTLink server exists.
-    `pyigtl.OpenIGTLinkServer.__init__` registers its own SIGINT and SIGTERM
-    handlers, which close the socket and then re-send the signal to the default
-    handler, so a flag installed before the server is silently replaced and the
-    shutdown message never runs.
-
-    SIGBREAK is handled alongside SIGINT where it exists: on Windows Ctrl-C and
-    Ctrl-Break arrive as different signals, and both mean stop.
-    """
-
-    def __init__(self) -> None:
-        self.requested = False
-        self._previousHandlers: dict[int, object] = {}
-
-        for signalName in ("SIGINT", "SIGBREAK"):
-            signalNumber = getattr(signal, signalName, None)
-            if signalNumber is not None:
-                self._previousHandlers[signalNumber] = signal.signal(signalNumber, self._handle)
-
-    def __enter__(self) -> _InterruptFlag:
-        return self
-
-    def __exit__(self, exceptionType, exceptionValue, traceback) -> None:
-        self.restore()
-
-    def _handle(self, signalNumber, stackFrame) -> None:
-        self.requested = True
-
-    def restore(self) -> None:
-        for signalNumber, previousHandler in self._previousHandlers.items():
-            signal.signal(signalNumber, previousHandler)
-        self._previousHandlers.clear()
 
 
 def synthesizeDataset(
@@ -172,7 +134,7 @@ def streamLiveView(simulatorConfig: config.SimulatorConfig, frameSource) -> floa
     reportedRate = False
 
     with igtl_transport.ImageStreamServer(port=simulatorConfig.liveViewPort) as server, (
-        _InterruptFlag()
+        igtl_transport.InterruptFlag()
     ) as interrupt:
         print(
             f"  LiveView server listening on 127.0.0.1:{simulatorConfig.liveViewPort} "

@@ -85,6 +85,54 @@ source opens camera index 0 - and so does `SLIAFlowLogic.startCamera`. On
 Windows the second open fails, so the SLIAFlow live pane and this source cannot
 run at the same time. Close one before starting the other.
 
+## Running the UC1 arithmetic stand-in
+
+The UC1 stand-in reads a dataset written by the acquisition simulator and sends
+all five contract maps on `127.0.0.1:18945`. It is a fixed arithmetic rule with
+hand-chosen constants, not a classifier; its output is synthetic and
+non-clinical.
+
+Create a dataset without leaving the acquisition server running:
+
+```powershell
+.\scripts\development\run-acquisition-simulator.ps1 -DatasetOnly
+```
+
+Then start the UC1 sender, replacing the path with the folder printed by the
+acquisition command:
+
+```powershell
+.\scripts\development\run-uc1-simulator.ps1 `
+    -DatasetFolder workspace\simulators\datasets\sim-YYYYMMDD-HHMMSS `
+    -Cycles 0 -SendNotice
+```
+
+In a second shell, inspect one message for each device name:
+
+```powershell
+.\.venv\Scripts\python.exe tools\simulators\tests\uc1_client.py
+```
+
+The client prints the `(1, lines, samples[, components])` shape, scalar type,
+header version and every metadata key. The five devices are `UC1_TMD`,
+`UC1_MV_CLASS`, `UC1_MV_PROB`, `UC1_SVM_PROB` and `UC1_KNN_PROB`. Every map
+message must report header version 2 and all four provenance keys. An empty
+metadata dictionary means the sender used pyigtl header version 1 and the
+provenance was lost.
+
+Stop the sender with Ctrl-C. The default `raw.hdr` marker is required. If an
+explicitly approved synthetic test folder has no `STRATUM SIMULATED CUBE`
+marker, the only escape is:
+
+```powershell
+.\scripts\development\run-uc1-simulator.ps1 `
+    -DatasetFolder path\to\approved-synthetic-folder -ForceUnmarked
+```
+
+The sender prints a simulated/non-classifier banner for every complete map
+cycle. It never turns an unmarked folder into a genuine result, and
+`--force-unmarked` must not be used with patient or clinical data.
+
 ## Configuration
 
 Settings come from the `simulators` block of `config/local.json`, which is
