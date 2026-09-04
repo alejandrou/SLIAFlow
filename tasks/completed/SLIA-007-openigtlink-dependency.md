@@ -1,8 +1,8 @@
 ---
 id: SLIA-007
 title: Build the SlicerOpenIGTLink dependency
-status: backlog
-branch:
+status: active
+branch: feature/SLIA-007-openigtlink-dependency
 priority: high
 depends_on: SLIA-013
 required_skills: [slicer]
@@ -103,11 +103,11 @@ Tests to add or change, and how each one will be shown to fail first:
 
 | # | Action | Expected observation | Result |
 | --- | --- | --- | --- |
-| 1 | Run `git -C workspace/dependencies/SlicerOpenIGTLink rev-parse HEAD` and `git -C ... status --short` | HEAD is exactly `85e5f764f3ad3d4adbaa568db0104b2b8f5998e8` and the working tree is clean | |
-| 2 | Read the SLIAFlow `CMakeLists.txt` diff | `EXTENSION_DEPENDS SlicerOpenIGTLink` is declared and the dependency package directory is passed at configure time | |
-| 3 | Start Slicer with no sender running | Both OpenIGTLinkIF and SLIAFlow appear in the module list and the log shows no new startup error | |
-| 4 | Run `git status --short` at the repository root | No path under `apps/` or `source/` appears; only the files this card allows | |
-| 5 | Run `scripts/development/run-slicer-tests.ps1` | The suite passes, matching the pre-rebuild baseline | |
+| 1 | Run `git -C workspace/dependencies/SlicerOpenIGTLink rev-parse HEAD` and `git -C ... status --short` | HEAD is exactly `85e5f764f3ad3d4adbaa568db0104b2b8f5998e8` and the working tree is clean | Pass. HEAD is the pinned commit in detached state; `status --short --branch` prints only `## HEAD (no branch)` |
+| 2 | Read the SLIAFlow `CMakeLists.txt` diff | `EXTENSION_DEPENDS SlicerOpenIGTLink` is declared and the dependency package directory is passed at configure time | Pass. One-line diff sets `EXTENSION_DEPENDS "SlicerOpenIGTLink"`; `-DSlicerOpenIGTLink_DIR` is documented in the README configure block |
+| 3 | Start Slicer with no sender running | Both OpenIGTLinkIF and SLIAFlow appear in the module list and the log shows no new startup error | Headless equivalent passed, exit 0: the module manager lists OpenIGTLinkIF, OpenIGTLinkRemote, PlusRemote, UltrasoundRemoteControl and SLIAFlow, both loaded from this build. Project-owner confirmation in the GUI module list is still outstanding |
+| 4 | Run `git status --short` at the repository root | No path under `apps/` or `source/` appears; only the files this card allows | Pass. Only the README, the extension CMakeLists, the new setup doc and this card's move appear |
+| 5 | Run `scripts/development/run-slicer-tests.ps1` | The suite passes, matching the pre-rebuild baseline | Pass. 33 tests, OK (skipped=5), exit 0, matching the pre-rebuild Source baseline |
 
 ## Risks
 
@@ -120,7 +120,63 @@ Add an independent OpenIGTLink dependency build procedure.
 
 ## Completion evidence
 
-Reserved for implementation evidence.
+### Dependency
+
+Cloned to the ignored `workspace/dependencies/SlicerOpenIGTLink` and left in
+detached `HEAD` at `85e5f764f3ad3d4adbaa568db0104b2b8f5998e8`. A branch would
+move under a later `git pull`; a detached checkout makes `rev-parse HEAD` the
+whole pin. The source tree is unmodified.
+
+Superbuild configured and built Release/x64 against `apps/SR/Slicer-build`,
+exit 0, no compiler or linker errors. Loadable modules land in
+`build/SlicerOpenIGTLink/inner-build/lib/Slicer-5.13/qt-loadable-modules/Release`
+and the OpenIGTLink runtime libraries in `build/SlicerOpenIGTLink/bin/Release`.
+`SlicerOpenIGTLink_USE_VP9` was left OFF.
+
+### Wiring
+
+`extensions/SLIAFlow/CMakeLists.txt` now sets
+`EXTENSION_DEPENDS "SlicerOpenIGTLink"`. That name alone does nothing until the
+configure step also supplies `SlicerOpenIGTLink_DIR`: `SlicerExtensionCPack`
+expands `${dep}_DIR` into the launcher's `--additional-module-paths`, so the
+package directory (`inner-build`, not the superbuild root) is passed at
+configure time and the reconfigure is mandatory rather than cosmetic.
+
+### Discovery verified against the running application
+
+Through `build/SLIAFlow/SlicerWithSLIAFlow.exe`, exit 0 each time:
+
+- the module manager lists `OpenIGTLinkIF`, `OpenIGTLinkRemote`, `PlusRemote`,
+  `UltrasoundRemoteControl` and `SLIAFlow`, 152 modules in total;
+- `slicer.util.modulePath('OpenIGTLinkIF')` resolves inside
+  `build/SlicerOpenIGTLink/inner-build/...` and `SLIAFlow` inside
+  `build/SLIAFlow/...`, so neither comes from a previously installed extension;
+- `slicer.vtkMRMLIGTLConnectorNode()` constructs and reports its class name,
+  which proves the native library loaded rather than only that a module name was
+  registered.
+
+### Regression gate
+
+| Run | Before | After |
+| --- | --- | --- |
+| `run-slicer-tests.ps1` (Source) | 33 tests, OK (skipped=5), exit 0 | 33 tests, OK (skipped=5), exit 0 |
+| `run-slicer-tests.ps1 -Target Build` | 28 tests, OK (skipped=2), exit 0 | 33 tests, OK (skipped=5), exit 0 |
+
+The Build target's count rose because the compiled copy it exercises was a stale
+snapshot before this rebuild; the rebuild brought it level with the source tree.
+No test changed behaviour.
+
+Also run after the rebuild: `ctest --test-dir build/SLIAFlow -C Release`,
+2/2 passed, exit 0; `run-python-quality.ps1`, 31 files, all checks passed,
+exit 0.
+
+### Repository state
+
+`git status --short` shows only `README_SLIAFlow_Build.md`,
+`extensions/SLIAFlow/CMakeLists.txt`, the new
+`docs/development/openigtlink_setup.md` and this card's move. Nothing under
+`apps/` or `source/`. The dependency source and both build trees sit inside
+Git-ignored directories.
 
 ## Review findings
 
