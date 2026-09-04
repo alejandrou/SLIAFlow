@@ -12,6 +12,7 @@ the existing base Slicer build must not be deleted or modified.
 | Extension source | `C:\stratum\extensions\SLIAFlow` |
 | Extension build | `C:\stratum\build\SLIAFlow` |
 | Extension launcher | `C:\stratum\build\SLIAFlow\SlicerWithSLIAFlow.exe` |
+| SlicerOpenIGTLink package | `C:\stratum\build\SlicerOpenIGTLink\inner-build` |
 
 Machine-specific paths belong in the ignored `config/local.json`; use
 `config/local.example.json` as its portable template.
@@ -22,6 +23,8 @@ Machine-specific paths belong in the ignored `config/local.json`; use
 - Visual Studio 2022 with the Desktop development with C++ workload.
 - CMake 3.28 or newer.
 - The existing Release base Slicer build at `apps/SR/Slicer-build`.
+- The SlicerOpenIGTLink dependency built at `build/SlicerOpenIGTLink`. See
+  `docs/development/openigtlink_setup.md`.
 - Ruff for Python quality checks. `scripts/development/run-python-quality.ps1`
   finds it in the ignored root `.venv` or on `PATH`.
 
@@ -40,12 +43,19 @@ cmake `
   -G "Visual Studio 17 2022" `
   -A x64 `
   -DSlicer_DIR:PATH=C:\stratum\apps\SR\Slicer-build `
-  -DBUILD_TESTING:BOOL=ON
+  -DBUILD_TESTING:BOOL=ON `
+  -DSlicerOpenIGTLink_DIR:PATH=C:\stratum\build\SlicerOpenIGTLink\inner-build
 ```
 
 A successful configure creates
 `build\SLIAFlow\SlicerWithSLIAFlow.exe` without modifying the base Slicer
 tree.
+
+`SlicerOpenIGTLink_DIR` is what turns the `EXTENSION_DEPENDS` declaration in
+`extensions/SLIAFlow/CMakeLists.txt` into module paths inside the generated
+launcher. It is the `inner-build` subdirectory of the dependency superbuild.
+Reconfigure after the dependency is rebuilt or moved; the launcher argument
+list is generated at configure time.
 
 ## Build
 

@@ -9,7 +9,7 @@ set(EXTENSION_CONTRIBUTORS "STRATUM project contributors")
 set(EXTENSION_DESCRIPTION "Non-clinical STRATUM visualization prototype for 3D Slicer")
 set(EXTENSION_ICONURL "")
 set(EXTENSION_SCREENSHOTURLS "")
-set(EXTENSION_DEPENDS "NA")
+set(EXTENSION_DEPENDS "SlicerOpenIGTLink")
 
 find_package(Slicer REQUIRED)
 include(${Slicer_USE_FILE})
