@@ -31,6 +31,23 @@ DEFAULT_BAND_COUNT = 93
 
 FRAME_SOURCE_NAMES = ("synthetic", "webcam")
 
+# How the spectral scene is built.
+#
+# `tissue` is the default because it is the only one the genuine UC1 pipeline
+# resolves to anything: the `channel` scene is spectrally rich but its spectra
+# are mixtures of camera colour curves, and UC1's SVM - which sees only the
+# min-max normalized *shape* of each spectrum - classified every pixel of it as
+# background. `tissue` builds the shape from haemoglobin absorption and a
+# scattering power law instead. See `tissue.py` for what that does and does not
+# claim.
+#
+# `channel` is kept because it is the only mode that can carry a moving scene
+# or a webcam: it turns a frame into a cube, where `tissue` renders its frame
+# from the cube.
+SCENE_MODE_TISSUE = "tissue"
+SCENE_MODE_CHANNEL = "channel"
+SCENE_MODE_NAMES = (SCENE_MODE_TISSUE, SCENE_MODE_CHANNEL)
+
 # `OpenIGTLinkServer.cpp` serves LiveView on 18944. The UC1 map stream gets
 # 18945 in SLIA-012; nothing here listens on it.
 DEFAULT_LIVE_VIEW_PORT = 18944
@@ -68,6 +85,7 @@ class SimulatorConfig:
     presetName: str = DEFAULT_PRESET_NAME
     bands: int = DEFAULT_BAND_COUNT
     frameSource: str = "synthetic"
+    sceneMode: str = SCENE_MODE_TISSUE
     webcamIndex: int = 0
     liveViewPort: int = DEFAULT_LIVE_VIEW_PORT
     liveViewDeviceName: str = DEFAULT_LIVE_VIEW_DEVICE_NAME
@@ -89,6 +107,21 @@ class SimulatorConfig:
             raise ConfigurationError(
                 f"Unknown frame source {self.frameSource!r}. "
                 f"Choose one of: {', '.join(FRAME_SOURCE_NAMES)}."
+            )
+        if self.sceneMode not in SCENE_MODE_NAMES:
+            raise ConfigurationError(
+                f"Unknown scene mode {self.sceneMode!r}. "
+                f"Choose one of: {', '.join(SCENE_MODE_NAMES)}."
+            )
+        if self.sceneMode == SCENE_MODE_TISSUE and self.frameSource != "synthetic":
+            # In tissue mode the frame is rendered from the cube, so there is
+            # nowhere for a camera frame to enter. Accepting the setting and
+            # ignoring it would leave an operator believing the phantom was
+            # built from what the camera saw.
+            raise ConfigurationError(
+                f"Scene mode {SCENE_MODE_TISSUE!r} renders its own frame from the phantom cube, "
+                f"so it cannot take frames from frameSource {self.frameSource!r}. Use "
+                f"sceneMode {SCENE_MODE_CHANNEL!r} to drive the cube from a camera."
             )
         if self.bands < MINIMUM_BAND_COUNT:
             raise ConfigurationError(

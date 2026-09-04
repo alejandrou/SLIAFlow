@@ -37,6 +37,9 @@ ARBITRARY_CONSTANTS = {
 }
 
 CLASS_COUNT = len(ARBITRARY_CONSTANTS["biases"])
+# The UC1 class values, in the order `functions_cuda.cu` assigns them: 1 normal,
+# 2 tumour, 3 hypervascularised, 4 background.
+CLASS_VALUES = (1, 2, 3, 4)
 REDNESS_MINIMUM_NM = 600.0
 REDNESS_MAXIMUM_NM = 700.0
 GREEN_MINIMUM_NM = 500.0
@@ -185,6 +188,43 @@ def _requireFloatProbability(
         raise MapContractError(f"{name} contains values outside [0, 1].")
 
 
+def validateMajorityVotingMap(
+    majorityVotingMap: numpy.ndarray, expectedShape: tuple[int, ...] | None = None
+) -> None:
+    """Raise :class:`MapContractError` unless the class map satisfies the contract.
+
+    This is separate from :func:`validateMaps` because the genuine UC1 binary
+    produces this one map and nothing else, so a five-map check cannot be run
+    over its output. Both producers are held to one definition of the class-map
+    rules rather than to two that can drift apart.
+
+    `expectedShape` is supplied when the map is checked alongside the other four
+    and must agree with them. On its own, any `(1, lines, samples)` is accepted.
+    """
+    if not isinstance(majorityVotingMap, numpy.ndarray):
+        raise MapContractError(
+            f"majorityVotingMap must be a NumPy array, got {type(majorityVotingMap).__name__}."
+        )
+
+    shape = majorityVotingMap.shape
+    if expectedShape is None:
+        shapeIsValid = len(shape) == 3 and shape[0] == 1 and shape[1] > 0 and shape[2] > 0
+    else:
+        shapeIsValid = shape == expectedShape
+    if not shapeIsValid or majorityVotingMap.dtype != numpy.uint8:
+        expectation = expectedShape if expectedShape is not None else "(1, lines, samples)"
+        raise MapContractError(
+            f"majorityVotingMap must have shape {expectation} and dtype uint8, "
+            f"got {shape} and {majorityVotingMap.dtype}."
+        )
+    if not numpy.all(numpy.isfinite(majorityVotingMap)):
+        raise MapContractError("majorityVotingMap contains non-finite values.")
+    if not set(numpy.unique(majorityVotingMap).tolist()).issubset(set(CLASS_VALUES)):
+        raise MapContractError(
+            f"majorityVotingMap contains a class outside {set(CLASS_VALUES)}."
+        )
+
+
 def validateMaps(maps: contract.Uc1Maps) -> None:
     """Raise :class:`MapContractError` unless all five maps satisfy the contract."""
     present = _requirePresentMaps(maps)
@@ -218,15 +258,7 @@ def validateMaps(maps: contract.Uc1Maps) -> None:
         expectedScalarShape,
     )
 
-    if majorityVotingMap.shape != expectedScalarShape or majorityVotingMap.dtype != numpy.uint8:
-        raise MapContractError(
-            "majorityVotingMap must have the scalar shape and dtype uint8, "
-            f"got {majorityVotingMap.shape} and {majorityVotingMap.dtype}."
-        )
-    if not numpy.all(numpy.isfinite(majorityVotingMap)):
-        raise MapContractError("majorityVotingMap contains non-finite values.")
-    if not set(numpy.unique(majorityVotingMap).tolist()).issubset({1, 2, 3, 4}):
-        raise MapContractError("majorityVotingMap contains a class outside {1, 2, 3, 4}.")
+    validateMajorityVotingMap(majorityVotingMap, expectedShape=expectedScalarShape)
 
     for name, probability in (
         ("svmProbability", svmProbability),
@@ -281,6 +313,7 @@ def classifyDataset(
 
 __all__ = [
     "ARBITRARY_CONSTANTS",
+    "CLASS_VALUES",
     "ArithmeticClassifier",
     "MapContractError",
     "NON_CLASSIFIER_NOTICE",
@@ -290,5 +323,6 @@ __all__ = [
     "logits",
     "luminance",
     "rednessIndex",
+    "validateMajorityVotingMap",
     "validateMaps",
 ]

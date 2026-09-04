@@ -21,6 +21,8 @@ from .SLIAFlowParameterNode import (
     RESULT_SOURCE_ROLE_ATTRIBUTE,
     RESULT_SOURCE_SIMULATED_ORIGIN,
     SIMULATED_BANNER_MESSAGE,
+    SIMULATED_BANNER_MESSAGE_REAL_PIPELINE,
+    simulatedBannerMessage,
 )
 
 
@@ -896,6 +898,63 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 self.assertIsNone(compositeNode.GetBackgroundVolumeID())
 
     SIMULATION_DETAIL = "arithmetic stand-in, not a classifier"
+    SIMULATION_DETAIL_REAL_PIPELINE = "real UC1 pipeline, synthetic tissue phantom"
+
+    def test_bannerWordingFollowsTheProducer(self) -> None:
+        self.assertEqual(
+            simulatedBannerMessage(self.SIMULATION_DETAIL), SIMULATED_BANNER_MESSAGE
+        )
+        self.assertEqual(
+            simulatedBannerMessage(self.SIMULATION_DETAIL_REAL_PIPELINE),
+            SIMULATED_BANNER_MESSAGE_REAL_PIPELINE,
+        )
+        self.assertEqual(
+            simulatedBannerMessage("real UC1 pipeline, synthetic input"),
+            SIMULATED_BANNER_MESSAGE_REAL_PIPELINE,
+        )
+        # Anything that does not say what produced it keeps the stronger
+        # wording. Softening the banner is never the default.
+        self.assertEqual(simulatedBannerMessage(None), SIMULATED_BANNER_MESSAGE)
+        self.assertEqual(simulatedBannerMessage(""), SIMULATED_BANNER_MESSAGE)
+        self.assertEqual(
+            simulatedBannerMessage("some other producer"), SIMULATED_BANNER_MESSAGE
+        )
+
+    def test_realPipelineResultIsBanneredWithoutCallingItUngenuine(self) -> None:
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            self.skipTest("This Slicer session has no layout manager")
+
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_MV_CLASS
+        self._createSimulatedResultVolume(
+            RESULT_MAP_MV_CLASS,
+            self._validResultValues(RESULT_MAP_MV_CLASS),
+            detail=self.SIMULATION_DETAIL_REAL_PIPELINE,
+        )
+
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        previousLayout = int(layoutNode.GetViewArrangement())
+        try:
+            self.assertTrue(widget._activatePresentation())
+            widget._onDemoModeToggled(True)
+
+            bannerActor = widget._simulatedBannerActor
+            detailActor = widget._simulatedDetailActor
+            self.assertIsNotNone(bannerActor)
+            self.assertIsNotNone(detailActor)
+            self.assertEqual(
+                bannerActor.GetInput(), SIMULATED_BANNER_MESSAGE_REAL_PIPELINE
+            )
+            self.assertEqual(
+                detailActor.GetInput(), self.SIMULATION_DETAIL_REAL_PIPELINE
+            )
+        finally:
+            widget._deactivatePresentation(restore=True)
+            widget._resetDemoMode()
+            if int(layoutNode.GetViewArrangement()) != previousLayout:
+                layoutManager.setLayout(previousLayout)
 
     def test_simulatedSourceIsNotGenuine(self) -> None:
         logic = SLIAFlowLogic()

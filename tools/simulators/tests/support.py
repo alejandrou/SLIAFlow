@@ -36,6 +36,28 @@ PCA_BAND_COUNT_VALUE_INDEX = 1
 UC1_MAX_PATH_LENGTH = 128
 
 
+UC1_SVM_MODEL_PATH = UC1_PARAMETERS_PATH.parents[2] / "svm_model"
+
+# The staged build root the build script writes, used by the tests that exercise
+# the real binary. Absent until `scripts/development/build-uc1.ps1` has run.
+STAGED_UC1_BUILD_ROOT = REPOSITORY_ROOT / "build" / "uc1" / "UC1"
+
+
+def vendoredSvmModelDirectory() -> Path | None:
+    """Return the vendored `svm_model/`, or None when the tree is not present."""
+    return UC1_SVM_MODEL_PATH if UC1_SVM_MODEL_PATH.is_dir() else None
+
+
+def stagedUc1Executable() -> Path | None:
+    """Return the staged UC1 binary, or None when the build has not been run.
+
+    Tests that need the GPU use this to skip rather than fail: a fresh clone has
+    no `build/`, and the CUDA toolchain is not a checkout prerequisite.
+    """
+    executable = STAGED_UC1_BUILD_ROOT / "gpu_single_bsq" / "source" / "stratum.opt.exe"
+    return executable if executable.is_file() else None
+
+
 def readUc1PcaBandCount() -> int | None:
     """Return the PCA component count UC1 requests, or None when unavailable."""
     if not UC1_PARAMETERS_PATH.is_file():

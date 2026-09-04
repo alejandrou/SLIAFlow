@@ -46,6 +46,33 @@ RESULT_SOURCE_DETAIL_ATTRIBUTE = "SLIAFlow.SimulationDetail"
 # qualifies so the marker cannot drift away from the boundary it marks.
 SIMULATED_BANNER_MESSAGE = "SIMULATED - NOT A GENUINE UC1 RESULT"
 
+# A simulated result now has two possible producers. The arithmetic stand-in is
+# not a classifier, so "not a genuine UC1 result" is exactly right for it. The
+# genuine UC1 pipeline run on an invented scene is the other: the algorithm is
+# real and only the input was made up, so that same sentence would be a false
+# statement displayed in red over the view. Both are barred from clinical
+# reading, and both keep a banner; only the wording differs, chosen from the
+# detail the producer puts on the wire.
+SIMULATED_DETAIL_REAL_PIPELINE_PREFIX = "real UC1 pipeline"
+SIMULATED_BANNER_MESSAGE_REAL_PIPELINE = (
+    "SIMULATED INPUT - REAL UC1 PIPELINE, NOT A CLINICAL RESULT"
+)
+
+
+def simulatedBannerMessage(detail: str | None) -> str:
+    """Return the banner headline that matches a simulation detail string.
+
+    Anything unrecognised falls back to the stronger stand-in wording. A
+    producer that stops describing itself must not quietly get the softer
+    banner.
+    """
+    if detail is None:
+        return SIMULATED_BANNER_MESSAGE
+    prefix = SIMULATED_DETAIL_REAL_PIPELINE_PREFIX.lower()
+    if detail.strip().lower().startswith(prefix):
+        return SIMULATED_BANNER_MESSAGE_REAL_PIPELINE
+    return SIMULATED_BANNER_MESSAGE
+
 
 @parameterNodeWrapper
 class SLIAFlowParameterNode:

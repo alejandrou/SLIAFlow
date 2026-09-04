@@ -62,6 +62,40 @@ each containing `raw.hdr`, `raw.dat`, `whiteReference.dat`,
 Every preset keeps `samples` a multiple of 4, so a BMP row written from a frame
 needs no padding.
 
+### The two scenes
+
+`sceneMode` chooses how the cube is built, and the two modes run in opposite
+directions.
+
+| Mode | Cube from | LiveView frame from | Moves? | Camera? |
+| --- | --- | --- | --- | --- |
+| `tissue` (default) | a haemoglobin and scattering model | the cube | no | no |
+| `channel` | the frame | the frame source | yes | yes |
+
+`tissue` is the default because it is the only one the genuine UC1 pipeline
+resolves to anything. The `channel` scene is spectrally rich, but UC1 min-max
+normalizes each pixel across its bands before its SVM, so only spectral *shape*
+reaches a classifier trained on real brain reflectance - and every pixel of the
+channel scene came back class 4, background.
+
+The phantom is a synthetic optical phantom, not patient data and not a tumour.
+When UC1 paints a red area over its tumour-like region **that is not a
+detection**: it is a trained model responding to a spectrum built to have the
+shape of tissue. `docs/development/synthetic_tissue_phantom.md` records the
+model, the region parameters, exactly where UC1 disagrees with how the phantom
+was built, and what may and may not be claimed from it. Read it before showing
+the result to anyone.
+
+Asking for `tissue` with `--frame-source webcam` is refused rather than
+ignored: in tissue mode the frame is rendered from the cube, so there is
+nowhere for a camera frame to enter. Use `--scene-mode channel` for a camera or
+for motion.
+
+Each phantom dataset also carries `phantom_regions.npy` and
+`phantom_regions.json`, a record of how the scene was built. No consumer reads
+them and no test grades UC1 against them - they are a construction record, not
+ground truth.
+
 ### Watching the stream
 
 With the simulator running, in a second shell:
@@ -133,6 +167,76 @@ The sender prints a simulated/non-classifier banner for every complete map
 cycle. It never turns an unmarked folder into a genuine result, and
 `--force-unmarked` must not be used with patient or clinical data.
 
+## Running the genuine UC1 pipeline
+
+The third command runs the real thing. `uc1-real` executes the vendored UC1 CUDA
+binary, compiled unmodified for this GPU, on a simulated dataset and sends the
+class map it recovers from the binary's own output files.
+
+Build it once:
+
+```powershell
+.\scripts\development\build-uc1.ps1
+```
+
+Then run it against a dataset. The wrapper script is the short way:
+
+```powershell
+# Report the recovered map without opening a server.
+.\scripts\development\run-uc1-real.ps1 `
+    -DatasetFolder workspace\simulators\datasets\sim-YYYYMMDD-HHMMSS -ClassifyOnly
+
+# Serve UC1_MV_CLASS on 127.0.0.1:18945 until Ctrl-C.
+.\scripts\development\run-uc1-real.ps1 `
+    -DatasetFolder workspace\simulators\datasets\sim-YYYYMMDD-HHMMSS
+```
+
+The same thing through the module, when a switch the script does not expose is
+needed:
+
+```powershell
+$env:PYTHONPATH = "$PWD\tools\simulators"
+
+# Report the recovered map without opening a server.
+.\.venv\Scripts\python.exe -m stratum_sim uc1-real `
+    workspace\simulators\datasets\sim-YYYYMMDD-HHMMSS --classify-only
+
+# Serve UC1_MV_CLASS on 127.0.0.1:18945 until Ctrl-C.
+.\.venv\Scripts\python.exe -m stratum_sim uc1-real `
+    workspace\simulators\datasets\sim-YYYYMMDD-HHMMSS
+```
+
+Inspect the session from a second shell, recording every device name that
+arrives rather than waiting for five:
+
+```powershell
+.\.venv\Scripts\python.exe tools\simulators\tests\uc1_client.py --session-seconds 6
+```
+
+**It sends one map, not five.** UC1 computes the other four contract maps and
+then discards them, so a real-UC1 session sends `UC1_MV_CLASS` alone and leaves
+the rest absent rather than substituting zeros. Never run `uc1` and `uc1-real`
+together: five maps from two different boxes in one session would imply UC1
+produced all five.
+
+The pipeline is real; only the scene is invented, so the output is still marked
+`simulated` on the wire. `SLIAFlow.SimulationDetail` names which scene it was:
+`real UC1 pipeline, synthetic tissue phantom` when the dataset folder carries a
+phantom record, `real UC1 pipeline, synthetic input` otherwise. The runner reads
+that from the folder rather than from a switch, so it cannot be told to claim a
+scene the data does not support. The same `STRATUM SIMULATED CUBE` marker
+interlock applies, with the same `--force-unmarked` escape.
+
+Failure is always loud. A non-zero exit, a missing output, an output left over
+from an earlier run, or an RGB triple outside the UC1 palette each stop the run;
+there is no fallback to the arithmetic stand-in on any path.
+
+`docs/development/uc1_local_build.md` has the build command line, the staging
+layout, the expected warnings, the measured runtime and VRAM, and what the scene
+has to look like for UC1 to produce anything but background.
+`docs/development/uc1_demo_runbook.md` is the order to run all of this in when
+someone is watching, and the output each step should print.
+
 ## Configuration
 
 Settings come from the `simulators` block of `config/local.json`, which is
@@ -145,8 +249,9 @@ than one that stops.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `preset` | `"demo"` | Frame size: `demo`, `medium` or `full`. |
-| `bands` | `93` | Bands in the generated cube. Minimum 8, see below. |
-| `frameSource` | `"synthetic"` | `synthetic` or `webcam`. |
+| `bands` | `93` | Bands in the generated cube. Minimum 8, see below - but the genuine UC1 runner accepts **only 93**. |
+| `frameSource` | `"synthetic"` | `synthetic` or `webcam`. Only used by the `channel` scene. |
+| `sceneMode` | `"tissue"` | `tissue` or `channel`. See "The two scenes" above. |
 | `webcamIndex` | `0` | Camera index for the `webcam` source. |
 | `liveViewPort` | `18944` | Port the LiveView server socket listens on. |
 | `liveViewDeviceName` | `"LiveView"` | OpenIGTLink device name for the stream. |
@@ -154,9 +259,31 @@ than one that stops.
 | `rotate180` | `true` | Match the real application, which rotates 180 degrees. |
 | `seed` | `20260902` | Seed for the scene and the reference cubes. |
 | `noiseCounts` | `0` | Per-frame sensor noise. 0 keeps the calibration round trip exact. |
-| `textureFeatureCount` | `6` | Independent narrow features added to the spectral basis. Minimum 5, see below. |
+| `textureFeatureCount` | `6` | Independent narrow features added to the spectral basis. Minimum 5, see below. Only used by the `channel` scene. |
 | `frameCount` | `0` | Stop after this many frames. 0 streams until Ctrl-C. |
 | `datasetRoot` | `null` | Dataset folder. `null` means `workspace/simulators/datasets`. |
+
+### 93 bands, for the genuine runner
+
+The floor below is 8, but the genuine UC1 runner refuses anything except 93.
+
+The staged `svm_model/` is the one shipped with the vendored pipeline and it is
+sized for 93 bands. `main.cu` reads the band count out of the dataset header and
+then reads that many float32 weights per binary classifier from `w_vector.bin`
+without checking how many it got: a wider dataset reads past the end of the file
+into whatever was already in the buffer, and a narrower one classifies against a
+truncated model. Either way the run exits 0 and produces a map that looks
+exactly like a result.
+
+The `svm_model/` the acquisition stand-in writes *inside* each dataset folder
+does not rescue this. UC1 opens the model as the literal relative path
+`../../svm_model/*.bin`, resolved against its working directory and not against
+the dataset argument, so a dataset's own model is never the one it reads.
+
+So the runner checks the header's band count and the five model file sizes
+before it starts the process, and refuses rather than running. A non-93-band
+dataset is still valid input for the arithmetic stand-in, which sizes its
+arithmetic to whatever it is given.
 
 `bands` and `textureFeatureCount` carry floors because they can otherwise be set
 to values that produce a dataset which writes, loads, and is spectrally

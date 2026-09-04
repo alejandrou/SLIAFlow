@@ -37,6 +37,8 @@ __all__ = [
     "frames",
     "igtl_transport",
     "spectra",
+    "tissue",
     "uc1_maps",
+    "uc1_runner",
     "uc1_sim",
 ]
