@@ -1,8 +1,8 @@
 ---
 id: SLIA-008
 title: Receive live and UC1 images over OpenIGTLink
-status: backlog
-branch:
+status: active
+branch: feature/SLIA-008-network-reception
 priority: high
 depends_on: SLIA-007
 required_skills: [slicer]
@@ -155,11 +155,11 @@ Tests to add or change, and how each one will be shown to fail first:
 
 | # | Action | Expected observation | Result |
 | --- | --- | --- | --- |
-| 1 | With the SLIA-012 stand-in sending on 18945, print `GetAttributeNames()` and every value for the received node in the Python console, and paste the output into the contract document | The exact attribute names this build produces are recorded, whether bare or prefixed. The translation layer is written against that output, not against an assumption | |
-| 2 | Run the acquisition stand-in and a map producer, and connect both connectors | LiveView frames appear only in the left pane; the selected UC1 map appears only in the right | |
-| 3 | Observe a received simulated map with demo mode off, then on | Off: the right pane stays black with the waiting status. On: the map appears and carries its banner | |
-| 4 | Stop the sender, restart it, then switch the live source between camera and LiveView several times | Slicer never freezes; the status moves through disconnected and receiving; no module-owned connector is left behind after cleanup | |
-| 5 | Run `git status --short` under `workspace/components/` | No sender source file is modified | |
+| 1 | With the SLIA-012 stand-in sending on 18945, print `GetAttributeNames()` and every value for the received node in the Python console, and paste the output into the contract document | The exact attribute names this build produces are recorded, whether bare or prefixed. The translation layer is written against that output, not against an assumption | Pass, scripted under `build\SLIAFlow\SlicerWithSLIAFlow.exe`. All five map nodes carried only the prefixed spelling - `OpenIGTLink.SLIAFlow.{DataOrigin,DeviceName,ResultMap,SimulationDetail}` - plus `OriginalNodeName`, which OpenIGTLinkIF writes itself. The bare spelling appeared on no node. Node classes and scalar types matched the result-roles table exactly. Recorded in the contract document |
+| 2 | Run the acquisition stand-in and a map producer, and connect both connectors | LiveView frames appear only in the left pane; the selected UC1 map appears only in the right | Pass, scripted headful against both stand-ins. LiveView bound to the live pane with the result pane background `None`; the UC1 result bound to the result pane with the live pane background `None`. Project-owner confirmation by eye is still outstanding |
+| 3 | Observe a received simulated map with demo mode off, then on | Off: the right pane stays black with the waiting status. On: the map appears and carries its banner | Pass. Off: `WARN Waiting for genuine UC1_TMD result.` and no result reference. On: `PASS: SIMULATED: Displaying TMD probability from UC1_TMD.`, `dataOrigin=simulated`, detail `arithmetic stand-in, not a classifier`, banner actor present |
+| 4 | Stop the sender, restart it, then switch the live source between camera and LiveView several times | Slicer never freezes; the status moves through disconnected and receiving; no module-owned connector is left behind after cleanup | Pass. States moved disconnected -> receiving -> displaying -> disconnected; three camera/LiveView round trips left exactly one connector; `cleanup()` left zero `vtkMRMLIGTLConnectorNode` in the scene. On disconnect the last valid result stayed on screen under the stale status |
+| 5 | Run `git status --short` under `workspace/components/` | No sender source file is modified | Pass. `git status --short workspace/components/` prints nothing |
 
 ## Risks
 
@@ -174,7 +174,110 @@ alongside the four canonical provenance keys.
 
 ## Completion evidence
 
-Reserved for implementation evidence.
+### What was built
+
+`SLIAFlowLogic` gained an OpenIGTLink reception section and a connector-
+ownership section. `normalizeReceivedProvenance` is the single place that
+reconciles the wire spelling with the canonical one, and it runs at the top of
+`presentSelectedResult`, before discovery; `findResultSource`, the validation
+boundary and the SLIA-010 origin gate were left reading canonical attributes
+only. `receivedOrigin` recognizes exactly the two contract origins and returns
+`None` for anything else, and `unrecognizedProvenanceNode` turns a role claim
+without a recognized origin into a `FAIL` carrying `provenance="unrecognized"`,
+so it is reported invalid rather than as a source that never arrived.
+
+Connectors are held by the logic instance rather than looked up from the scene,
+which is what makes the lifecycle testable in a Slicer with no OpenIGTLink and
+makes it impossible for cleanup to miss one. Only a node carrying
+`SLIAFlow.Owner = Connectors` is stopped and removed. The connector state and
+event enums are mirrored from the pinned header for the same reason.
+
+`SLIAFlowWidget` gained the two link controls, the live-source switch, the
+connector observers and the five-state reporting. Two behaviours are worth
+naming: a lost link keeps a pane that is already showing something valid and
+says the image is stale, rather than blanking work that really did arrive and
+really did validate; and wire-triggered result refreshes are throttled to
+`RESULT_REFRESH_INTERVAL_SEC`, while an operator refresh never is.
+
+### Validation
+
+| Command | Result |
+| --- | --- |
+| `scripts/development/run-python-quality.ps1` | Passed, exit 0, 6 + 31 files |
+| `scripts/development/run-slicer-tests.ps1` | 45 tests, OK (skipped=6), exit 0 |
+| `scripts/development/run-slicer-tests.ps1 -Headful` | 45 tests, OK (skipped=1), exit 0 |
+| `cmake --build build/SLIAFlow --config Release` | Succeeded |
+| `scripts/development/run-slicer-tests.ps1 -Target Build -Headful` | 45 tests, OK (skipped=1), exit 0 |
+
+The `Build -Headful` run is the one that matters most here: it is the only
+target whose Slicer actually has `vtkMRMLIGTLConnectorNode`, so it is where the
+real-connector branch of `test_connectorLifecycleIsCleanAcrossTransitions`
+runs and where a leaked connector node would be caught.
+
+Seven new tests were added, plus one for source switching. Before the
+implementation existed they failed as described in the test plan; the three
+worth recording specifically are that
+`test_prefixedAndBareWireAttributesBothTranslate` asserts discovery finds
+nothing before translation - which is the assumption this card existed to
+disprove - that `test_unknownProvenanceIsRejectedNotDefaulted` fails a receiver
+defaulting a missing origin in either direction, and that
+`test_receivedSimulatedNodeObeysDemoModeGate` fails a receiver that passes
+`allowSimulated=True` unconditionally.
+
+### Changes made after review
+
+A code review of the working tree raised six findings. Four were defects and
+were fixed, one was a genuine gap that is only partly ours to close, and one was
+a documentation error rather than a code one. Four tests were added.
+
+`normalizeReceivedProvenance` now mirrors the wire instead of accumulating from
+it: for a node whose producer speaks the prefixed dialect, a canonical
+attribute whose prefixed counterpart is absent is removed. The review's exact
+scenario - a producer that sends provenance once and then stops - remains
+undetectable here, because the connector removes no attribute it has ever
+written, so the earlier message's prefixed keys are still on the node when the
+next one arrives. Nothing at this layer can distinguish that from a message
+that resent them. The requirement it places on producers is now stated in the
+contract document, and the part that is ours is fixed and tested by
+`test_provenanceMirrorsTheWireInsteadOfAccumulating`.
+
+The live-source selector was disabled by `_configureResultControls` on every
+call, which left the switching requirement unmet however good the code behind
+it was. It is now enabled wherever OpenIGTLink is present, and the widget test
+asserts that rather than asserting the bug.
+
+`displaying` and `invalid` are now reported only while a connector exists.
+Previously any later refresh rediscovered the retained scene node and reported
+`displaying` for a link that had been disconnected. The related distinction
+matters too and is now kept: a result that arrives with no link ever having
+been opened is not captioned as though a link had failed, and a stale simulated
+result keeps its SIMULATED prefix, because the banner is still on the image and
+the status has to agree with it.
+
+The acquisition link reports `displaying` and `invalid` as well, so both links
+expose all five states rather than only the socket's three.
+
+Throttled wire events now schedule a trailing refresh, so the last event of a
+burst - a one-shot send, or the tail of a five-map cycle - is delayed rather
+than dropped.
+
+The review's sixth finding, that switching away from LiveView leaves the
+acquisition connector running, is behaviour I kept and documentation I
+corrected. The camera belongs to the pane; the link belongs to the operator,
+who opened it with its own button, and tearing it down because a pane changed
+source would be surprising. What the switch does now release is the pane's hold
+on the stream, which it previously did not: the `liveSourceVolume` reference is
+cleared. The contract sentence that promised more than that was wrong and has
+been rewritten.
+
+### Not done here
+
+No CTest run was made beyond the two script targets; `ctest --test-dir
+build/SLIAFlow` was not re-run because this card changed no CMake or C++.
+
+The bare attribute spelling is accepted but no build produces it, so that half
+of the translation is exercised only by its unit test. That is deliberate: it
+is insurance against the pin moving, not a path in use.
 
 ## Review findings
 

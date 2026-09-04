@@ -8,8 +8,19 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModuleTest
 
 from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
+    ACQUISITION_PORT,
+    CONNECTION_CONNECTING,
+    CONNECTION_DISCONNECTED,
+    CONNECTION_DISPLAYING,
+    CONNECTION_INVALID,
+    CONNECTION_RECEIVING,
+    CONNECTOR_ACQUISITION,
+    CONNECTOR_UC1,
+    IGTL_HOST,
     LIVE_SOURCE_CHOICES,
+    LIVE_SOURCE_IGTL,
     LIVE_SOURCE_LAPTOP,
+    LIVE_VIEW_DEVICE_NAME,
     RESULT_MAP_CHOICES,
     RESULT_MAP_DEVICE_NAMES,
     RESULT_MAP_KNN_PROB,
@@ -24,6 +35,8 @@ from .SLIAFlowParameterNode import (
     RESULT_SOURCE_SIMULATED_ORIGIN,
     SIMULATED_BANNER_MESSAGE,
     SIMULATED_BANNER_MESSAGE_REAL_PIPELINE,
+    UC1_PORT,
+    WIRE_ATTRIBUTE_PREFIX,
     simulatedBannerMessage,
 )
 
@@ -42,6 +55,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         "_demoModeEnabled",
         "_cameraSupportAvailable",
         "_cameraRestartRequired",
+        "_resultEverDisplayed",
+        "_liveViewEverDisplayed",
+        "_lastResultRefreshTime",
+        "_pendingResultRefresh",
     )
     EVENT_LOOP_TIMEOUT_SEC = 2.0
 
@@ -72,6 +89,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             return
         for name in self.WIDGET_STATE_FIELDS:
             setattr(widget, name, backup[name])
+        widget._disconnectAllLinks()
         widget._refreshCameraControls()
         widget._configureResultControls()
         if backup["status"] is not None:
@@ -184,7 +202,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         status = slicer.util.findChild(representation, "statusLabel")
 
         self.assertIsNotNone(liveSource)
-        self.assertFalse(liveSource.isEnabled())
+        self.assertEqual(
+            liveSource.isEnabled(),
+            widget.logic.openIGTLinkAvailable(),
+            "Live-source switching must be offered wherever there is a second "
+            "source to switch to",
+        )
         self.assertIsNotNone(resultMap)
         self.assertEqual(resultMap.isEnabled(), widget._presentationActive)
         self.assertIsNotNone(resultClass)
@@ -1366,3 +1389,679 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             widget._resetDemoMode()
             if int(layoutNode.GetViewArrangement()) != previousLayout:
                 layoutManager.setLayout(previousLayout)
+
+    # ----------------------------------------------------------------------
+    # SLIA-008 - OpenIGTLink reception
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _createReceivedVolume(deviceName, values, metadata, *, prefixed=True):
+        """Create the node the connector would leave in the scene.
+
+        `vtkMRMLIGTLConnectorNode` writes every incoming metadata entry as
+        `"OpenIGTLink." + key`, so a test that stamps the bare names is testing
+        a receiver that will never exist. The prefix is applied here for the
+        same reason it is stripped in the module.
+        """
+        values = np.ascontiguousarray(values)
+        className = (
+            "vtkMRMLVectorVolumeNode" if values.ndim == 4 else "vtkMRMLScalarVolumeNode"
+        )
+        volumeNode = slicer.mrmlScene.AddNewNodeByClass(className, deviceName)
+        slicer.util.updateVolumeFromArray(volumeNode, values)
+        prefix = WIRE_ATTRIBUTE_PREFIX if prefixed else ""
+        for key, value in metadata.items():
+            volumeNode.SetAttribute(prefix + key, value)
+        return volumeNode
+
+    @classmethod
+    def _receivedResultVolume(cls, resultMap, values, origin, *, detail=None, prefixed=True):
+        metadata = {
+            RESULT_SOURCE_ROLE_ATTRIBUTE: resultMap,
+            RESULT_SOURCE_DEVICE_ATTRIBUTE: RESULT_MAP_DEVICE_NAMES[resultMap],
+        }
+        if origin is not None:
+            metadata[RESULT_SOURCE_ORIGIN_ATTRIBUTE] = origin
+        if detail is not None:
+            metadata[RESULT_SOURCE_DETAIL_ATTRIBUTE] = detail
+        return cls._createReceivedVolume(
+            RESULT_MAP_DEVICE_NAMES[resultMap], values, metadata, prefixed=prefixed
+        )
+
+    @classmethod
+    def _receivedLiveViewVolume(cls):
+        frame = np.zeros((1, 4, 6, 3), dtype=np.uint8)
+        frame[..., 0] = 200
+        return cls._createReceivedVolume(
+            LIVE_VIEW_DEVICE_NAME,
+            frame,
+            {
+                RESULT_SOURCE_DEVICE_ATTRIBUTE: LIVE_VIEW_DEVICE_NAME,
+                RESULT_SOURCE_ORIGIN_ATTRIBUTE: RESULT_SOURCE_SIMULATED_ORIGIN,
+                RESULT_SOURCE_DETAIL_ATTRIBUTE: "acquisition stand-in, synthetic scene",
+            },
+        )
+
+    class _FakeConnector:
+        """A connector stand-in for a Slicer built without OpenIGTLink.
+
+        The Source test target runs against the base Slicer build, which has no
+        `vtkMRMLIGTLConnectorNode` at all, so connector lifecycle would
+        otherwise be untestable exactly where it is most likely to leak.
+        """
+
+        def __init__(self) -> None:
+            self.attributes = {}
+            self.client = None
+            self.saveWithScene = None
+            self.state = 0
+            self.startCount = 0
+            self.stopCount = 0
+
+        def SetAttribute(self, name, value):
+            self.attributes[name] = value
+
+        def GetAttribute(self, name):
+            return self.attributes.get(name)
+
+        def SetSaveWithScene(self, value):
+            self.saveWithScene = value
+
+        def SetTypeClient(self, hostname, port):
+            self.client = (hostname, port)
+            return 1
+
+        def Start(self):
+            self.startCount += 1
+            self.state = 1
+            return 1
+
+        def Stop(self):
+            self.stopCount += 1
+            self.state = 0
+            return 1
+
+        def GetState(self):
+            return self.state
+
+    def test_prefixedAndBareWireAttributesBothTranslate(self) -> None:
+        """Both spellings reach discovery; the prefixed one is authoritative.
+
+        The prefixed spelling is what the pinned SlicerOpenIGTLink build
+        produces, so it is the one that must work. The bare spelling is
+        accepted as well so that the receiver keeps working if the pin ever
+        moves to a build that behaves differently.
+        """
+        logic = SLIAFlowLogic()
+        prefixedNode = self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        self.assertIsNone(
+            prefixedNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE),
+            "The received node must start with only the prefixed spelling",
+        )
+        self.assertIsNone(
+            logic.findResultSource(RESULT_MAP_TMD),
+            "Discovery must read canonical attributes, which do not exist yet",
+        )
+
+        logic.normalizeReceivedProvenance()
+        self.assertEqual(
+            prefixedNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        self.assertEqual(
+            prefixedNode.GetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE),
+            RESULT_MAP_DEVICE_NAMES[RESULT_MAP_TMD],
+        )
+        self.assertIs(logic.findResultSource(RESULT_MAP_TMD), prefixedNode)
+
+        # A stale canonical value left by an earlier message never outranks
+        # what the current message actually put on the wire.
+        prefixedNode.SetAttribute(
+            RESULT_SOURCE_ORIGIN_ATTRIBUTE, RESULT_SOURCE_SIMULATED_ORIGIN
+        )
+        logic.normalizeReceivedProvenance(prefixedNode)
+        self.assertEqual(
+            prefixedNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        slicer.mrmlScene.RemoveNode(prefixedNode)
+
+        bareNode = self._receivedResultVolume(
+            RESULT_MAP_MV_CLASS,
+            self._validResultValues(RESULT_MAP_MV_CLASS),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+            prefixed=False,
+        )
+        logic.normalizeReceivedProvenance()
+        self.assertIs(logic.findResultSource(RESULT_MAP_MV_CLASS), bareNode)
+
+    def test_unknownProvenanceIsRejectedNotDefaulted(self) -> None:
+        """Absent or unrecognized provenance is invalid in both directions.
+
+        Treating a missing origin as genuine displays unmarked data of unknown
+        origin; treating it as simulated invents a provenance the sender never
+        claimed. Both are fabrications, so both must fail.
+        """
+        logic = SLIAFlowLogic()
+        for origin in (None, "", "mock", "external_genuine"):
+            with self.subTest(origin=origin):
+                node = self._receivedResultVolume(
+                    RESULT_MAP_TMD,
+                    self._validResultValues(RESULT_MAP_TMD),
+                    origin,
+                )
+                logic.normalizeReceivedProvenance()
+                self.assertIsNone(logic.receivedOrigin(node))
+                self.assertIsNone(logic.findResultSource(RESULT_MAP_TMD))
+                self.assertIsNone(
+                    logic.findResultSource(RESULT_MAP_TMD, allowSimulated=True)
+                )
+                self.assertIs(logic.unrecognizedProvenanceNode(RESULT_MAP_TMD), node)
+
+                for allowSimulated in (False, True):
+                    report = logic.presentSelectedResult(
+                        parameterNode=logic.getParameterNode(),
+                        resultMap=RESULT_MAP_TMD,
+                        allowSimulated=allowSimulated,
+                    )
+                    self.assertEqual(report["summaryStatus"], "FAIL", report)
+                    self.assertEqual(report["provenance"], "unrecognized", report)
+                slicer.mrmlScene.RemoveNode(node)
+
+        # A node that claims nothing at all is not a claim to reject. It keeps
+        # the ordinary waiting state, so an unrelated scene volume that happens
+        # to share the device name is not reported as a broken UC1 result.
+        plain = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLScalarVolumeNode", RESULT_MAP_DEVICE_NAMES[RESULT_MAP_TMD]
+        )
+        slicer.util.updateVolumeFromArray(
+            plain, self._validResultValues(RESULT_MAP_TMD)
+        )
+        self.assertIsNone(logic.unrecognizedProvenanceNode(RESULT_MAP_TMD))
+        self.assertEqual(
+            logic.presentSelectedResult(
+                parameterNode=logic.getParameterNode(), resultMap=RESULT_MAP_TMD
+            )["summaryStatus"],
+            "WARN",
+        )
+
+    def test_receivedSimulatedNodeObeysDemoModeGate(self) -> None:
+        """A simulated map arriving over the wire is still opt-in only.
+
+        Nothing about having crossed a socket makes simulated data displayable.
+        The gate is the SLIA-010 demo-mode opt-in and the banner, exactly as it
+        is for a node created in the scene.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_SIMULATED_ORIGIN,
+            detail=self.SIMULATION_DETAIL,
+        )
+
+        withDemoModeOff = widget._refreshResultPresentation()
+        self.assertEqual(withDemoModeOff["summaryStatus"], "WARN", withDemoModeOff)
+        self.assertIsNone(widget._parameterNode.resultVolume)
+
+        widget._demoModeEnabled = True
+        try:
+            report = widget._refreshResultPresentation()
+            self.assertEqual(report["summaryStatus"], "PASS", report)
+            self.assertEqual(report["dataOrigin"], RESULT_SOURCE_SIMULATED_ORIGIN)
+            self.assertEqual(report["simulationDetail"], self.SIMULATION_DETAIL)
+            self.assertIn("SIMULATED", widget.ui.resultStatusLabel.text)
+            if slicer.app.layoutManager() is not None:
+                self.assertIsNotNone(
+                    widget._simulatedBannerActor,
+                    "A received simulated result was displayed without its banner",
+                )
+        finally:
+            widget._resetDemoMode()
+
+    def test_liveViewNodeBindsToLivePaneOnly(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.liveSource = LIVE_SOURCE_IGTL
+        liveNode = self._receivedLiveViewVolume()
+
+        report = widget._displayLiveViewNode()
+        self.assertEqual(report["summaryStatus"], "PASS", report)
+        self.assertIs(widget._parameterNode.liveSourceVolume, liveNode)
+        # The live stream is not a result and must never be able to reach the
+        # result pane or the result references.
+        self.assertIsNone(widget._parameterNode.resultSourceVolume)
+        self.assertIsNone(widget._parameterNode.resultVolume)
+
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            return
+        widget._activatePresentation()
+        try:
+            widget._displayLiveViewNode()
+            liveWidget = layoutManager.sliceWidget(widget.LIVE_VIEW_NAME)
+            resultWidget = layoutManager.sliceWidget(widget.RESULT_VIEW_NAME)
+            if liveWidget is None or resultWidget is None:
+                return
+            self.assertEqual(
+                liveWidget.sliceLogic().GetSliceCompositeNode().GetBackgroundVolumeID(),
+                liveNode.GetID(),
+            )
+            self.assertNotEqual(
+                resultWidget.sliceLogic()
+                .GetSliceCompositeNode()
+                .GetBackgroundVolumeID(),
+                liveNode.GetID(),
+                "The LiveView stream reached the result pane",
+            )
+        finally:
+            widget._deactivatePresentation(restore=True)
+
+    def test_resultNodeBindsToResultPaneOnly(self) -> None:
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            self.skipTest("This Slicer session has no layout manager")
+
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        liveNode = self._receivedLiveViewVolume()
+        widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
+        )
+
+        widget._activatePresentation()
+        try:
+            report = widget._refreshResultPresentation()
+            self.assertEqual(report["summaryStatus"], "PASS", report)
+            resultWidget = layoutManager.sliceWidget(widget.RESULT_VIEW_NAME)
+            liveWidget = layoutManager.sliceWidget(widget.LIVE_VIEW_NAME)
+            if resultWidget is None or liveWidget is None:
+                return
+            resultNode = widget._parameterNode.resultVolume
+            self.assertEqual(
+                resultWidget.sliceLogic()
+                .GetSliceCompositeNode()
+                .GetBackgroundVolumeID(),
+                resultNode.GetID(),
+            )
+            self.assertNotEqual(
+                liveWidget.sliceLogic().GetSliceCompositeNode().GetBackgroundVolumeID(),
+                resultNode.GetID(),
+                "The UC1 result reached the live pane",
+            )
+            self.assertNotEqual(
+                resultWidget.sliceLogic()
+                .GetSliceCompositeNode()
+                .GetBackgroundVolumeID(),
+                liveNode.GetID(),
+            )
+            self.assertEqual(
+                widget.connectionState(CONNECTOR_UC1), CONNECTION_DISPLAYING
+            )
+        finally:
+            widget._deactivatePresentation(restore=True)
+
+    def test_invalidResultDoesNotReplaceLastValidState(self) -> None:
+        """Invalid data and a lost link are reported, never presented.
+
+        Two different failures are covered because they must not be confused.
+        Data that arrives and fails the contract clears the pane; a link that
+        drops leaves the last valid image where it is and says it is stale.
+        Neither is ever reported as a successful result.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        sourceNode = self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
+        )
+
+        self.assertEqual(
+            widget._refreshResultPresentation()["summaryStatus"], "PASS"
+        )
+        self.assertTrue(widget._resultEverDisplayed)
+        displayedNodeID = widget._parameterNode.resultVolume.GetID()
+
+        # A lost link keeps what was valid, and says so.
+        widget._onLinkDisconnected(CONNECTOR_UC1)
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_DISCONNECTED
+        )
+        self.assertEqual(
+            widget._parameterNode.resultVolume.GetID(),
+            displayedNodeID,
+            "A disconnection discarded a result that had already validated",
+        )
+        self.assertIn("disconnected", widget.ui.resultStatusLabel.text.lower())
+        self.assertNotIn("PASS", widget.ui.resultStatusLabel.text)
+
+        # Data that arrives and fails the contract does not stay on screen.
+        slicer.util.updateVolumeFromArray(
+            sourceNode, np.array([[[7.5, 0.2], [0.3, 0.4]]], dtype=np.float32)
+        )
+        report = widget._refreshResultPresentation()
+        self.assertEqual(report["summaryStatus"], "FAIL", report)
+        self.assertFalse(widget._resultEverDisplayed)
+        self.assertIsNone(widget._parameterNode.resultVolume)
+        self.assertEqual(widget.connectionState(CONNECTOR_UC1), CONNECTION_INVALID)
+
+        # And a link that drops with nothing valid ever shown returns to black.
+        widget._onLinkDisconnected(CONNECTOR_UC1)
+        self.assertIn("waiting", widget.ui.resultStatusLabel.text.lower())
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is not None:
+            resultWidget = layoutManager.sliceWidget(widget.RESULT_VIEW_NAME)
+            if resultWidget is not None:
+                self.assertIsNone(
+                    resultWidget.sliceLogic()
+                    .GetSliceCompositeNode()
+                    .GetBackgroundVolumeID()
+                )
+
+    def test_connectorLifecycleIsCleanAcrossTransitions(self) -> None:
+        """Connectors are configured, stopped and dropped without leaking.
+
+        The endpoints are asserted because both a stand-in and the genuine UC1
+        runner listen on the UC1 port: the endpoint has to be right, and it
+        still says nothing about provenance.
+        """
+        logic = SLIAFlowLogic()
+        created = []
+
+        def factory(role):
+            connector = self._FakeConnector()
+            created.append((role, connector))
+            return connector
+
+        acquisition = logic.getOrCreateConnector(
+            CONNECTOR_ACQUISITION, connectorFactory=factory
+        )
+        uc1 = logic.getOrCreateConnector(CONNECTOR_UC1, connectorFactory=factory)
+        self.assertEqual(acquisition.client, (IGTL_HOST, ACQUISITION_PORT))
+        self.assertEqual(uc1.client, (IGTL_HOST, UC1_PORT))
+        self.assertEqual(acquisition.saveWithScene, False)
+        self.assertEqual(
+            acquisition.GetAttribute("SLIAFlow.Owner"), logic.CONNECTOR_OWNER
+        )
+        self.assertIs(
+            logic.getOrCreateConnector(CONNECTOR_UC1, connectorFactory=factory),
+            uc1,
+            "A second request created a second connector for the same role",
+        )
+        self.assertEqual(len(created), 2)
+
+        self.assertEqual(logic.connectorState(CONNECTOR_UC1), CONNECTION_DISCONNECTED)
+        self.assertEqual(
+            logic.startConnector(CONNECTOR_UC1, connectorFactory=factory),
+            CONNECTION_CONNECTING,
+        )
+        self.assertEqual(uc1.startCount, 1)
+        uc1.state = logic.CONNECTOR_STATE_CONNECTED
+        self.assertEqual(logic.connectorState(CONNECTOR_UC1), CONNECTION_RECEIVING)
+
+        # Repeated stops are harmless, and a stopped role is genuinely gone.
+        self.assertEqual(logic.stopConnector(CONNECTOR_UC1), CONNECTION_DISCONNECTED)
+        self.assertEqual(uc1.stopCount, 1)
+        self.assertIsNone(logic.connectorNode(CONNECTOR_UC1))
+        self.assertEqual(logic.stopConnector(CONNECTOR_UC1), CONNECTION_DISCONNECTED)
+        self.assertEqual(uc1.stopCount, 1)
+
+        logic.stopAllConnectors()
+        self.assertEqual(acquisition.stopCount, 1)
+        self.assertIsNone(logic.connectorNode(CONNECTOR_ACQUISITION))
+        logic.stopAllConnectors()
+
+        self.assertRaises(ValueError, logic.getOrCreateConnector, "not-a-role")
+
+        # An unknown or absent state is reported as disconnected rather than
+        # guessed at.
+        self.assertEqual(
+            logic.connectorStateName(logic.CONNECTOR_STATE_OFF),
+            CONNECTION_DISCONNECTED,
+        )
+        self.assertEqual(
+            logic.connectorStateName(logic.CONNECTOR_STATE_WAIT_CONNECTION),
+            CONNECTION_CONNECTING,
+        )
+        self.assertEqual(
+            logic.connectorStateName(logic.CONNECTOR_STATE_CONNECTED),
+            CONNECTION_RECEIVING,
+        )
+        for unknown in (None, 99, "connected"):
+            self.assertEqual(
+                logic.connectorStateName(unknown), CONNECTION_DISCONNECTED
+            )
+
+        if logic.openIGTLinkAvailable():
+            connector = logic.getOrCreateConnector(CONNECTOR_UC1)
+            self.assertIsNotNone(connector)
+            connectorID = connector.GetID()
+            logic.stopConnector(CONNECTOR_UC1)
+            self.assertIsNone(
+                slicer.mrmlScene.GetNodeByID(connectorID),
+                "A module-owned connector was left in the scene",
+            )
+        else:
+            self.assertIsNone(logic.getOrCreateConnector(CONNECTOR_UC1))
+
+    def test_liveSourceSwitchingReleasesTheSourceItLeaves(self) -> None:
+        """Switching sources never leaves the previous one feeding the pane."""
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        self._receivedLiveViewVolume()
+
+        widget.ui.liveSourceSelector.setCurrentText(LIVE_SOURCE_IGTL)
+        widget._onLiveSourceChanged()
+        self.assertEqual(widget._parameterNode.liveSource, LIVE_SOURCE_IGTL)
+        self.assertFalse(widget.logic.cameraActive)
+        self.assertFalse(widget.ui.startButton.enabled)
+        self.assertIsNotNone(widget._parameterNode.liveSourceVolume)
+
+        widget.ui.liveSourceSelector.setCurrentText(LIVE_SOURCE_LAPTOP)
+        widget._onLiveSourceChanged()
+        self.assertEqual(widget._parameterNode.liveSource, LIVE_SOURCE_LAPTOP)
+        self.assertFalse(widget.logic.cameraActive)
+        self.assertFalse(widget._liveViewEverDisplayed)
+        self.assertIsNone(
+            widget._parameterNode.liveSourceVolume,
+            "The pane kept hold of the stream it had switched away from",
+        )
+
+        # The link is a separate, operator-held resource. Changing which
+        # source the pane shows releases the pane, not the connection, and a
+        # frame arriving while the camera is selected must not reach the pane.
+        connector = widget.logic.getOrCreateConnector(
+            CONNECTOR_ACQUISITION, connectorFactory=lambda role: self._FakeConnector()
+        )
+        widget.ui.liveSourceSelector.setCurrentText(LIVE_SOURCE_IGTL)
+        widget._onLiveSourceChanged()
+        widget.ui.liveSourceSelector.setCurrentText(LIVE_SOURCE_LAPTOP)
+        widget._onLiveSourceChanged()
+        self.assertIs(widget.logic.connectorNode(CONNECTOR_ACQUISITION), connector)
+        widget._onConnectorEvent(
+            CONNECTOR_ACQUISITION, widget.logic.CONNECTOR_DEVICE_MODIFIED_EVENT
+        )
+        self.assertIsNone(widget._parameterNode.liveSourceVolume)
+
+    def test_provenanceMirrorsTheWireInsteadOfAccumulating(self) -> None:
+        """A key the wire stops carrying stops authenticating the node.
+
+        The connector writes the keys a message carries and removes none, so
+        the same MRML node is updated in place message after message. If the
+        translation only ever wrote, a value from an earlier message would go
+        on vouching for data that no longer declares it - which is exactly the
+        default-by-accident this card forbids, arriving by a slower route.
+        """
+        logic = SLIAFlowLogic()
+        node = self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        logic.normalizeReceivedProvenance()
+        self.assertIs(logic.findResultSource(RESULT_MAP_TMD), node)
+
+        # The same node, updated by a later message that no longer declares an
+        # origin.
+        node.RemoveAttribute(WIRE_ATTRIBUTE_PREFIX + RESULT_SOURCE_ORIGIN_ATTRIBUTE)
+        logic.normalizeReceivedProvenance()
+        self.assertIsNone(node.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE))
+        self.assertIsNone(logic.receivedOrigin(node))
+        self.assertIsNone(logic.findResultSource(RESULT_MAP_TMD))
+        self.assertIsNone(
+            logic.findResultSource(RESULT_MAP_TMD, allowSimulated=True),
+            "An origin the wire had stopped sending still passed discovery",
+        )
+        # It still claims the role, so it is reported invalid rather than as a
+        # result that never arrived.
+        self.assertIs(logic.unrecognizedProvenanceNode(RESULT_MAP_TMD), node)
+
+        # A producer speaking the bare dialect writes no prefixed attribute at
+        # all, so there is nothing to mirror and nothing is stripped.
+        bareNode = self._receivedResultVolume(
+            RESULT_MAP_MV_CLASS,
+            self._validResultValues(RESULT_MAP_MV_CLASS),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+            prefixed=False,
+        )
+        logic.normalizeReceivedProvenance()
+        self.assertEqual(
+            bareNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+
+    def test_staleResultIsNotReportedAsDisplayingWithoutALink(self) -> None:
+        """Rediscovering the retained node may not erase the disconnection.
+
+        The received node stays in the scene after the link drops, so every
+        later refresh - an operator refresh, a result change, a demo-mode
+        toggle, re-entering the module - finds it again and validates it
+        again. None of that is news from the wire, and none of it may report
+        a link that no longer exists as displaying.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
+        )
+        self.assertEqual(
+            widget._refreshResultPresentation()["summaryStatus"], "PASS"
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_DISPLAYING
+        )
+        displayedNodeID = widget._parameterNode.resultVolume.GetID()
+
+        widget._disconnectLink(CONNECTOR_UC1)
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_DISCONNECTED
+        )
+
+        report = widget._refreshResultPresentation()
+        self.assertEqual(report["summaryStatus"], "PASS", report)
+        self.assertEqual(
+            widget._parameterNode.resultVolume.GetID(),
+            displayedNodeID,
+            "A refresh after a disconnection discarded the last valid result",
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1),
+            CONNECTION_DISCONNECTED,
+            "A refresh after a disconnection reported the link as displaying",
+        )
+        self.assertIn("disconnected", widget.ui.resultStatusLabel.text.lower())
+        self.assertNotIn("PASS", widget.ui.resultStatusLabel.text)
+
+    def test_acquisitionLinkReportsDisplayingAndInvalid(self) -> None:
+        """Both links expose all five states, not just the socket's three."""
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.liveSource = LIVE_SOURCE_IGTL
+        liveNode = self._receivedLiveViewVolume()
+        widget.logic.getOrCreateConnector(
+            CONNECTOR_ACQUISITION, connectorFactory=lambda role: self._FakeConnector()
+        )
+
+        self.assertEqual(widget._displayLiveViewNode()["summaryStatus"], "PASS")
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_DISPLAYING
+        )
+
+        liveNode.SetAndObserveImageData(None)
+        self.assertEqual(widget._displayLiveViewNode()["summaryStatus"], "FAIL")
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_INVALID
+        )
+        self.assertIsNone(widget._parameterNode.liveSourceVolume)
+
+        # And with no link, a rediscovered node makes no claim about one.
+        widget._disconnectLink(CONNECTOR_ACQUISITION)
+        widget._displayLiveViewNode()
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_DISCONNECTED
+        )
+
+    def test_throttledResultEventStillGetsATrailingRefresh(self) -> None:
+        """Throttling may delay the last event of a burst, never drop it.
+
+        A one-shot send, or the tail of a five-map cycle, arrives inside the
+        throttle window behind an earlier event. Without a trailing refresh the
+        pane would sit waiting on data that had already arrived until the
+        operator refreshed by hand.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
+        )
+        widget._presentationActive = True
+
+        # An earlier event has just been served; the window is open.
+        widget._lastResultRefreshTime = time.monotonic()
+        self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        widget._onConnectorEvent(
+            CONNECTOR_UC1, widget.logic.CONNECTOR_DEVICE_MODIFIED_EVENT
+        )
+        self.assertIsNone(
+            widget._parameterNode.resultVolume,
+            "The event inside the throttle window was not throttled",
+        )
+        self.assertTrue(
+            widget._pendingResultRefresh,
+            "A dropped wire event was owed a trailing refresh and did not get one",
+        )
+
+        widget._onPendingResultRefresh()
+        self.assertFalse(widget._pendingResultRefresh)
+        self.assertIsNotNone(
+            widget._parameterNode.resultVolume,
+            "The trailing refresh did not present the data that had arrived",
+        )
