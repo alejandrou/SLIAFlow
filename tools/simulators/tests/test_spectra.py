@@ -17,6 +17,11 @@ TEST_SEED = 20260902
 # 0-to-100 scale the pipeline actually sees.
 CALIBRATION_TOLERANCE_PERCENT = 100.0 / 2000.0
 
+# Public Headwall sensor sampling contract documented for this simulator.
+HEADWALL_FIRST_WAVELENGTH_NM = 400.482
+HEADWALL_LAST_WAVELENGTH_NM = 1000.73
+HEADWALL_BAND_COUNT = 93
+
 
 def buildCalibratedCube(textureFeatureCount: int) -> numpy.ndarray:
     wavelengthsNm = spectra.bandWavelengthsNm(spectra.DEFAULT_BAND_COUNT)
@@ -100,12 +105,14 @@ class SpectralRankTest(unittest.TestCase):
 class BandGridTest(unittest.TestCase):
 
     def test_bandGridMatchesTheHeadwallRange(self):
-        wavelengthsNm = spectra.bandWavelengthsNm(spectra.DEFAULT_BAND_COUNT)
+        expected = numpy.linspace(
+            HEADWALL_FIRST_WAVELENGTH_NM,
+            HEADWALL_LAST_WAVELENGTH_NM,
+            HEADWALL_BAND_COUNT,
+            dtype=numpy.float64,
+        )
 
-        self.assertEqual(wavelengthsNm.shape, (spectra.DEFAULT_BAND_COUNT,))
-        self.assertAlmostEqual(float(wavelengthsNm[0]), spectra.SENSOR_FIRST_WAVELENGTH_NM, places=6)
-        self.assertAlmostEqual(float(wavelengthsNm[-1]), spectra.SENSOR_LAST_WAVELENGTH_NM, places=6)
+        actual = spectra.bandWavelengthsNm(HEADWALL_BAND_COUNT)
 
-        steps = numpy.diff(wavelengthsNm)
-        self.assertAlmostEqual(float(steps.max() - steps.min()), 0.0, places=6)
-        self.assertAlmostEqual(float(steps[0]), 6.5244, places=4)
+        numpy.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-12)
+        self.assertEqual(spectra.DEFAULT_BAND_COUNT, HEADWALL_BAND_COUNT)

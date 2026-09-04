@@ -287,9 +287,12 @@ def phantomRegionMap(lines: int, samples: int) -> numpy.ndarray:
 
     This is a construction record, not a label set the classifier is graded
     against. The regions are drawn as an elliptical craniotomy field on drape,
-    with a tumour-like blob and three vessel tracks inside the field, so that
-    every region is a connected area rather than scattered pixels: a map made
-    of coherent regions can be told apart from noise by eye.
+    with a tumour-like blob and three vessel tracks inside the field. The
+    tracks are painted last and cut the labels beneath them, so a label is
+    several coherent areas rather than one; what matters is that they are areas
+    at all, because a map made of areas can be told apart from noise by eye.
+    `docs/development/synthetic_tissue_phantom.md` states the geometry and what
+    is asserted of it.
     """
     if lines < 1 or samples < 1:
         raise ValueError(f"A phantom needs a positive size, not {lines}x{samples}.")

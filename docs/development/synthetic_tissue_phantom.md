@@ -114,10 +114,40 @@ covariance rank of the written dataset: **12**, against a floor of 8.
 ### Geometry
 
 An elliptical craniotomy field on drape, with a tumour-like blob and three
-sinusoidal vessel tracks inside the field. Regions are areas, not scattered
-pixels, so a coherent map can be told from salt-and-pepper noise by eye. A test
-asserts the coherence and asserts that the interior regions never touch the
-frame edge.
+sinusoidal vessel tracks inside the field. In fractions of the frame, so that
+the scene is the same at every preset:
+
+| Shape | Centre (x, y) | Radii (x, y) |
+| --- | --- | --- |
+| craniotomy field | 0.50, 0.50 | 0.40, 0.42 |
+| tumour-like blob | 0.36, 0.58 | 0.15, 0.17 |
+
+The three vessel tracks are sine curves of the form
+`y = offset + amplitude * sin(6x + phase) + slope * x`, each drawn a listed
+half-width either side of its curve and clipped to the field; their individual
+parameters are `VESSEL_TRACKS` in `tissue.py`. Both ellipses and the track
+count are restated in `tests/test_tissue.py`, which rebuilds them from this
+table and fails if the code and this document drift apart.
+
+Drawing order matters. The tracks are painted last, so they cut the cortex and
+tumour-like labels into several areas each, and the number of areas per label
+is a rasterisation artifact of the frame size - the vessel label alone falls
+into 15 areas at 24 x 32, 2 at 48 x 64 and 3 at 96 x 128. Those counts are
+therefore not pinned by any test. What is asserted is what the geometry
+actually promises and what holds at every size:
+
+- the craniotomy field is one connected area, and so is the drape around it;
+- every label owns an area covering at least 1 % of the frame;
+- the vessel label never falls into more areas than there are tracks;
+- the interior regions never touch the frame edge.
+
+Rasterising five curved boundaries onto a small grid does leave a few one- and
+two-pixel slivers where a track clips the field or the tumour edge: 10 pixels
+of 3072 at 48 x 64, and under 0.02 % of the frame at every larger preset. They
+are held to a budget rather than pinned, together with the rule that separates
+them from noise - a sliver appears only where two drawn boundaries cross, so it
+always borders both of the labels that made it, while a stray pixel dropped
+into a region's interior borders only one and is rejected.
 
 ### The frame and the cube are the same array
 

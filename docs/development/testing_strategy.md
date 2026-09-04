@@ -55,9 +55,13 @@ catch.
    observers, including the DataProbe slice-view annotations, react only once
    the event loop turns. An assertion made before that can pass against a view
    that displays nothing.
-4. **Never write an expected value as a literal that duplicates a constant.**
-   Import the constant and compare against it, so that renaming the constant
-   breaks the test instead of silently orphaning it.
+4. **Classify expected values by their authority.** Internal implementation
+   details should be imported from production and tested through behavior.
+   External or public contracts need independently maintained expected values
+   so production and test cannot drift together. Derived invariants should be
+   calculated from the specification or a small independent oracle, never from
+   the SUT output being judged. Every contract literal must name or cite its
+   authority.
 5. **Never copy an expected value out of observed output without knowing why it
    has that value.** If the reason cannot be stated in one sentence, the test
    records current behaviour rather than required behaviour, and it will pass
@@ -138,6 +142,19 @@ requires. This guard exists because `build\SLIAFlow\SlicerWithSLIAFlow.exe`
 carries its own built-in copy of the scripted module, and that copy shadows
 `--additional-module-paths`. Without the guard, a stale build produced a green
 run that said nothing about the working tree.
+
+The default target is deliberately headless. Layout-manager and renderer tests
+report explicit skips there. Run the maintained headful target to execute those
+branches in a real Slicer window:
+
+```powershell
+.\scripts\development\run-slicer-tests.ps1 -Headful
+```
+
+The headful run must report the layout lifecycle, layout restore, waiting
+annotation, and simulated-banner tests as passed rather than skipped. It is also
+the automated precursor to visual manual verification; it does not replace the
+human legibility check.
 
 ### Automated tests against the compiled extension
 

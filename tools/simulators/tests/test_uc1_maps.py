@@ -24,9 +24,11 @@ class Uc1MapTest(unittest.TestCase):
             ],
             dtype=numpy.float32,
         )
-        self.maps = uc1_maps.deriveMaps(calibratedCube, wavelengthsNm)
+        self.wavelengthsNm = wavelengthsNm
+        self.calibratedCube = calibratedCube
+        self.maps = uc1_maps.deriveMaps(self.calibratedCube, self.wavelengthsNm)
 
-    def test_derivedMapsAreSelfConsistent(self) -> None:
+    def test_derivedMapsAreInternallyConsistent(self) -> None:
         maps = self.maps
 
         self.assertEqual(maps.svmProbability.shape, (1, 2, 2, 4))
@@ -50,6 +52,117 @@ class Uc1MapTest(unittest.TestCase):
         )
         self.assertTrue(numpy.allclose(maps.tmdMap, mean[..., 1]))
         self.assertTrue(set(numpy.unique(maps.majorityVotingMap)).issubset({1, 2, 3, 4}))
+
+    def test_derivedMapsMatchIndependentArithmeticOracle(self) -> None:
+        # These fixed values were evaluated independently from the documented
+        # arithmetic rule; no expected value is derived from a returned map.
+        expectedRedness = numpy.array([[40.0, 40.0], [40.0, 40.0]], dtype=numpy.float32)
+        expectedLuminance = numpy.array(
+            [[32.5, 42.5], [52.5, 62.5]], dtype=numpy.float32
+        )
+        expectedLogits = numpy.array(
+            [
+                [[-2.475, 5.6, -1.5125, 1.025], [-2.375, 5.6, -1.3625, 0.725]],
+                [[-2.275, 5.6, -1.2125, 0.425], [-2.175, 5.6, -1.0625, 0.125]],
+            ],
+            dtype=numpy.float32,
+        )
+        expectedSvmProbability = numpy.array(
+            [
+                [
+                    [
+                        [0.0003077055, 0.9886968442, 0.0008056449, 0.0101898055],
+                        [0.0003409120, 0.9911531887, 0.0009383513, 0.0075675480],
+                    ],
+                    [
+                        [0.0003774355, 0.9929142802, 0.0010921457, 0.0056161385],
+                        [0.0004176482, 0.9941461854, 0.0012704666, 0.0041656997],
+                    ],
+                ]
+            ],
+            dtype=numpy.float32,
+        )
+        expectedKnnProbability = numpy.array(
+            [
+                [
+                    [
+                        [0.0059782323, 0.9298282799, 0.0109100832, 0.0532834046],
+                        [0.0064128667, 0.9369982361, 0.0120747790, 0.0445141181],
+                    ],
+                    [
+                        [0.0068677379, 0.9426638839, 0.0133417376, 0.0371266406],
+                        [0.0073444044, 0.9470138489, 0.0147206492, 0.0309210975],
+                    ],
+                ]
+            ],
+            dtype=numpy.float32,
+        )
+        expectedTumourProbability = numpy.array(
+            [[[0.9592625621, 0.9640757124], [0.9677890821, 0.9705800172]]],
+            dtype=numpy.float32,
+        )
+        expectedClasses = numpy.full((1, 2, 2), 2, dtype=numpy.uint8)
+
+        redness = uc1_maps.rednessIndex(self.calibratedCube, self.wavelengthsNm)
+        luminance = uc1_maps.luminance(self.calibratedCube)
+        actualLogits = uc1_maps.logits(redness, luminance)
+
+        numpy.testing.assert_allclose(redness, expectedRedness, rtol=0.0, atol=1e-6)
+        numpy.testing.assert_allclose(luminance, expectedLuminance, rtol=0.0, atol=1e-6)
+        numpy.testing.assert_allclose(actualLogits, expectedLogits, rtol=0.0, atol=1e-6)
+        numpy.testing.assert_allclose(
+            self.maps.svmProbability, expectedSvmProbability, rtol=0.0, atol=1e-6
+        )
+        numpy.testing.assert_allclose(
+            self.maps.knnProbability, expectedKnnProbability, rtol=0.0, atol=1e-6
+        )
+        numpy.testing.assert_allclose(
+            self.maps.tmdMap, expectedTumourProbability, rtol=0.0, atol=1e-6
+        )
+        numpy.testing.assert_array_equal(self.maps.majorityVotingMap, expectedClasses)
+        numpy.testing.assert_allclose(
+            self.maps.majorityVotingProbabilityMap,
+            expectedTumourProbability,
+            rtol=0.0,
+            atol=1e-6,
+        )
+
+    def test_derivedMapsDependOnInputSpectrum(self) -> None:
+        redDominantCube = numpy.array(
+            [10.0, 20.0, 60.0, 40.0], dtype=numpy.float32
+        ).reshape(4, 1, 1)
+        greenDominantCube = numpy.array(
+            [10.0, 60.0, 20.0, 40.0], dtype=numpy.float32
+        ).reshape(4, 1, 1)
+
+        self.assertEqual(
+            float(uc1_maps.luminance(redDominantCube)[0, 0]),
+            float(uc1_maps.luminance(greenDominantCube)[0, 0]),
+        )
+        self.assertEqual(
+            float(uc1_maps.rednessIndex(redDominantCube, self.wavelengthsNm)[0, 0]),
+            40.0,
+        )
+        self.assertEqual(
+            float(uc1_maps.rednessIndex(greenDominantCube, self.wavelengthsNm)[0, 0]),
+            -40.0,
+        )
+
+        redDominantMaps = uc1_maps.deriveMaps(redDominantCube, self.wavelengthsNm)
+        greenDominantMaps = uc1_maps.deriveMaps(greenDominantCube, self.wavelengthsNm)
+
+        self.assertFalse(
+            numpy.allclose(
+                redDominantMaps.svmProbability, greenDominantMaps.svmProbability
+            )
+        )
+        self.assertFalse(
+            numpy.allclose(
+                redDominantMaps.knnProbability, greenDominantMaps.knnProbability
+            )
+        )
+        self.assertEqual(int(redDominantMaps.majorityVotingMap[0, 0, 0]), 2)
+        self.assertEqual(int(greenDominantMaps.majorityVotingMap[0, 0, 0]), 1)
 
     def test_contractCheckRejectsCorruptedMaps(self) -> None:
         validMaps = self.maps
@@ -88,18 +201,20 @@ class Uc1MapTest(unittest.TestCase):
                     uc1_maps.validateMaps(maps)
 
     def test_moduleDocstringStatesItIsNotAClassifier(self) -> None:
-        # The whole sentence is asserted, not a prefix of it. "was never
-        # validated" and "no diagnostic meaning whatsoever" are the two clauses
-        # the medical-data policy actually turns on, and a prefix assertion
-        # would keep passing with both of them deleted.
-        expectedFirstLine = (
-            "This is not a classifier. It is a fixed arithmetic rule with hand-chosen "
-            "constants, written so that a demo pipeline has something to draw. It was not "
-            "fitted to data, it was never validated, and its output has no diagnostic "
-            "meaning whatsoever."
-        )
-        self.assertEqual(uc1_maps.__doc__.splitlines()[0], expectedFirstLine)
-        self.assertEqual(uc1_maps.NON_CLASSIFIER_NOTICE, expectedFirstLine)
+        surfaces = {
+            "module docstring": " ".join(uc1_maps.__doc__.split()),
+            "operator notice": " ".join(uc1_maps.NON_CLASSIFIER_NOTICE.split()),
+        }
+        for surfaceName, normalizedText in surfaces.items():
+            with self.subTest(surface=surfaceName):
+                lowered = normalizedText.lower()
+                self.assertIn("not a classifier", lowered)
+                self.assertIn("was never validated", lowered)
+                self.assertIn("no diagnostic meaning", lowered)
+
+        # These two surfaces deliberately show the same policy text even if its
+        # source formatting changes.
+        self.assertEqual(surfaces["module docstring"].split(" The rule exists", 1)[0], surfaces["operator notice"])
         self.assertIsInstance(uc1_maps.ARBITRARY_CONSTANTS, dict)
         self.assertIn("not a classifier", uc1_maps.ARBITRARY_CONSTANTS["description"])
 

@@ -12,7 +12,9 @@ import os
 import shutil
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from unittest import mock
 
 import numpy
 
@@ -163,6 +165,23 @@ class Uc1RunnerTestCase(unittest.TestCase):
         )
         return classifier.classify(self.dataset)
 
+    def outputPath(self, fileName: str) -> Path:
+        if fileName == uc1_runner.CLASS_IMAGE_FILE_NAME:
+            return self.build.datasetOutputDirectory(self.datasetName) / fileName
+        return self.build.rgbOutputDirectory / fileName
+
+    def processWithOutputMutation(
+        self, fileName: str, mutation: Callable[[Path], None]
+    ) -> Callable[[list[str], Path], uc1_runner.ProcessResult]:
+        recordedRun = RecordedRun(self.build, self.datasetName, self.rgb)
+
+        def run(command: list[str], cwd: Path) -> uc1_runner.ProcessResult:
+            result = recordedRun(command, cwd)
+            mutation(self.outputPath(fileName))
+            return result
+
+        return run
+
 
 class RecoveredMapTest(Uc1RunnerTestCase):
     def test_recoveredClassMapMatchesContract(self) -> None:
@@ -202,34 +221,57 @@ class RecoveredMapTest(Uc1RunnerTestCase):
         uc1_maps.validateMajorityVotingMap(maps.majorityVotingMap)
 
 
-class StaleOutputTest(Uc1RunnerTestCase):
-    def test_staleOutputIsRejectedNotAccepted(self) -> None:
-        process = RecordedRun(
-            self.build, self.datasetName, self.rgb, ageSeconds=STALE_SECONDS
-        )
+class OutputValidationTest(Uc1RunnerTestCase):
+    @staticmethod
+    def requiredOutputNames() -> tuple[str, ...]:
+        return (*uc1_runner.CHANNEL_FILE_NAMES, uc1_runner.CLASS_IMAGE_FILE_NAME)
 
-        with self.assertRaises(uc1_runner.Uc1StaleOutputError) as caught:
-            self.classifyWith(process)
+    def test_eachRequiredOutputMustBeFresh(self) -> None:
+        def backdate(path: Path) -> None:
+            stamp = path.stat().st_mtime - STALE_SECONDS
+            os.utime(path, (stamp, stamp))
 
-        message = str(caught.exception)
-        self.assertIn("red.txt", message)
+        for fileName in self.requiredOutputNames():
+            with self.subTest(fileName=fileName):
+                process = self.processWithOutputMutation(fileName, backdate)
+                with self.assertRaises(uc1_runner.Uc1StaleOutputError) as caught:
+                    self.classifyWith(process)
+                self.assertIn(fileName, str(caught.exception))
 
-        # The three files exist and are non-empty, so an existence check - the
-        # behaviour this card replaces - would have accepted them as a result.
-        for name in uc1_runner.CHANNEL_FILE_NAMES:
-            path = self.build.rgbOutputDirectory / name
-            self.assertTrue(path.is_file())
-            self.assertGreater(path.stat().st_size, 0)
+    def test_eachRequiredOutputMustExist(self) -> None:
+        for fileName in self.requiredOutputNames():
+            with self.subTest(fileName=fileName):
+                process = self.processWithOutputMutation(fileName, Path.unlink)
+                with self.assertRaises(uc1_runner.Uc1OutputMissingError) as caught:
+                    self.classifyWith(process)
+                self.assertIn(fileName, str(caught.exception))
 
+    def test_eachChannelRejectsEmptyAndMalformedContent(self) -> None:
+        corruptions = {
+            "empty": b"",
+            "malformed": b"not-a-number\n",
+        }
+        for fileName in uc1_runner.CHANNEL_FILE_NAMES:
+            for corruption, content in corruptions.items():
+                with self.subTest(fileName=fileName, corruption=corruption):
+                    process = self.processWithOutputMutation(
+                        fileName, lambda path, data=content: path.write_bytes(data)
+                    )
+                    with self.assertRaises(uc1_runner.Uc1OutputMissingError) as caught:
+                        self.classifyWith(process)
+                    self.assertIn(fileName, str(caught.exception))
 
-class MissingOutputTest(Uc1RunnerTestCase):
-    def test_missingOutputFailsLoudly(self) -> None:
-        process = RecordedRun(self.build, self.datasetName, None)
-
-        with self.assertRaises(uc1_runner.Uc1OutputMissingError) as caught:
-            self.classifyWith(process)
-
-        self.assertIn("red.txt", str(caught.exception))
+    def test_eachChannelRejectsAnIndividualShapeMismatch(self) -> None:
+        for fileName in uc1_runner.CHANNEL_FILE_NAMES:
+            with self.subTest(fileName=fileName):
+                process = self.processWithOutputMutation(
+                    fileName, lambda path: path.write_text("1\t2\n", encoding="ascii")
+                )
+                with self.assertRaises(uc1_runner.Uc1OutputMissingError) as caught:
+                    self.classifyWith(process)
+                message = str(caught.exception)
+                self.assertIn(fileName, message)
+                self.assertIn("shape", message)
 
     def test_pathTooLongOnStderrFails(self) -> None:
         process = RecordedRun(
@@ -253,7 +295,7 @@ class PaletteInverseTest(Uc1RunnerTestCase):
             self.classifyWith(process)
 
         message = str(caught.exception)
-        self.assertIn("2", message)
+        self.assertIn("2 pixel(s)", message)
         self.assertIn("(0, 1)", message)
         self.assertIn("(128, 128, 0)", message)
 
@@ -273,13 +315,13 @@ class ProcessFailureTest(Uc1RunnerTestCase):
             self.classifyWith(process)
 
         message = str(caught.exception)
-        self.assertIn("3", message)
+        self.assertIn("code 3", message)
         self.assertIn("CUDA error 999", message)
 
         # The failure mode this card forbids: a runner that falls back to the
         # arithmetic stand-in would have returned five valid maps here, and the
-        # operator would believe the real pipeline ran.
-        self.assertNotIsInstance(caught.exception, contract.Uc1Maps)
+        # operator would believe the real pipeline ran. The assertRaises above
+        # proves that no map result was returned.
 
 
 class MarkerInterlockTest(Uc1RunnerTestCase):
@@ -417,26 +459,35 @@ class ModelCompatibilityTest(Uc1RunnerTestCase):
         with self.assertRaises(uc1_runner.Uc1ModelMismatchError):
             classifier.classify(dataset)
 
-    def test_shortWeightVectorIsRefused(self) -> None:
+    def test_eachMissingModelFileIsNamed(self) -> None:
+        for fileName, expectedSize in uc1_runner.MODEL_FILE_SIZES.items():
+            with self.subTest(fileName=fileName):
+                modelPath = self.build.svmModelDirectory / fileName
+                modelPath.unlink()
+                process = RecordedRun(self.build, self.datasetName, self.rgb)
+                try:
+                    with self.assertRaises(uc1_runner.Uc1ModelMismatchError) as raised:
+                        self.classifyWith(process)
+                    self.assertIn(fileName, str(raised.exception))
+                    self.assertEqual(process.commands, [])
+                finally:
+                    modelPath.write_bytes(bytes(expectedSize))
+
+    def test_eachWrongSizeModelFileIsNamed(self) -> None:
         # `main.cu` never checks how many elements `fread` returned, so a short
         # file classifies against whatever was already in the buffer.
-        weightPath = self.build.svmModelDirectory / envi.WEIGHT_VECTOR_FILE_NAME
-        weightPath.write_bytes(weightPath.read_bytes()[:-4])
-        process = RecordedRun(self.build, self.datasetName, self.rgb)
-
-        with self.assertRaises(uc1_runner.Uc1ModelMismatchError) as raised:
-            self.classifyWith(process)
-
-        self.assertIn(envi.WEIGHT_VECTOR_FILE_NAME, str(raised.exception))
-        self.assertEqual(process.commands, [])
-
-    def test_missingModelFileIsNamed(self) -> None:
-        (self.build.svmModelDirectory / envi.RHO_FILE_NAME).unlink()
-
-        with self.assertRaises(uc1_runner.Uc1ModelMismatchError) as raised:
-            self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
-
-        self.assertIn(envi.RHO_FILE_NAME, str(raised.exception))
+        for fileName, expectedSize in uc1_runner.MODEL_FILE_SIZES.items():
+            with self.subTest(fileName=fileName):
+                modelPath = self.build.svmModelDirectory / fileName
+                modelPath.write_bytes(bytes(expectedSize - 1))
+                process = RecordedRun(self.build, self.datasetName, self.rgb)
+                try:
+                    with self.assertRaises(uc1_runner.Uc1ModelMismatchError) as raised:
+                        self.classifyWith(process)
+                    self.assertIn(fileName, str(raised.exception))
+                    self.assertEqual(process.commands, [])
+                finally:
+                    modelPath.write_bytes(bytes(expectedSize))
 
     def test_theStagedModelShippedWithThePipelineHasTheExpectedSizes(self) -> None:
         # The sizes above are a claim about the vendored model, so it is checked
@@ -479,6 +530,88 @@ class SceneProvenanceTest(Uc1RunnerTestCase):
 
     def test_theTwoDetailsAreDistinguishable(self) -> None:
         self.assertNotEqual(uc1_runner.SIMULATION_DETAIL, uc1_runner.SIMULATION_DETAIL_PHANTOM)
+
+    def test_sendFailureDoesNotReportACompleteMapSet(self) -> None:
+        maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
+
+        class RejectingServer:
+            def __init__(self):
+                self.calls = []
+
+            def sendImage(self, image, deviceName, metadata):
+                self.calls.append((image, deviceName, metadata))
+                return False
+
+        server = RejectingServer()
+        self.assertFalse(uc1_runner.sendMaps(server, maps))
+        self.assertEqual(len(server.calls), 1)
+
+    def test_servicePropagatesBothDatasetSceneDetails(self) -> None:
+        class Classifier:
+            def __init__(self, maps):
+                self.maps = maps
+
+            def classify(self, _dataset):
+                return self.maps
+
+        class Context:
+            def __init__(self, value):
+                self.value = value
+
+            def __enter__(self):
+                return self.value
+
+            def __exit__(self, *_args):
+                return False
+
+        class Server:
+            isConnected = True
+
+        class Interrupt:
+            requested = False
+
+        maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
+        for isPhantom, expectedDetail in (
+            (False, uc1_runner.SIMULATION_DETAIL),
+            (True, uc1_runner.SIMULATION_DETAIL_PHANTOM),
+        ):
+            with self.subTest(isPhantom=isPhantom):
+                recordPaths = ()
+                if isPhantom:
+                    recordPaths = tissue.writePhantomRecord(
+                        self.dataset.folder,
+                        tissue.phantomRegionMap(*FIXTURE_CLASS_MAP.shape),
+                    )
+                observedDetails = []
+                try:
+                    with (
+                        mock.patch.object(
+                            uc1_runner.igtl_transport,
+                            "ImageStreamServer",
+                            return_value=Context(Server()),
+                        ),
+                        mock.patch.object(
+                            uc1_runner.igtl_transport,
+                            "InterruptFlag",
+                            return_value=Context(Interrupt()),
+                        ),
+                        mock.patch.object(
+                            uc1_runner,
+                            "sendMaps",
+                            side_effect=lambda _server, _maps, detail, observed=observedDetails: (
+                                observed.append(detail) or True
+                            ),
+                        ),
+                    ):
+                        completed = uc1_runner.streamMaps(
+                            self.dataset, Classifier(maps), cycles=1, intervalSec=0.0
+                        )
+                finally:
+                    for recordPath in recordPaths:
+                        recordPath.unlink(missing_ok=True)
+
+                self.assertEqual(completed, 1)
+                self.assertEqual(observedDetails, [expectedDetail])
 
 
 class RealBinaryIntegrationTest(unittest.TestCase):

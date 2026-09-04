@@ -9,11 +9,13 @@ looks exactly like a successful one.
 from __future__ import annotations
 
 import unittest
+from importlib import metadata
 
 import numpy
 import pyigtl
 
 from stratum_sim import contract, igtl_transport
+from tests import support
 
 TEST_SAMPLES = 8
 TEST_LINES = 4
@@ -94,10 +96,16 @@ class ImageMessageShapeTest(unittest.TestCase):
         )
 
 
-class PyigtlVersionTest(unittest.TestCase):
+class DependencyConsistencyTest(unittest.TestCase):
 
-    def test_installedVersionIsReadFromDistributionMetadata(self):
+    def test_installedPyigtlMatchesTheSimulatorManifest(self):
         # pyigtl/_version.py was not bumped for the 0.3.4 release, so
         # `pyigtl.__version__` reports 0.3.2 and a check against it would record
         # a version that is simply false while continuing to pass.
-        self.assertEqual(igtl_transport.installedPyigtlVersion(), "0.3.4")
+        requirement = support.pinnedRequirement(
+            support.REPOSITORY_ROOT / "tools" / "simulators" / "requirements.txt",
+            "pyigtl",
+        )
+        _packageName, expectedVersion = requirement.split("==", 1)
+        self.assertEqual(igtl_transport.installedPyigtlVersion(), expectedVersion)
+        self.assertEqual(metadata.version("pyigtl"), expectedVersion)

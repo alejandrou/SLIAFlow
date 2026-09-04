@@ -1,4 +1,6 @@
+import time
 import unittest
+from pathlib import Path
 
 import numpy as np
 import slicer
@@ -41,6 +43,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         "_cameraSupportAvailable",
         "_cameraRestartRequired",
     )
+    EVENT_LOOP_TIMEOUT_SEC = 2.0
 
     def setUp(self) -> None:
         slicer.mrmlScene.Clear()
@@ -360,10 +363,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             CAP_PROP_FRAME_WIDTH = 30
             CAP_PROP_FRAME_HEIGHT = 40
 
-        self.assertEqual(
-            SLIAFlowLogic.OPENCV_REQUIREMENT,
-            "opencv-python-headless==5.0.0.93",
-        )
         self.assertFalse(
             SLIAFlowLogic.openCVAvailable(importer=MissingCV2Importer())
         )
@@ -395,6 +394,15 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         )
         status = slicer.util.findChild(representation, "statusLabel")
         self.assertIn("install camera support", status.text.lower())
+
+    def test_openCvRequirementMatchesExtensionManifest(self) -> None:
+        requirementsPath = Path(__file__).resolve().parents[1] / "Resources" / "requirements.txt"
+        pins = [
+            line.strip()
+            for line in requirementsPath.read_text(encoding="utf-8").splitlines()
+            if line.strip().lower().startswith("opencv-python-headless==")
+        ]
+        self.assertEqual(pins, [SLIAFlowLogic.OPENCV_REQUIREMENT])
 
     def test_cameraFrameUpdatesOnlyLiveView(self) -> None:
         class FakeCompositeNode:
@@ -497,12 +505,17 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         finally:
             widget._stopCamera(clearLiveView=True, layoutManager=layoutManager)
 
-    @staticmethod
-    def _settleEventLoop(iterations: int = 20) -> None:
-        for _iteration in range(iterations):
+    def _waitForUi(self, predicate, description: str) -> None:
+        deadline = time.monotonic() + self.EVENT_LOOP_TIMEOUT_SEC
+        while time.monotonic() < deadline:
             slicer.app.processEvents()
+            if predicate():
+                return
+        self.fail(
+            f"Timed out after {self.EVENT_LOOP_TIMEOUT_SEC:.1f} s waiting for {description}."
+        )
 
-    def test_layoutContractAndLifecycle(self) -> None:
+    def test_layoutDescriptionContract(self) -> None:
         from xml.etree import ElementTree
 
         widget = self._moduleRepresentationAndWidget()[1]
@@ -528,11 +541,19 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             [widget.LIVE_VIEW_LABEL, widget.RESULT_VIEW_LABEL],
         )
 
+    def test_headlessPresentationFallback(self) -> None:
+        if slicer.app.layoutManager() is not None:
+            self.skipTest("This test covers only Slicer's no-main-window fallback")
+        widget = self._moduleRepresentationAndWidget()[1]
+        self.assertFalse(widget._activatePresentation())
+        self.assertFalse(widget._presentationActive)
+
+    def test_layoutContractAndLifecycle(self) -> None:
+        widget = self._moduleRepresentationAndWidget()[1]
+
         layoutManager = slicer.app.layoutManager()
         if layoutManager is None:
-            self.assertFalse(widget._activatePresentation())
-            self.assertFalse(widget._presentationActive)
-            return
+            self.skipTest("Requires the maintained headful Slicer test target")
 
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         if int(layoutNode.GetViewArrangement()) == widget.CUSTOM_LAYOUT_ID:
@@ -573,10 +594,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertEqual(actor.GetInput(), widget.WAITING_RESULT_MESSAGE)
             self.assertFalse(liveRenderer.HasViewProp(actor))
 
-            self._settleEventLoop()
             resultWidget.mrmlSliceNode().Modified()
             resultWidget.sliceLogic().GetSliceCompositeNode().Modified()
-            self._settleEventLoop()
+            self._waitForUi(
+                lambda: bool(resultRenderer.HasViewProp(actor)),
+                "the waiting annotation actor to reach the result renderer",
+            )
             self.assertTrue(resultRenderer.HasViewProp(actor))
             self.assertEqual(actor.GetInput(), widget.WAITING_RESULT_MESSAGE)
 
@@ -597,8 +620,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         widget = self._moduleRepresentationAndWidget()[1]
         layoutManager = slicer.app.layoutManager()
         if layoutManager is None:
-            self.assertFalse(widget._activatePresentation())
-            return
+            self.skipTest("Requires the maintained headful Slicer test target")
 
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         emptyLayout = slicer.vtkMRMLLayoutNode.SlicerLayoutNone
@@ -1205,12 +1227,22 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertTrue(renderer.HasViewProp(bannerActor))
             self.assertTrue(renderer.HasViewProp(detailActor))
 
-            self._settleEventLoop()
             resultWidget.mrmlSliceNode().Modified()
             resultWidget.sliceLogic().GetSliceCompositeNode().Modified()
-            self._settleEventLoop()
+            # Refresh once, then wait only on what the renderer shows. Polling
+            # `_refreshResultPresentation()` would re-assert the banner on
+            # every turn of the loop, so the wait would be driving the state it
+            # claims to be observing.
             self.assertEqual(
                 widget._refreshResultPresentation()["summaryStatus"], "PASS"
+            )
+            self._waitForUi(
+                lambda: bool(
+                    widget._sliceViewRenderer(resultWidget).HasViewProp(
+                        widget._simulatedBannerActor
+                    )
+                ),
+                "the simulated banner to survive the slice view rebuild",
             )
             renderer = widget._sliceViewRenderer(resultWidget)
             self.assertTrue(renderer.HasViewProp(widget._simulatedBannerActor))

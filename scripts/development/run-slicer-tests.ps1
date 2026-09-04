@@ -3,7 +3,10 @@ param(
     # Source runs the tests against the working tree under extensions/.
     # Build runs them against the compiled copy under build/SLIAFlow/.
     [ValidateSet("Source", "Build")]
-    [string]$Target = "Source"
+    [string]$Target = "Source",
+
+    # Keep the main window for layout-manager and renderer coverage.
+    [switch]$Headful
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,9 +104,11 @@ $pythonCode = $pythonStatements -join "; "
 $slicerArguments = @(
     "--testing",
     "--no-splash",
-    "--no-main-window",
     "--disable-cli-modules"
 )
+if (-not $Headful) {
+    $slicerArguments += "--no-main-window"
+}
 if ($modulePaths.Count -gt 0) {
     $slicerArguments += "--additional-module-paths"
     $slicerArguments += $modulePaths
@@ -147,6 +152,7 @@ function ConvertTo-WindowsCommandLineArgument {
 }
 
 Write-Host "Target:            $Target"
+Write-Host "Window mode:       $(if ($Headful) { 'headful' } else { 'headless' })"
 Write-Host "Slicer executable: $slicerExecutable"
 Write-Host "Expected module:   $expectedModuleRoot"
 Write-Host "Test:              $testName"

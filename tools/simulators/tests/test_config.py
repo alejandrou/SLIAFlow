@@ -18,14 +18,23 @@ from stratum_sim import config, contract, igtl_transport
 
 BMP_ROW_ALIGNMENT_SAMPLES = 4
 
+# Documented simulator interface and integration contracts.
+DOCUMENTED_FRAME_PRESETS = {
+    "demo": (160, 120),
+    "medium": (320, 240),
+    "full": (640, 480),
+}
+DOCUMENTED_DEFAULT_BAND_COUNT = 93
+DOCUMENTED_LIVE_VIEW_PORT = 18944
+
 
 class PresetTest(unittest.TestCase):
 
     def test_demoIsTheDefaultPreset(self):
         self.assertEqual(config.DEFAULT_PRESET_NAME, "demo")
-        self.assertEqual(config.FRAME_PRESETS["demo"], (160, 120))
-        self.assertEqual(config.FRAME_PRESETS["medium"], (320, 240))
-        self.assertEqual(config.FRAME_PRESETS["full"], (640, 480))
+
+    def test_presetTableMatchesTheDocumentedInterface(self):
+        self.assertEqual(config.FRAME_PRESETS, DOCUMENTED_FRAME_PRESETS)
 
     def test_everyPresetKeepsBmpRowPaddingAtZero(self):
         for presetName, (samples, _lines) in config.FRAME_PRESETS.items():
@@ -51,10 +60,12 @@ class ConfigurationTest(unittest.TestCase):
         loaded = config.loadSimulatorConfig(self.repositoryRoot)
 
         self.assertEqual(loaded.presetName, config.DEFAULT_PRESET_NAME)
-        self.assertEqual((loaded.samples, loaded.lines), (160, 120))
-        self.assertEqual(loaded.bands, 93)
+        self.assertEqual(
+            (loaded.samples, loaded.lines), DOCUMENTED_FRAME_PRESETS["demo"]
+        )
+        self.assertEqual(loaded.bands, DOCUMENTED_DEFAULT_BAND_COUNT)
         self.assertEqual(loaded.frameSource, "synthetic")
-        self.assertEqual(loaded.liveViewPort, 18944)
+        self.assertEqual(loaded.liveViewPort, DOCUMENTED_LIVE_VIEW_PORT)
         self.assertEqual(loaded.liveViewDeviceName, "LiveView")
         self.assertTrue(loaded.rotate180)
         self.assertEqual(loaded.noiseCounts, 0)
@@ -65,7 +76,9 @@ class ConfigurationTest(unittest.TestCase):
 
         loaded = config.loadSimulatorConfig(self.repositoryRoot)
 
-        self.assertEqual((loaded.samples, loaded.lines), (320, 240))
+        self.assertEqual(
+            (loaded.samples, loaded.lines), DOCUMENTED_FRAME_PRESETS["medium"]
+        )
         self.assertEqual(loaded.liveViewPort, 19944)
         self.assertFalse(loaded.rotate180)
 

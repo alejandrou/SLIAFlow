@@ -35,12 +35,44 @@ PCA_BAND_COUNT_VALUE_INDEX = 1
 # and `MAX_PATH_LENGTH` is 128, so a longer line is split mid-parse.
 UC1_MAX_PATH_LENGTH = 128
 
+TINY_DATASET_SAMPLES = 8
+TINY_DATASET_LINES = 4
+TINY_DATASET_BANDS = 6
+
 
 UC1_SVM_MODEL_PATH = UC1_PARAMETERS_PATH.parents[2] / "svm_model"
 
 # The staged build root the build script writes, used by the tests that exercise
 # the real binary. Absent until `scripts/development/build-uc1.ps1` has run.
 STAGED_UC1_BUILD_ROOT = REPOSITORY_ROOT / "build" / "uc1" / "UC1"
+
+
+def buildTinyCubes() -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray]:
+    """Build the small ENVI fixture shared by writer and contract tests."""
+    shape = (TINY_DATASET_BANDS, TINY_DATASET_LINES, TINY_DATASET_SAMPLES)
+    voxelCount = numpy.prod(shape)
+    darkCube = numpy.full(shape, 1200, dtype=numpy.uint16)
+    whiteCube = numpy.full(shape, 51200, dtype=numpy.uint16)
+    rawCube = (
+        numpy.arange(voxelCount, dtype=numpy.uint16).reshape(shape) % 40000 + 1200
+    ).astype(numpy.uint16)
+    wavelengthsNm = numpy.linspace(400.482, 1000.73, TINY_DATASET_BANDS)
+    return rawCube, whiteCube, darkCube, wavelengthsNm
+
+
+def pinnedRequirement(requirementsPath: Path, packageName: str) -> str:
+    """Return one exact ``package==version`` pin from a requirements file."""
+    prefix = f"{packageName.lower()}=="
+    matches = [
+        line.strip()
+        for line in requirementsPath.read_text(encoding="utf-8").splitlines()
+        if line.strip().lower().startswith(prefix)
+    ]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"Expected exactly one {packageName!r} pin in {requirementsPath}, found {matches}."
+        )
+    return matches[0]
 
 
 def vendoredSvmModelDirectory() -> Path | None:
