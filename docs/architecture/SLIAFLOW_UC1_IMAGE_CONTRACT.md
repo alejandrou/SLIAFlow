@@ -181,13 +181,126 @@ attribute `OpenIGTLink.SLIAFlow.DataOrigin`.
 
 Producers send the bare names anyway. The prefix is the receiver's business,
 and changing what goes on the wire to pre-compensate would break the real
-applications the stand-ins imitate. Reconciling the two names is SLIA-008's
-job, and the attribute names SLIAFlow actually reads are established there
-rather than assumed here.
+applications the stand-ins imitate.
 
 The line above was read at commit
 `85e5f764f3ad3d4adbaa568db0104b2b8f5998e8`, which is the commit SLIA-007 pins,
 so it describes the build SLIAFlow will actually run against.
+
+#### What the pinned build actually produced
+
+The source above says what the receiver should do; the table below is what it
+did. It was recorded by connecting a bare `vtkMRMLIGTLConnectorNode` to the
+SLIA-012 stand-in on `127.0.0.1:18945` under
+`build\SLIAFlow\SlicerWithSLIAFlow.exe` and printing `GetAttributeNames()`
+and every value of each received node. All five map nodes carried exactly
+these names:
+
+```text
+OpenIGTLink.SLIAFlow.DataOrigin        = simulated
+OpenIGTLink.SLIAFlow.DeviceName        = UC1_TMD
+OpenIGTLink.SLIAFlow.ResultMap         = tmdMap
+OpenIGTLink.SLIAFlow.SimulationDetail  = arithmetic stand-in, not a classifier
+OriginalNodeName                       = UC1_TMD
+```
+
+Three things are worth keeping from that output. The prefixed spelling is the
+only spelling that appears - the bare `SLIAFlow.DataOrigin` is absent from
+every received node, so a receiver written against it would find nothing and
+would look like a transport failure. `OriginalNodeName` is written by
+OpenIGTLinkIF itself rather than by the sender, so it is not part of this
+contract and nothing reads it. And the node classes and image types the
+converter produced match the result-roles table exactly:
+
+| Device | MRML class | Components | Scalar type |
+| --- | --- | ---: | --- |
+| `UC1_TMD` | `vtkMRMLScalarVolumeNode` | 1 | `float` |
+| `UC1_MV_CLASS` | `vtkMRMLScalarVolumeNode` | 1 | `unsigned char` |
+| `UC1_MV_PROB` | `vtkMRMLScalarVolumeNode` | 1 | `float` |
+| `UC1_SVM_PROB` | `vtkMRMLVectorVolumeNode` | 4 | `float` |
+| `UC1_KNN_PROB` | `vtkMRMLVectorVolumeNode` | 4 | `float` |
+
+#### Translation into the canonical names
+
+`SLIAFlowLogic.normalizeReceivedProvenance` is the single place that reconciles
+the two spellings, and it runs before every discovery call. For each of the
+four keys it accepts the prefixed spelling and the bare one, and the prefixed
+value wins when both are present, because a bare value can only be a copy an
+earlier message left behind.
+
+The translation mirrors the wire rather than accumulating from it. The
+connector updates one MRML node in place, message after message, so for a node
+whose producer speaks the prefixed dialect a canonical attribute whose prefixed
+counterpart is absent is removed rather than left standing. Otherwise a value
+written for an earlier message would go on vouching for data that no longer
+declares it, which is the same defaulting this contract forbids arriving by a
+slower route. Nodes carrying no prefixed attribute at all are left alone: for
+them the canonical name is the wire name and there is nothing to mirror.
+
+One gap is upstream and cannot be closed here. The connector writes the keys a
+message carries and removes none, so if a producer sends provenance once and
+then stops sending it, the prefixed attributes from the earlier message remain
+on the node and SLIAFlow has no way to tell that the latest frame did not carry
+them. Producers must therefore send all four keys with every message. The
+stand-ins do.
+
+Accepting the bare spelling costs one line and is not currently exercised by
+any build; it is there so that the receiver keeps working if the pin moves to a
+build that behaves differently.
+
+Discovery, validation and the SLIA-010 origin gate read only the canonical
+`SLIAFlow.*` names and have no knowledge that a network exists. The received
+node is the one node SLIAFlow does write to, and only these four attributes:
+its image data, its name and its orientation are never touched.
+
+A received node whose provenance is absent or unrecognized after translation is
+reported invalid rather than shown, and rather than reported as a source that
+has not arrived. A node that declares no provenance attribute at all makes no
+claim and keeps the ordinary waiting state, so an unrelated scene volume that
+happens to share a device name is not announced as a broken UC1 result.
+
+### Connectors, states, and what a disconnection means
+
+SLIAFlow owns two client connectors and creates neither until the operator asks
+for it:
+
+| Link | Endpoint | Devices |
+| --- | --- | --- |
+| Acquisition | `127.0.0.1:18944` | `LiveView` |
+| UC1 | `127.0.0.1:18945` | the five map devices above |
+
+Both connector nodes carry `SLIAFlow.Owner = Connectors` and
+`SaveWithScene = false`. Only a node carrying that ownership is ever stopped
+and removed, so a connector created from the OpenIGTLinkIF panel is left alone.
+Leaving the module, closing the scene and module cleanup all stop both.
+
+The panel reports one of five states per link. `disconnected`, `connecting` and
+`receiving` are translations of the connector's own `StateOff`,
+`StateWaitConnection` and `StateConnected`; `displaying` and `invalid` are
+stronger claims about what was made of the data and are set by the result path
+rather than by the socket.
+
+A lost connection is not a reason to blank a pane that is showing an image that
+really did arrive and really did validate. The pane keeps that image and the
+status says it is no longer being updated. A pane that never held a valid image
+returns to black with its waiting message.
+
+The live pane accepts either the laptop camera or the received `LiveView`
+stream, and switching between them releases the source being left rather than
+leaving it feeding a pane that no longer shows it: the camera is stopped, and
+the reference to the received stream is dropped. The two sources are released
+differently because they are owned differently. The camera belongs to the pane
+and is torn down with it; the link belongs to the operator, who opened it with
+its own button, so changing which source the pane shows releases the pane, not
+the connection. A frame arriving while the camera is selected reaches no view.
+
+`displaying` and `invalid` are claims about a live link, so neither is reported
+while no connector exists. The received node stays in the scene after a link
+drops and is rediscovered by every later refresh, but rediscovery is not news
+from the wire and never restores a `displaying` state to a link that is gone. `LiveView` carries no
+`SLIAFlow.ResultMap`, is never discoverable as a result, and is bound only to
+the live pane; the UC1 result contract does not apply to it, but nothing
+reaches a view before it is known to be displayable.
 
 ### Provenance never travels with the endpoint
 
@@ -338,8 +451,10 @@ Provenance and validation are orthogonal. Simulated data passes through the
 identical checks and produces the identical messages, so a malformed simulated
 map is rejected exactly as a malformed genuine one is.
 
-The external source node is never modified or deleted. SLIAFlow owns a
-transient scalar display volume for scalar maps and selected SVM/KNN channels,
+The external source node is never deleted, and the only change SLIAFlow makes
+to it is writing the four canonical provenance attributes translated from the
+wire names it arrived with. Its image data, name and orientation are left
+exactly as received. SLIAFlow owns a transient scalar display volume for scalar maps and selected SVM/KNN channels,
 plus its display node and its probability and class colour nodes. These
 module-owned resources are marked `SaveWithScene = false`. While a result is
 displayed the parameter node holds exactly two MRML references: the external

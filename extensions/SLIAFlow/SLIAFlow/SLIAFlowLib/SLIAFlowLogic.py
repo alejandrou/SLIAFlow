@@ -9,6 +9,16 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
 
 from .SLIAFlowParameterNode import (
+    ACQUISITION_PORT,
+    CONNECTION_CONNECTING,
+    CONNECTION_DISCONNECTED,
+    CONNECTION_RECEIVING,
+    CONNECTOR_ACQUISITION,
+    CONNECTOR_ROLES,
+    CONNECTOR_UC1,
+    IGTL_HOST,
+    LIVE_VIEW_DEVICE_NAME,
+    RECOGNIZED_ORIGINS,
     RESULT_MAP_CHOICES,
     RESULT_MAP_DEVICE_NAMES,
     RESULT_MAP_KNN_PROB,
@@ -16,12 +26,15 @@ from .SLIAFlowParameterNode import (
     RESULT_MAP_MV_PROB,
     RESULT_MAP_SVM_PROB,
     RESULT_MAP_TMD,
+    RESULT_SOURCE_ATTRIBUTES,
     RESULT_SOURCE_DETAIL_ATTRIBUTE,
     RESULT_SOURCE_DEVICE_ATTRIBUTE,
     RESULT_SOURCE_GENUINE_ORIGIN,
     RESULT_SOURCE_ORIGIN_ATTRIBUTE,
     RESULT_SOURCE_ROLE_ATTRIBUTE,
     RESULT_SOURCE_SIMULATED_ORIGIN,
+    UC1_PORT,
+    WIRE_ATTRIBUTE_PREFIX,
     SLIAFlowParameterNode,
 )
 
@@ -49,6 +62,37 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     SIMULATION_DETAIL_MAX_CHARS = 80
     RESULT_OWNER = "ResultPresentation"
     COLOR_OWNER = "ResultPresentation"
+    CONNECTOR_OWNER = "Connectors"
+    CONNECTOR_ROLE_ATTRIBUTE = "SLIAFlow.Connector"
+    CONNECTOR_NODE_CLASS = "vtkMRMLIGTLConnectorNode"
+    CONNECTOR_NAMES = {
+        CONNECTOR_ACQUISITION: "SLIAFlow Acquisition Link",
+        CONNECTOR_UC1: "SLIAFlow UC1 Link",
+    }
+    CONNECTOR_ENDPOINTS = {
+        CONNECTOR_ACQUISITION: (IGTL_HOST, ACQUISITION_PORT),
+        CONNECTOR_UC1: (IGTL_HOST, UC1_PORT),
+    }
+    # vtkMRMLIGTLConnectorNode's state enum, mirrored so that the state
+    # translation stays testable in a Slicer that has no OpenIGTLink build.
+    # Read from OpenIGTLinkIF/MRML/vtkMRMLIGTLConnectorNode.h at the pinned
+    # commit: StateOff, StateWaitConnection, StateConnected, State_Last.
+    CONNECTOR_STATE_OFF = 0
+    CONNECTOR_STATE_WAIT_CONNECTION = 1
+    CONNECTOR_STATE_CONNECTED = 2
+    CONNECTOR_STATE_NAMES = {
+        CONNECTOR_STATE_OFF: CONNECTION_DISCONNECTED,
+        CONNECTOR_STATE_WAIT_CONNECTION: CONNECTION_CONNECTING,
+        CONNECTOR_STATE_CONNECTED: CONNECTION_RECEIVING,
+    }
+    # The connector's event ids, mirrored from the same header for the same
+    # reason: a Slicer without OpenIGTLink must still import this module.
+    CONNECTOR_CONNECTED_EVENT = 118944
+    CONNECTOR_DISCONNECTED_EVENT = 118945
+    CONNECTOR_ACTIVATED_EVENT = 118946
+    CONNECTOR_DEACTIVATED_EVENT = 118947
+    CONNECTOR_NEW_DEVICE_EVENT = 118949
+    CONNECTOR_DEVICE_MODIFIED_EVENT = 118950
     RESULT_CLASS_MIN = 1
     RESULT_CLASS_MAX = 4
     PROBABILITY_COLOR_RAMP = (
@@ -122,6 +166,10 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         self._cameraTimeoutCallback = None
         self._frameCallback = None
         self._errorCallback = None
+        # Connectors are held by the logic instance rather than looked up from
+        # the scene, so a test can inject a stand-in connector into a Slicer
+        # build that has no OpenIGTLink, and so cleanup can never miss one.
+        self._connectors: dict[str, Any] = {}
 
     @staticmethod
     def openCVAvailable(importer=importlib.import_module) -> bool:
@@ -577,6 +625,256 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
                 return volumeNode
         return None
 
+    # ------------------------------------------------------------------
+    # OpenIGTLink reception
+    #
+    # Everything that knows a network exists lives in this section. Discovery,
+    # validation and the SLIA-010 origin gate above it read canonical
+    # SLIAFlow.* attributes and nothing else.
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def openIGTLinkAvailable(cls) -> bool:
+        """Whether this Slicer build actually loaded the connector class."""
+        return hasattr(slicer, cls.CONNECTOR_NODE_CLASS)
+
+    @classmethod
+    def normalizeReceivedProvenance(cls, volumeNode=None) -> int:
+        """Translate incoming wire attributes onto the canonical names.
+
+        `vtkMRMLIGTLConnectorNode` copies every incoming metadata entry onto
+        the node as `"OpenIGTLink." + key`, unconditionally, so a message sent
+        as `SLIAFlow.DataOrigin` arrives as `OpenIGTLink.SLIAFlow.DataOrigin`
+        and the bare spelling never appears. Both spellings are accepted here:
+        the prefixed one is what the pinned build produces and is the one that
+        must work, and accepting the bare one as well costs a line and keeps
+        the receiver working if the pin ever moves to a build that behaves
+        differently.
+
+        The prefixed value wins when both are present, because the bare one can
+        only be a copy this method made from an earlier message.
+
+        The translation mirrors the wire rather than accumulating from it. For
+        a node whose producer speaks the prefixed dialect, a canonical
+        attribute whose prefixed counterpart is absent is removed, so a value
+        this method wrote for an earlier message can never go on
+        authenticating a node the wire no longer describes. Nodes carrying no
+        prefixed attribute at all are left alone, because for them the
+        canonical name is the wire name and there is nothing to mirror.
+
+        Module-owned nodes are skipped: the presentation volume carries copies
+        of these attributes and never arrives from a wire.
+        """
+        nodes = (
+            slicer.util.getNodesByClass("vtkMRMLVolumeNode")
+            if volumeNode is None
+            else [volumeNode]
+        )
+        translated = 0
+        for node in nodes:
+            if node is None or node.GetAttribute("SLIAFlow.Owner") is not None:
+                continue
+            wireValues = {
+                attribute: node.GetAttribute(WIRE_ATTRIBUTE_PREFIX + attribute)
+                for attribute in RESULT_SOURCE_ATTRIBUTES
+            }
+            speaksPrefixed = any(value is not None for value in wireValues.values())
+            for attribute, wireValue in wireValues.items():
+                current = node.GetAttribute(attribute)
+                if wireValue is None:
+                    if speaksPrefixed and current is not None:
+                        node.RemoveAttribute(attribute)
+                        translated += 1
+                    continue
+                if current == wireValue:
+                    continue
+                node.SetAttribute(attribute, wireValue)
+                translated += 1
+        return translated
+
+    @staticmethod
+    def receivedOrigin(volumeNode) -> str | None:
+        """Return the node's origin only when it is one of the two recognized.
+
+        Absent, empty or unrecognized provenance returns None. It is neither
+        genuine nor simulated, and it is never widened into a default.
+        """
+        if volumeNode is None:
+            return None
+        origin = volumeNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE)
+        return origin if origin in RECOGNIZED_ORIGINS else None
+
+    @classmethod
+    def findReceivedNode(cls, deviceName: str, nodeClass: str = "vtkMRMLVolumeNode"):
+        """Find an externally produced node by its exact device name.
+
+        The declared device attribute is authoritative; the node name is the
+        fallback for a producer that has not sent one. Matching is exact, so a
+        near-miss device name is not found rather than guessed at.
+        """
+        for node in slicer.util.getNodesByClass(nodeClass):
+            if node.GetAttribute("SLIAFlow.Owner") is not None:
+                continue
+            cls.normalizeReceivedProvenance(node)
+            declared = node.GetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE)
+            if declared == deviceName:
+                return node
+            if declared is None and node.GetName() == deviceName:
+                return node
+        return None
+
+    @classmethod
+    def findLiveViewNode(cls):
+        """Find the received `LiveView` node, whatever its provenance."""
+        return cls.findReceivedNode(LIVE_VIEW_DEVICE_NAME)
+
+    @classmethod
+    def validateLiveViewNode(cls, volumeNode) -> dict[str, Any]:
+        """Check that a received live frame can be shown, without interpreting it.
+
+        The live pane is a camera image, not a result, so the UC1 result
+        contract does not apply to it. What does apply is that nothing reaches
+        a view before it is known to be displayable.
+        """
+        if volumeNode is None:
+            return cls._resultReport("WARN", "No LiveView stream has been received.")
+        if not volumeNode.IsA("vtkMRMLVolumeNode"):
+            return cls._resultReport("FAIL", "The LiveView node is not a volume node.")
+        imageData = volumeNode.GetImageData()
+        if imageData is None or imageData.GetPointData().GetScalars() is None:
+            return cls._resultReport(
+                "FAIL",
+                "The LiveView node has no image scalar data.",
+                sourceNode=volumeNode,
+            )
+        if any(int(value) <= 0 for value in imageData.GetDimensions()):
+            return cls._resultReport(
+                "FAIL", "LiveView dimensions must be positive.", sourceNode=volumeNode
+            )
+        return cls._resultReport(
+            "PASS", "Displaying the received LiveView stream.", sourceNode=volumeNode
+        )
+
+    @classmethod
+    def unrecognizedProvenanceNode(cls, resultMap: str):
+        """Return a received node that claims this role without a valid origin.
+
+        Such a node is neither genuine nor simulated, so it is reported invalid
+        rather than shown - and rather than reported as a source that has not
+        arrived, which would read as a transport failure. A node that declares
+        no provenance at all makes no claim and keeps the ordinary waiting
+        state.
+        """
+        descriptor = cls.resultDescriptor(resultMap)
+        if descriptor is None:
+            return None
+        for node in slicer.util.getNodesByClass("vtkMRMLVolumeNode"):
+            if node.GetAttribute("SLIAFlow.Owner") is not None:
+                continue
+            cls.normalizeReceivedProvenance(node)
+            if not any(
+                node.GetAttribute(attribute) for attribute in RESULT_SOURCE_ATTRIBUTES
+            ):
+                continue
+            claimsRole = node.GetAttribute(RESULT_SOURCE_ROLE_ATTRIBUTE) == resultMap
+            claimsDevice = (
+                node.GetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE)
+                == descriptor.deviceName
+            )
+            if not (claimsRole or claimsDevice):
+                continue
+            if cls.receivedOrigin(node) is None:
+                return node
+        return None
+
+    # ------------------------------------------------------------------
+    # Connector ownership
+    # ------------------------------------------------------------------
+
+    def connectorNode(self, role: str):
+        return self._connectors.get(role)
+
+    def _createConnectorNode(self, role: str):
+        return slicer.mrmlScene.AddNewNodeByClass(
+            self.CONNECTOR_NODE_CLASS,
+            slicer.mrmlScene.GenerateUniqueName(self.CONNECTOR_NAMES[role]),
+        )
+
+    def getOrCreateConnector(self, role: str, *, connectorFactory=None):
+        """Return the module-owned client connector for one role.
+
+        Returns None when this Slicer has no OpenIGTLink build, so the module
+        stays usable as a camera-only viewer instead of failing to load.
+        """
+        if role not in CONNECTOR_ROLES:
+            raise ValueError(f"Unknown connector role: {role}")
+        connector = self._connectors.get(role)
+        if connector is not None:
+            return connector
+        if connectorFactory is None:
+            if not self.openIGTLinkAvailable():
+                return None
+            connectorFactory = self._createConnectorNode
+        connector = connectorFactory(role)
+        if connector is None:
+            return None
+        host, port = self.CONNECTOR_ENDPOINTS[role]
+        connector.SetAttribute("SLIAFlow.Owner", self.CONNECTOR_OWNER)
+        connector.SetAttribute(self.CONNECTOR_ROLE_ATTRIBUTE, role)
+        connector.SetSaveWithScene(False)
+        connector.SetTypeClient(host, port)
+        self._connectors[role] = connector
+        return connector
+
+    def startConnector(self, role: str, *, connectorFactory=None) -> str:
+        connector = self.getOrCreateConnector(role, connectorFactory=connectorFactory)
+        if connector is None:
+            return CONNECTION_DISCONNECTED
+        connector.Start()
+        return self.connectorState(role)
+
+    def stopConnector(self, role: str) -> str:
+        """Stop and drop one connector, leaving nodes this module does not own.
+
+        A connector created from the OpenIGTLinkIF panel belongs to whoever
+        created it. Only a node carrying this module's connector ownership is
+        removed from the scene.
+        """
+        connector = self._connectors.pop(role, None)
+        if connector is None:
+            return CONNECTION_DISCONNECTED
+        try:
+            connector.Stop()
+        except Exception:
+            pass
+        try:
+            if connector.GetAttribute("SLIAFlow.Owner") == self.CONNECTOR_OWNER:
+                slicer.mrmlScene.RemoveNode(connector)
+        except Exception:
+            pass
+        return CONNECTION_DISCONNECTED
+
+    def stopAllConnectors(self) -> None:
+        for role in list(self._connectors):
+            self.stopConnector(role)
+
+    @classmethod
+    def connectorStateName(cls, stateValue) -> str:
+        """Translate the connector's state enum into the panel vocabulary."""
+        try:
+            return cls.CONNECTOR_STATE_NAMES[int(stateValue)]
+        except (TypeError, ValueError, KeyError):
+            return CONNECTION_DISCONNECTED
+
+    def connectorState(self, role: str) -> str:
+        connector = self._connectors.get(role)
+        if connector is None:
+            return CONNECTION_DISCONNECTED
+        try:
+            return self.connectorStateName(connector.GetState())
+        except Exception:
+            return CONNECTION_DISCONNECTED
+
     @staticmethod
     def extractSelectedResultComponent(volumeNode, resultClass: int = 1):
         if volumeNode is None:
@@ -791,10 +1089,29 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         if resultClass is None:
             resultClass = parameterNode.resultClass
 
+        # The single translation point. Everything below reads canonical
+        # SLIAFlow.* attributes and never a wire-prefixed one, so discovery and
+        # the origin gate stay unaware that a network exists.
+        self.normalizeReceivedProvenance()
+
         sourceNode = self.findResultSource(resultMap, allowSimulated=allowSimulated)
         if sourceNode is None:
             self.clearResultReferences(parameterNode)
             descriptor = self.resultDescriptor(resultMap)
+            claimedNode = self.unrecognizedProvenanceNode(resultMap)
+            if claimedNode is not None:
+                # Reporting this as "waiting" would read as a transport
+                # failure. The data did arrive; it just does not say what it
+                # is, and a missing attribute must never widen into a default.
+                return self._resultReport(
+                    "FAIL",
+                    "A received node claims this UC1 role with absent or "
+                    "unrecognized provenance.",
+                    resultMap,
+                    claimedNode,
+                    descriptor,
+                    provenance="unrecognized",
+                )
             # The message names the provenance actually being waited for, so a
             # demo-mode operator is never told a simulated source is missing
             # under the word "genuine".

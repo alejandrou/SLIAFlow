@@ -36,11 +36,8 @@
       </item>
       <item row="0" column="1">
        <widget class="QComboBox" name="liveSourceSelector">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
         <property name="toolTip">
-         <string>Laptop Camera is the active source. A later task provides OpenIGTLink LiveView support.</string>
+         <string>Choose between the Windows laptop camera and the LiveView stream received over OpenIGTLink.</string>
         </property>
         <property name="SlicerParameterName" stdset="0">
          <string>liveSource</string>
@@ -240,6 +237,136 @@
        </widget>
       </item>
      </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="connectionsGroupBox">
+     <property name="title">
+      <string>OpenIGTLink links</string>
+     </property>
+     <layout class="QFormLayout" name="connectionsFormLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="acquisitionLinkLabel">
+        <property name="text">
+         <string>Acquisition link:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <layout class="QHBoxLayout" name="acquisitionLinkLayout">
+        <item>
+         <widget class="QPushButton" name="connectAcquisitionButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Connect as a client to the acquisition LiveView stream on 127.0.0.1:18944.</string>
+          </property>
+          <property name="text">
+           <string>Connect</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="disconnectAcquisitionButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Stop and remove the module-owned acquisition connector.</string>
+          </property>
+          <property name="text">
+           <string>Disconnect</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="acquisitionStateLabel">
+        <property name="text">
+         <string>Acquisition state:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLabel" name="acquisitionStateValueLabel">
+        <property name="text">
+         <string>disconnected</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="uc1LinkLabel">
+        <property name="text">
+         <string>UC1 link:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <layout class="QHBoxLayout" name="uc1LinkLayout">
+        <item>
+         <widget class="QPushButton" name="connectUc1Button">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Connect as a client to the UC1 map stream on 127.0.0.1:18945. The endpoint says nothing about provenance; the metadata does.</string>
+          </property>
+          <property name="text">
+           <string>Connect</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="disconnectUc1Button">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Stop and remove the module-owned UC1 connector.</string>
+          </property>
+          <property name="text">
+           <string>Disconnect</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="uc1StateLabel">
+        <property name="text">
+         <string>UC1 state:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QLabel" name="uc1StateValueLabel">
+        <property name="text">
+         <string>disconnected</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="openIGTLinkUnavailableLabel">
+     <property name="visible">
+      <bool>false</bool>
+     </property>
+     <property name="text">
+      <string>This Slicer build has no OpenIGTLink support, so the network links are unavailable. The laptop camera still works.</string>
+     </property>
+     <property name="wordWrap">
+      <bool>true</bool>
+     </property>
     </widget>
    </item>
    <item>
