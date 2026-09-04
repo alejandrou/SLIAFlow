@@ -99,9 +99,16 @@ banner; a node carrying it with no origin at all is never discovered.
 ### On-screen marking
 
 Whenever a displayed result's origin is simulated, the result view carries a
-red banner reading `SIMULATED - NOT A GENUINE UC1 RESULT` with the truncated
-detail on a smaller second line beneath it, and the panel status is prefixed
-`SIMULATED: `. The banner is a pair of text actors, because one text actor
+red banner with the truncated detail on a smaller second line beneath it, and
+the panel status is prefixed `SIMULATED: `. The headline is chosen from that
+detail. A detail beginning `real UC1 pipeline` gets `SIMULATED INPUT - REAL UC1
+PIPELINE, NOT A CLINICAL RESULT`; everything else, including an absent detail,
+gets `SIMULATED - NOT A GENUINE UC1 RESULT`. Both bar the result from clinical
+reading, and the second is the default precisely because a producer that stops
+describing itself must not be handed the softer wording. The distinction exists
+because the arithmetic stand-in is genuinely not a UC1 result, while the
+vendored pipeline run on an invented scene genuinely is one - and a banner an
+audience can see is factually wrong is a banner they stop believing. The banner is a pair of text actors, because one text actor
 carries a single text property for its whole string and so cannot render a
 second line at a smaller size. The pair is added, removed and re-asserted as a
 unit, and is re-asserted on every successful refresh, because the slice view
@@ -218,6 +225,106 @@ sender also requires `STRATUM SIMULATED CUBE` in `raw.hdr`; the explicit
 That interlock is a data-safety boundary, not evidence that any result is
 clinical. An optional `UC1_SIM_NOTICE` STRING message repeats the simulated
 provenance on the wire.
+
+## SLIA-013 genuine UC1 runner
+
+The genuine pipeline is connected by `tools/simulators/stratum_sim/uc1_runner.py`,
+which builds nothing of its own: it runs the vendored UC1 binary, compiled
+unmodified, and reads back what that binary wrote. It listens on the same
+`127.0.0.1:18945` and implements the same `Classifier` seam as the stand-in, so
+swapping one for the other is stopping a process and starting another.
+
+### A real-UC1 producer supplies one of the five roles
+
+**The genuine binary produces `majorityVotingMap` and nothing else.** `main.cu`
+writes `output/rgb/{red,green,blue}.txt` and `output/<dataset>/imageRGB.bmp`;
+`tmdMap`, `majorityVotingProbabilityMap`, `svmProbability` and `knnProbability`
+are computed on the device and then discarded, and the write that would have
+surfaced them is inside a comment block at `main.cu` lines 164-174.
+
+This is a property of the upstream binary, not of SLIAFlow. SLIAFlow's contract
+has five roles; a real-UC1 producer currently fills one of them.
+
+Three options exist for the other four, and the chosen default is the third.
+
+1. Run the real binary for `UC1_MV_CLASS` and the stand-in for the other four.
+   Rejected. It would require a loud, non-optional distinction in the
+   interface - two different `SimulationDetail` strings on two different
+   nodes - or it silently implies UC1 produced all five.
+2. Add an output path to UC1 so it writes the other four. Out of scope; it
+   needs project-owner approval and a separate task, because it means changing
+   vendored source.
+3. **Leave the four unavailable in real-UC1 mode and show the waiting state.**
+   One box, one story, nothing implied.
+
+An absent map is `None` in `Uc1Maps` and is never substituted with zeros. A
+consumer must be able to read "this producer did not produce this map" without
+being handed a fabricated one, and the real runner and the arithmetic stand-in
+are never run in the same session.
+
+### Wire metadata the real runner stamps
+
+| Key | Value |
+| --- | --- |
+| `SLIAFlow.ResultMap` | `majorityVotingMap` |
+| `SLIAFlow.DeviceName` | `UC1_MV_CLASS` |
+| `SLIAFlow.DataOrigin` | `simulated` |
+| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, synthetic input`, or `real UC1 pipeline, synthetic tissue phantom` for a phantom dataset |
+
+The origin is `simulated` even though the algorithm is genuine, and that is the
+point of `SimulationDetail` carrying the distinction. A genuine algorithm run
+over an invented scene is not a genuine clinical result, so the origin describes
+the data and the detail describes how it was produced. Header version 2 applies
+here for the same reason it applies everywhere else: at version 1 all four keys
+are silently dropped.
+
+### Recovering the class map
+
+The binary emits colour, not classes, so the class map is recovered by inverting
+the palette. The forward table SLIA-012 writes with and the inverse SLIA-013
+reads with are one definition in `bmp.py`, exported both ways, so they cannot
+drift apart. An RGB triple that is not in the table is reported with its count
+and first offending coordinates and fails the run; it is never resolved to the
+nearest known colour, because a nearest-colour fallback would turn an unexpected
+pipeline output into a plausible-looking class map.
+
+Outputs are checked for freshness rather than existence. UC1 writes the same
+three `output/rgb/*.txt` names for every dataset on every run, so an existence
+check cannot distinguish this run's output from a previous run's, and a crashed
+run that left last week's files behind would pass one. A file that predates the
+run fails it.
+
+`docs/development/uc1_local_build.md` records the build, the measured runtime and
+VRAM, and what the scene has to look like before UC1 resolves it to anything.
+
+### The input scene is part of the provenance
+
+Two scenes exist and they are not equally fake, so both streams name which one
+produced a message:
+
+| Scene | LiveView detail | Map-stream detail | What UC1 makes of it |
+| --- | --- | --- | --- |
+| channel | `acquisition stand-in, synthetic scene` | `real UC1 pipeline, synthetic input` | every pixel class 4, background |
+| tissue phantom | `acquisition stand-in, synthetic tissue phantom` | `real UC1 pipeline, synthetic tissue phantom` | two classes, coherent regions |
+
+The runner decides by looking for the phantom record in the dataset folder, not
+by taking a flag, so the detail cannot disagree with the data that was read.
+`DataOrigin` stays `simulated` in both cases: the origin describes the data and
+never softens because the algorithm is genuine.
+
+The phantom's spectra are built from a haemoglobin absorption and scattering
+model so that they have the *shape* of brain reflectance, because UC1 min-max
+normalizes each pixel across its bands before its SVM and shape is all that
+classifier ever sees. That is what makes a demonstration possible, and it is
+also what makes the labelling delicate: a red area over the phantom's
+tumour-like region **is not a detection**, and UC1 in fact fails to separate the
+phantom's cortex from its tumour-like region at all.
+`docs/development/synthetic_tissue_phantom.md` records the model, the measured
+agreement, and what may and may not be claimed.
+
+A consumer must not branch on the detail. It is display-only, it is free text,
+and a new scene will add a new string: SLIAFlow reads it to write the second
+banner line and for nothing else.
 
 ## Validation and ownership
 

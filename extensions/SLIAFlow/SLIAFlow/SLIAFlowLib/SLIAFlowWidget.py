@@ -13,8 +13,8 @@ from .SLIAFlowParameterNode import (
     RESULT_MAP_KNN_PROB,
     RESULT_MAP_SVM_PROB,
     RESULT_SOURCE_SIMULATED_ORIGIN,
-    SIMULATED_BANNER_MESSAGE,
     SLIAFlowParameterNode,
+    simulatedBannerMessage,
 )
 
 
@@ -652,13 +652,19 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if renderer is None:
             return False
 
+        # The headline depends on the detail, so it is re-asserted rather than
+        # written once: a session that switches producers must not keep the
+        # previous producer's wording over the new one's map.
+        headline = simulatedBannerMessage(detail)
         if self._simulatedBannerActor is None:
             self._simulatedBannerActor = self._createBannerActor(
-                SIMULATED_BANNER_MESSAGE,
+                headline,
                 self.SIMULATED_BANNER_FONT_SIZE,
                 self.SIMULATED_BANNER_POSITION,
                 bold=True,
             )
+        else:
+            self._simulatedBannerActor.SetInput(headline)
 
         if not detail:
             self._detachSimulatedDetail()

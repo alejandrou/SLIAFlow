@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy
 
-from . import config, contract, envi, frames, igtl_transport, spectra
+from . import config, contract, envi, frames, igtl_transport, spectra, tissue
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,23 @@ NON_CLINICAL_NOTICE = (
     "or carries diagnostic meaning."
 )
 
-SIMULATION_DETAIL = "acquisition stand-in, synthetic scene"
+PHANTOM_NOTICE = (
+    "The scene is a synthetic optical phantom: its spectra are built from a "
+    "haemoglobin absorption and scattering model so that they have the shape of "
+    "tissue reflectance. The regions are drawn geometrically. A region named "
+    "'tumour-like' is one where the blood volume fraction was set high and the "
+    "saturation low - it is not a tumour, and any class a downstream classifier "
+    "assigns to it is that classifier's output, not a detection."
+)
+
+# One string per scene mode. The two scenes are different enough that a single
+# label would hide which one produced a dataset.
+SIMULATION_DETAILS = {
+    config.SCENE_MODE_TISSUE: "acquisition stand-in, synthetic tissue phantom",
+    config.SCENE_MODE_CHANNEL: "acquisition stand-in, synthetic scene",
+}
+
+SIMULATION_DETAIL = SIMULATION_DETAILS[config.SCENE_MODE_CHANNEL]
 
 # Frames measured before the achieved rate is reported. Throughput is an
 # acceptance criterion, not an assumption: CRC over a 640x480x3 frame is not
@@ -52,8 +68,20 @@ def synthesizeDataset(
         textureFeatureCount=simulatorConfig.textureFeatureCount,
         rng=sceneRng,
     )
-    # The references are drawn once per process; per-frame noise, when it is
-    # enabled at all, comes from a seed that includes the frame index.
+    return _writeCubeAsDataset(simulatorConfig, reflectance, wavelengthsNm, datasetFolder)
+
+
+def _writeCubeAsDataset(
+    simulatorConfig: config.SimulatorConfig,
+    reflectance: numpy.ndarray,
+    wavelengthsNm: numpy.ndarray,
+    datasetFolder: Path,
+) -> envi.DatasetRef:
+    """Invert UC1's calibration for a reflectance cube and write the dataset.
+
+    The references are drawn once per process; per-frame noise, when it is
+    enabled at all, comes from a seed that includes the frame index.
+    """
     referenceRng = numpy.random.default_rng(simulatorConfig.seed)
     darkCube, whiteCube = spectra.referenceCubes(
         referenceRng, simulatorConfig.bands, simulatorConfig.lines, simulatorConfig.samples
@@ -65,8 +93,51 @@ def synthesizeDataset(
         noiseCounts=simulatorConfig.noiseCounts,
         rng=numpy.random.default_rng([simulatorConfig.seed, 0]),
     )
+    datasetRef = envi.writeDataset(datasetFolder, rawCube, whiteCube, darkCube, wavelengthsNm)
 
-    return envi.writeDataset(datasetFolder, rawCube, whiteCube, darkCube, wavelengthsNm)
+    # Every dataset write clears any phantom record already in the folder, and
+    # the phantom path then writes its own. `--dataset-folder` can point two
+    # runs at one folder, and the ENVI writer replaces only the four files it
+    # owns, so without this a channel dataset written over a phantom would keep
+    # the phantom's region map and legend and appear to be described by them.
+    removed = tissue.removePhantomRecord(datasetRef.folder)
+    if removed:
+        print(f"  Removed a stale phantom record: {', '.join(path.name for path in removed)}")
+
+    return datasetRef
+
+
+def synthesizePhantomDataset(
+    simulatorConfig: config.SimulatorConfig, datasetFolder: Path
+) -> tuple[envi.DatasetRef, numpy.ndarray, numpy.ndarray]:
+    """Build the tissue phantom, write it, and return `(dataset, frame, regions)`.
+
+    The order is the reverse of the channel scene's: the cube is built first
+    from the optical model and the LiveView frame is rendered from it. So the
+    pane and the dataset cannot drift apart - the frame is a projection of the
+    exact array that was written.
+    """
+    wavelengthsNm = spectra.bandWavelengthsNm(simulatorConfig.bands)
+    regionMap = tissue.phantomRegionMap(simulatorConfig.lines, simulatorConfig.samples)
+    reflectance = tissue.phantomReflectanceCube(regionMap, wavelengthsNm)
+
+    datasetRef = _writeCubeAsDataset(
+        simulatorConfig, reflectance, wavelengthsNm, datasetFolder
+    )
+    tissue.writePhantomRecord(datasetRef.folder, regionMap)
+
+    return datasetRef, tissue.renderFrameBgr(reflectance, wavelengthsNm), regionMap
+
+
+def describeRegionMap(regionMap: numpy.ndarray) -> str:
+    """One line naming each region of the phantom and how much of the frame it covers."""
+    total = regionMap.size
+    parts = []
+    for value in tissue.REGION_VALUES:
+        count = int((regionMap == value).sum())
+        if count:
+            parts.append(f"{tissue.REGION_NAMES[value]} {100.0 * count / total:.1f}%")
+    return ", ".join(parts)
 
 
 def reportSpectralRank(datasetRef: envi.DatasetRef) -> spectra.SpectralRankReport:
@@ -124,7 +195,8 @@ def streamLiveView(simulatorConfig: config.SimulatorConfig, frameSource) -> floa
     `tests/liveview_client.py`.
     """
     metadata = contract.liveViewMetadata(
-        SIMULATION_DETAIL, deviceName=simulatorConfig.liveViewDeviceName
+        SIMULATION_DETAILS[simulatorConfig.sceneMode],
+        deviceName=simulatorConfig.liveViewDeviceName,
     )
     framePeriodSec = 1.0 / simulatorConfig.targetFrameRate
 
@@ -189,6 +261,17 @@ def buildArgumentParser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--preset", choices=sorted(config.FRAME_PRESETS), default=None)
     parser.add_argument("--frame-source", dest="frameSource", choices=config.FRAME_SOURCE_NAMES)
+    parser.add_argument(
+        "--scene-mode",
+        dest="sceneMode",
+        choices=config.SCENE_MODE_NAMES,
+        default=None,
+        help=(
+            "'tissue' builds the cube from a haemoglobin and scattering model and renders "
+            "the LiveView frame from it; 'channel' builds the cube from a camera or "
+            "synthetic frame. Only 'channel' can carry motion or a webcam."
+        ),
+    )
     parser.add_argument("--dataset-root", dest="datasetRoot", default=None)
     parser.add_argument(
         "--dataset-folder",
@@ -241,41 +324,57 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(NON_CLINICAL_NOTICE)
+    isPhantom = simulatorConfig.sceneMode == config.SCENE_MODE_TISSUE
+    if isPhantom:
+        print(PHANTOM_NOTICE)
     print()
     print(
         f"Acquisition stand-in: preset '{simulatorConfig.presetName}' "
         f"({simulatorConfig.samples}x{simulatorConfig.lines}), "
-        f"{simulatorConfig.bands} bands, frame source '{simulatorConfig.frameSource}', "
+        f"{simulatorConfig.bands} bands, scene mode '{simulatorConfig.sceneMode}', "
+        f"frame source '{simulatorConfig.frameSource}', "
         f"pyigtl {igtl_transport.installedPyigtlVersion()}."
     )
-
-    try:
-        frameSource = frames.createFrameSource(
-            simulatorConfig.frameSource,
-            simulatorConfig.samples,
-            simulatorConfig.lines,
-            simulatorConfig.seed,
-            simulatorConfig.webcamIndex,
-        )
-    except (ImportError, RuntimeError) as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 1
-
-    firstFrame = frameSource.read()
-    if firstFrame is None:
-        print("ERROR: the frame source produced no frame.", file=sys.stderr)
-        return 1
 
     datasetFolder = (
         Path(arguments.datasetFolder).expanduser()
         if arguments.datasetFolder
         else Path(simulatorConfig.datasetRoot) / envi.datasetFolderName()
     )
-    try:
-        datasetRef = synthesizeDataset(simulatorConfig, firstFrame, datasetFolder)
-    except envi.DatasetWriteError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 1
+
+    if isPhantom:
+        try:
+            datasetRef, phantomFrame, regionMap = synthesizePhantomDataset(
+                simulatorConfig, datasetFolder
+            )
+        except envi.DatasetWriteError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        frameSource = tissue.PhantomFrameSource(phantomFrame)
+        print(f"  Phantom regions: {describeRegionMap(regionMap)}")
+    else:
+        try:
+            frameSource = frames.createFrameSource(
+                simulatorConfig.frameSource,
+                simulatorConfig.samples,
+                simulatorConfig.lines,
+                simulatorConfig.seed,
+                simulatorConfig.webcamIndex,
+            )
+        except (ImportError, RuntimeError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+
+        firstFrame = frameSource.read()
+        if firstFrame is None:
+            print("ERROR: the frame source produced no frame.", file=sys.stderr)
+            return 1
+
+        try:
+            datasetRef = synthesizeDataset(simulatorConfig, firstFrame, datasetFolder)
+        except envi.DatasetWriteError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
 
     print(f"  Dataset written: {datasetRef.folder}")
     try:

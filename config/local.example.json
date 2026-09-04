@@ -8,6 +8,7 @@
     "preset": "demo",
     "bands": 93,
     "frameSource": "synthetic",
+    "sceneMode": "tissue",
     "webcamIndex": 0,
     "liveViewPort": 18944,
     "liveViewDeviceName": "LiveView",
