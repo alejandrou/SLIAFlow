@@ -8,8 +8,9 @@ the intervals it actually spans.
 
 from __future__ import annotations
 
-import time
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from stratum_sim import acquisition_sim, spectra
 
@@ -47,18 +48,23 @@ class EnqueueRateTest(unittest.TestCase):
         # took 0.9 s, so the rate is 10 fps, not the 11.1 that dividing by the
         # frame count would report.
         frameCount = 10
-        measurementStart = time.perf_counter() - 0.9
+        measurementStart = 100.0
+        measurementEnd = 100.9
 
-        rate = acquisition_sim.enqueueRate(frameCount, measurementStart)
+        # Patch the simulator's own reference to the clock. Patching
+        # `acquisition_sim.time.perf_counter` would reach into the stdlib
+        # module every other test in the process is sharing.
+        fixedClock = SimpleNamespace(perf_counter=lambda: measurementEnd)
+        with mock.patch.object(acquisition_sim, "time", fixedClock):
+            rate = acquisition_sim.enqueueRate(frameCount, measurementStart)
 
-        self.assertAlmostEqual(rate, (frameCount - 1) / 0.9, places=1)
-        self.assertLess(rate, frameCount / 0.9)
+        expectedRate = (frameCount - 1) / (measurementEnd - measurementStart)
+        self.assertEqual(rate, expectedRate)
+        self.assertLess(rate, frameCount / (measurementEnd - measurementStart))
 
     def test_noMeasurementIsReportedAsZeroRatherThanGuessed(self):
         self.assertEqual(acquisition_sim.enqueueRate(0, None), 0.0)
-        self.assertEqual(
-            acquisition_sim.enqueueRate(1, time.perf_counter()), 0.0
-        )
+        self.assertEqual(acquisition_sim.enqueueRate(1, 100.0), 0.0)
 
 
 if __name__ == "__main__":

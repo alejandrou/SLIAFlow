@@ -6,28 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy
-
 from stratum_sim import envi
 from tests import support
 
-TEST_SAMPLES = 8
-TEST_LINES = 4
-TEST_BANDS = 6
+TEST_SAMPLES = support.TINY_DATASET_SAMPLES
+TEST_LINES = support.TINY_DATASET_LINES
+TEST_BANDS = support.TINY_DATASET_BANDS
 BYTES_PER_SAMPLE = 2
-
-
-def buildTinyCubes() -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray]:
-    shape = (TEST_BANDS, TEST_LINES, TEST_SAMPLES)
-    voxelCount = TEST_BANDS * TEST_LINES * TEST_SAMPLES
-
-    darkCube = numpy.full(shape, 1200, dtype=numpy.uint16)
-    whiteCube = numpy.full(shape, 51200, dtype=numpy.uint16)
-    rawCube = (
-        numpy.arange(voxelCount, dtype=numpy.uint16).reshape(shape) % 40000 + 1200
-    ).astype(numpy.uint16)
-    wavelengthsNm = numpy.linspace(400.482, 1000.73, TEST_BANDS)
-    return rawCube, whiteCube, darkCube, wavelengthsNm
 
 
 class DatasetWriterTest(unittest.TestCase):
@@ -38,7 +23,7 @@ class DatasetWriterTest(unittest.TestCase):
         self.addCleanup(self._temporaryDirectory.cleanup)
 
     def writeTinyDataset(self, datasetFolder: Path):
-        rawCube, whiteCube, darkCube, wavelengthsNm = buildTinyCubes()
+        rawCube, whiteCube, darkCube, wavelengthsNm = support.buildTinyCubes()
         return envi.writeDataset(datasetFolder, rawCube, whiteCube, darkCube, wavelengthsNm)
 
     def test_datasetRoundTripsThroughUc1HeaderSemantics(self):
@@ -63,7 +48,7 @@ class DatasetWriterTest(unittest.TestCase):
 
         # BSQ index is `band * totalPixels + line * samples + sample`, which is
         # exactly the C-order layout of a (bands, lines, samples) array.
-        rawCube, _, _, _ = buildTinyCubes()
+        rawCube, _, _, _ = support.buildTinyCubes()
         writtenBytes = (datasetFolder / envi.RAW_DATA_FILE_NAME).read_bytes()
         self.assertEqual(writtenBytes, rawCube.astype("<u2").tobytes())
 
@@ -104,7 +89,7 @@ class DatasetWriterTest(unittest.TestCase):
                 self.assertLess(keyIndex, wavelengthIndex)
 
     def test_writerInterlocksRefuseUnsafeTargets(self):
-        rawCube, whiteCube, darkCube, wavelengthsNm = buildTinyCubes()
+        rawCube, whiteCube, darkCube, wavelengthsNm = support.buildTinyCubes()
 
         # UC1 builds "<folder>/whiteReference.dat" with snprintf into a
         # 128-byte buffer, so an over-long folder path is truncated in silence.
@@ -113,7 +98,7 @@ class DatasetWriterTest(unittest.TestCase):
             longFolder = longFolder / "deeper-than-uc1-can-address"
         with self.assertRaises(envi.DatasetWriteError) as overLongPath:
             envi.writeDataset(longFolder, rawCube, whiteCube, darkCube, wavelengthsNm)
-        self.assertIn("128", str(overLongPath.exception))
+        self.assertIn(str(support.UC1_MAX_PATH_LENGTH), str(overLongPath.exception))
 
         # A folder whose header lacks the marker was not written by us.
         foreignFolder = self.workingRoot / "sim-20260902-131415"
@@ -131,7 +116,7 @@ class DatasetWriterTest(unittest.TestCase):
         self.writeTinyDataset(ownFolder)
 
     def test_anOccupiedFolderWithNoHeaderIsRefused(self):
-        rawCube, whiteCube, darkCube, wavelengthsNm = buildTinyCubes()
+        rawCube, whiteCube, darkCube, wavelengthsNm = support.buildTinyCubes()
 
         # No raw.hdr means no marker to check, so the marker interlock cannot
         # clear this folder - and writing would replace raw.dat regardless.

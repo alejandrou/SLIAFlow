@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy
 
 from stratum_sim import contract, envi
-from tests.test_envi import TEST_BANDS, TEST_LINES, TEST_SAMPLES, buildTinyCubes
+from tests import support
 
 
 class DatasetRefTest(unittest.TestCase):
@@ -21,7 +21,7 @@ class DatasetRefTest(unittest.TestCase):
 
     def test_datasetRefRoundTripsFromWrittenFolder(self):
         datasetFolder = self.workingRoot / "sim-20260902-101112"
-        rawCube, whiteCube, darkCube, wavelengthsNm = buildTinyCubes()
+        rawCube, whiteCube, darkCube, wavelengthsNm = support.buildTinyCubes()
 
         writtenRef = envi.writeDataset(datasetFolder, rawCube, whiteCube, darkCube, wavelengthsNm)
         loadedRef = contract.loadDataset(datasetFolder)
@@ -31,7 +31,14 @@ class DatasetRefTest(unittest.TestCase):
         self.assertEqual(loadedRef.folder, datasetFolder.resolve())
 
         calibrated = loadedRef.loadCalibratedCube()
-        self.assertEqual(calibrated.shape, (TEST_BANDS, TEST_LINES, TEST_SAMPLES))
+        self.assertEqual(
+            calibrated.shape,
+            (
+                support.TINY_DATASET_BANDS,
+                support.TINY_DATASET_LINES,
+                support.TINY_DATASET_SAMPLES,
+            ),
+        )
         self.assertEqual(calibrated.dtype, numpy.float32)
         self.assertTrue(bool(numpy.all(numpy.isfinite(calibrated))))
 

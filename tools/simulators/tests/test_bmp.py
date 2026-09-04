@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,10 @@ from pathlib import Path
 import numpy
 
 from stratum_sim import bmp
+
+BMP_FILE_HEADER_BYTES = 14
+BMP_INFO_HEADER_BYTES = 40
+BMP_PIXEL_OFFSET = BMP_FILE_HEADER_BYTES + BMP_INFO_HEADER_BYTES
 
 
 class BmpWriterTest(unittest.TestCase):
@@ -24,36 +29,37 @@ class BmpWriterTest(unittest.TestCase):
             bmp.writeBMP(outputPath, red, green, blue)
             actual = outputPath.read_bytes()
 
-        # The C code's file-size field is 54 + 3*w*h = 66. It omits the two
-        # padding bytes required at the end of each 2-pixel row.
-        expectedHeader = bytes.fromhex(
-            "42 4d 42 00 00 00 00 00 00 00 36 00 00 00"
-        ) + bytes(
-            [
-                40,
-                0,
-                0,
-                0,
-                2,
-                0,
-                0,
-                0,
-                2,
-                0,
-                0,
-                0,
-                1,
-                0,
-                24,
-                0,
-            ]
-            + [0] * 24
+        # The C code's file-size field counts the pixel bytes alone:
+        # 54 + 3*2*2 = 66, while the file is 70 bytes because each 2-pixel row
+        # of 6 bytes is padded to an 8-byte boundary.
+        declaredPixelBytes = 3 * red.shape[0] * red.shape[1]
+        expectedFileHeader = struct.pack(
+            "<2sIHHI",
+            b"BM",
+            BMP_PIXEL_OFFSET + declaredPixelBytes,
+            0,
+            0,
+            BMP_PIXEL_OFFSET,
+        )
+        expectedInfoHeader = struct.pack(
+            "<IiiHHIIiiII",
+            BMP_INFO_HEADER_BYTES,
+            red.shape[1],
+            red.shape[0],
+            1,
+            24,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         )
         expectedPixels = bytes.fromhex(
             "ff 00 00 00 00 00 00 00 "
             "00 00 ff 00 ff 00 00 00"
         )
-        self.assertEqual(actual, expectedHeader + expectedPixels)
+        self.assertEqual(actual, expectedFileHeader + expectedInfoHeader + expectedPixels)
 
     def test_classMapBmpUsesThePaletteOnTheContractShape(self) -> None:
         # The class map arrives from the contract as (1, lines, samples), so
@@ -71,8 +77,8 @@ class BmpWriterTest(unittest.TestCase):
             "ff 00 00 00 00 00 00 00 "
             "00 ff 00 00 00 ff 00 00"
         )
-        self.assertEqual(len(actual), 54 + len(expectedPixels))
-        self.assertEqual(actual[54:], expectedPixels)
+        self.assertEqual(len(actual), BMP_PIXEL_OFFSET + len(expectedPixels))
+        self.assertEqual(actual[BMP_PIXEL_OFFSET:], expectedPixels)
 
     def test_paletteRoundTripsForAllClasses(self) -> None:
         classMap = numpy.array([[1, 2], [3, 4]], dtype=numpy.uint8)
