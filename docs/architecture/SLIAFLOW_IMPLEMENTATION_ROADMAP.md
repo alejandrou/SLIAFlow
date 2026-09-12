@@ -73,7 +73,18 @@ flowchart LR
 | 11 | `SLIA-007` | Independently built SlicerOpenIGTLink dependency |
 | 12 | `SLIA-008` | LiveView and UC1 OpenIGTLink reception |
 | 13 | `SLIA-014` | End-to-end hardware-free workflow verification |
-| 14 | `SLIA-009` | Camera-only demonstration and operator runbook |
+| 14 | `SLIA-016` | Link state that follows the socket, not the connector object |
+| 15 | `SLIA-023` | Recorded HSI cubes accepted; acquisition trigger stand-in |
+| 16 | `SLIA-022` | Six-panel operator surface with a capture button |
+| 17 | `SLIA-024` | UC1 result over a colour image derived from its own cube (MS5 point 2) |
+| 18 | `SLIA-021` | UC2 blood-vessel enhancement as an independent producer (MS5 point 3) |
+| 19 | `SLIA-009` | Camera-only demonstration and operator runbook |
+
+Orders 14 to 18 are the WP5 demonstrator, planned in
+`docs/architecture/WP5_MS5_DEMO_PLAN.md`. That document is the authority on their
+scope, the six-view layout and the port reservations; this table is the order.
+`SLIA-017` and `SLIA-018` remain open and are worth taking before order 16, since
+the demonstrator runs seven ports where the verified session ran two.
 
 SLIA-010 to SLIA-013 stand in for the unavailable hyperspectral camera. The
 stand-ins are separate processes outside `extensions/`, so the rule that SLIAFlow
@@ -83,6 +94,19 @@ permanent on-view banner. SLIA-013 runs the genuine UC1 CUDA pipeline on a
 synthetic cube, so only the scene is simulated. Swapping a stand-in for the real
 application is a matter of stopping one process and starting another on the same
 port.
+
+SLIA-014 verifies that claim rather than restating it. The whole workflow is run
+on one machine with no hyperspectral camera - the acquisition stand-in on
+`127.0.0.1:18944`, a map producer on `127.0.0.1:18945`, SLIAFlow receiving both -
+and the map producer is then swapped for a different one on the same port with no
+change to SLIAFlow. The procedure and its recorded evidence are in
+`docs/development/end_to_end_verification.md`.
+
+When real hardware arrives, nothing inside `extensions/` changes. The acquisition
+application takes over port 18944 and the genuine UC1 pipeline keeps port 18945.
+The only change on the producers' side is provenance: a map computed from a real
+cube travels as `SLIAFlow.DataOrigin = external-genuine` with no simulation
+detail, and SLIAFlow then displays it with no banner and without demo mode.
 
 The first demonstrable checkpoint is reached after SLIA-005. Tasks are completed
 one at a time so that each visible behavior can be verified in Slicer before the
@@ -99,8 +123,15 @@ The module panel uses the following defaults:
 - UC1 endpoint: `127.0.0.1:18945`
 - Result status: `Waiting for genuine UC1 result`
 
-The live and result images are placed in separate views. They are not overlaid
-because the laptop RGB image and HSI-derived maps are not registered.
+The live and result images were originally placed in separate views, on the
+grounds that the laptop RGB image and HSI-derived maps are not registered.
+`docs/architecture/decisions/ADR-0001-overlay-result-on-cube-derived-rgb.md`
+supersedes that decision and narrows it: an algorithm result may be composited
+over a background **derived from the same hyperspectral cube it was computed
+from**, which is registered with it by construction, and may never be composited
+over the laptop camera, which is not. SLIAFlow performs no registration or
+resampling; its only run-time safeguard is a refusal to composite images of
+different dimensions.
 
 ## OpenIGTLink contract
 
@@ -114,6 +145,27 @@ The networking tasks use these device names and data shapes:
 | `UC1_MV_PROB` | One-component `float32` in `[0,1]` |
 | `UC1_SVM_PROB` | Four-component `float32` in `[0,1]` |
 | `UC1_KNN_PROB` | Four-component `float32` in `[0,1]` |
+| `UC1_RGB` | Three-component `uint8`, composed from the cube's 710/540/480 nm bands (`SLIA-024`) |
+| `UC2_BV` | Three-component `uint8`, the PNG UC2 writes, as written (`SLIA-021`) |
+| `HSCube` | The captured cube, `uint16` (`SLIA-023`) |
+| `Control` | `STRING`, bidirectional: capture trigger and readiness (`SLIA-023`) |
+
+Ports, one per channel:
+
+| Port | Channel | State |
+| ---: | --- | --- |
+| 18944 | `LiveView` | In use |
+| 18945 | `UC1_MV_CLASS` and `UC1_RGB` | In use; `UC1_RGB` added by `SLIA-024` |
+| 18946 | `UC2_BV` | `SLIA-021` |
+| 18947 | `HSCube` | `SLIA-023` |
+| 18948 | `Stereoscopic` | **Reserved. No producer. Black panel with its reason.** |
+| 18949 | `UC2_STO2` | **Reserved. No algorithm. Black panel with its reason.** |
+| 18950 | `Control` | `SLIA-023` producer side, `SLIA-022` Slicer side |
+
+`UC1_RGB` shares port 18945 with `UC1_MV_CLASS` deliberately. One producer
+sending a result and its background from one cube over one connection makes
+"same capture" a property of the transport rather than an assumption. See
+`ADR-0001`.
 
 Class values are normal (1), tumour (2), hypervascularized (3), and background
 (4). SVM and KNN maps require a class selector because they contain four

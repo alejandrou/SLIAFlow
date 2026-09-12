@@ -107,6 +107,11 @@ With the simulator running, in a second shell:
 It prints the device name, image shape, scalar type, header version, the
 provenance metadata, and the achieved frame rate.
 
+Only one client at a time. `pyigtl.OpenIGTLinkServer` is a plain
+`socketserver.TCPServer`, so the simulator serves a single connection and any
+second client waits unserved until the first one goes away. Run this client with
+SLIAFlow's acquisition link disconnected, not alongside it.
+
 The rate this client reports is the one to trust. The simulator's own figure
 counts frames handed to `send_message(wait=False)`, which returns as soon as the
 message is queued on the writer thread, so it is an upper bound on delivered
@@ -236,6 +241,16 @@ layout, the expected warnings, the measured runtime and VRAM, and what the scene
 has to look like for UC1 to produce anything but background.
 `docs/development/uc1_demo_runbook.md` is the order to run all of this in when
 someone is watching, and the output each step should print.
+`docs/development/end_to_end_verification.md` is the verification procedure for
+running both producers and SLIAFlow together, including the producer swap on
+port 18945 that shows SLIAFlow following the data rather than the endpoint.
+`.\scripts\developmentun-end-to-end-session.ps1` runs that whole session from
+one console: it checks both ports are free, starts both producers in order, tails
+their output side by side, reports how many clients each port has, starts Slicer,
+and swaps the map producer on a keypress. Use it rather than opening a shell per
+producer; the procedure document keeps the by-hand commands as well.
+`docs/development/pipeline_test_quickstart.md` is the short version: the command,
+what a good startup looks like, the session keys, and what to do when it fails.
 
 ## Configuration
 
