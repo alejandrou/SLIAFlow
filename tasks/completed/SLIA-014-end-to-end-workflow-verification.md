@@ -1,7 +1,7 @@
 ---
 id: SLIA-014
 title: End-to-end hardware-free workflow verification
-status: active
+status: completed
 branch: feature/SLIA-014-end-to-end-workflow-verification
 priority: high
 depends_on: SLIA-008, SLIA-013
