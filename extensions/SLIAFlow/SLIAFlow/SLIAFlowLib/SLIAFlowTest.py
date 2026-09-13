@@ -80,6 +80,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             None if resultSourceValueLabel is None else resultSourceValueLabel.text
         )
         self._widgetStateBackup = backup
+        # Link history is deliberately preserved by production cleanup so a
+        # retained image cannot become fresh merely because the module was
+        # reopened. Each test still needs an isolated link session.
+        for role in (CONNECTOR_ACQUISITION, CONNECTOR_UC1):
+            widget._linkDropped[role] = False
+            widget._linkDropSnapshots[role] = None
 
     def tearDown(self) -> None:
         super().tearDown()
@@ -90,6 +96,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         for name in self.WIDGET_STATE_FIELDS:
             setattr(widget, name, backup[name])
         widget._disconnectAllLinks()
+        for role in (CONNECTOR_ACQUISITION, CONNECTOR_UC1):
+            widget._linkDropped[role] = False
+            widget._linkDropSnapshots[role] = None
         widget._refreshCameraControls()
         widget._configureResultControls()
         if backup["status"] is not None:
@@ -1677,9 +1686,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             RESULT_SOURCE_GENUINE_ORIGIN,
         )
         liveNode = self._receivedLiveViewVolume()
-        widget.logic.getOrCreateConnector(
+        connector = widget.logic.getOrCreateConnector(
             CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
         )
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
 
         widget._activatePresentation()
         try:
@@ -1729,9 +1739,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self._validResultValues(RESULT_MAP_TMD),
             RESULT_SOURCE_GENUINE_ORIGIN,
         )
-        widget.logic.getOrCreateConnector(
+        connector = widget.logic.getOrCreateConnector(
             CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
         )
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
 
         self.assertEqual(
             widget._refreshResultPresentation()["summaryStatus"], "PASS"
@@ -1739,17 +1750,21 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         self.assertTrue(widget._resultEverDisplayed)
         displayedNodeID = widget._parameterNode.resultVolume.GetID()
 
-        # A lost link keeps what was valid, and says so.
-        widget._onLinkDisconnected(CONNECTOR_UC1)
+        # An active client retries after a peer loss, so the connector reports
+        # WAIT_CONNECTION rather than OFF while the retained result is stale.
+        connector.state = widget.logic.CONNECTOR_STATE_WAIT_CONNECTION
+        widget._onConnectorEvent(
+            CONNECTOR_UC1, widget.logic.CONNECTOR_DISCONNECTED_EVENT
+        )
         self.assertEqual(
-            widget.connectionState(CONNECTOR_UC1), CONNECTION_DISCONNECTED
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_CONNECTING
         )
         self.assertEqual(
             widget._parameterNode.resultVolume.GetID(),
             displayedNodeID,
             "A disconnection discarded a result that had already validated",
         )
-        self.assertIn("disconnected", widget.ui.resultStatusLabel.text.lower())
+        self.assertIn("not connected", widget.ui.resultStatusLabel.text.lower())
         self.assertNotIn("PASS", widget.ui.resultStatusLabel.text)
 
         # Data that arrives and fails the contract does not stay on screen.
@@ -1760,10 +1775,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         self.assertEqual(report["summaryStatus"], "FAIL", report)
         self.assertFalse(widget._resultEverDisplayed)
         self.assertIsNone(widget._parameterNode.resultVolume)
-        self.assertEqual(widget.connectionState(CONNECTOR_UC1), CONNECTION_INVALID)
+        self.assertEqual(widget.connectionState(CONNECTOR_UC1), CONNECTION_CONNECTING)
 
         # And a link that drops with nothing valid ever shown returns to black.
-        widget._onLinkDisconnected(CONNECTOR_UC1)
+        widget._onConnectorEvent(
+            CONNECTOR_UC1, widget.logic.CONNECTOR_DISCONNECTED_EVENT
+        )
         self.assertIn("waiting", widget.ui.resultStatusLabel.text.lower())
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
@@ -1774,6 +1791,198 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                     .GetSliceCompositeNode()
                     .GetBackgroundVolumeID()
                 )
+
+    def test_reconnectDoesNotRedisplayRetainedResultBeforeNewData(self) -> None:
+        """A reconnect stays stale until the received node changes."""
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        sourceNode = self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        connector = widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
+        )
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
+
+        self.assertEqual(
+            widget._refreshResultPresentation()["summaryStatus"], "PASS"
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_DISPLAYING
+        )
+
+        connector.state = widget.logic.CONNECTOR_STATE_WAIT_CONNECTION
+        unobservedReport = widget._refreshResultPresentation()
+        self.assertEqual(unobservedReport["summaryStatus"], "PASS", unobservedReport)
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_CONNECTING
+        )
+        self.assertIn("not connected", widget.ui.resultStatusLabel.text.lower())
+        self.assertNotIn("PASS", widget.ui.resultStatusLabel.text)
+
+        widget._onConnectorEvent(
+            CONNECTOR_UC1, widget.logic.CONNECTOR_DISCONNECTED_EVENT
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_CONNECTING
+        )
+        self.assertIn("not connected", widget.ui.resultStatusLabel.text.lower())
+
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
+        widget._onConnectorEvent(
+            CONNECTOR_UC1, widget.logic.CONNECTOR_CONNECTED_EVENT
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_RECEIVING
+        )
+
+        retainedReport = widget._refreshResultPresentation()
+        self.assertEqual(retainedReport["summaryStatus"], "PASS", retainedReport)
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_RECEIVING
+        )
+        self.assertIn("not connected", widget.ui.resultStatusLabel.text.lower())
+        self.assertNotIn("PASS", widget.ui.resultStatusLabel.text)
+
+        slicer.util.updateVolumeFromArray(
+            sourceNode,
+            self._validResultValues(RESULT_MAP_TMD) + np.float32(0.1),
+        )
+        widget._presentationActive = True
+        widget._lastResultRefreshTime = 0.0
+        widget._onConnectorEvent(
+            CONNECTOR_UC1, widget.logic.CONNECTOR_DEVICE_MODIFIED_EVENT
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1), CONNECTION_DISPLAYING
+        )
+        self.assertIn("PASS", widget.ui.resultStatusLabel.text)
+
+    def test_reconnectDoesNotRedisplayRetainedLiveFrameBeforeNewData(self) -> None:
+        """The live path applies the same reconnect gate as the result path."""
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.liveSource = LIVE_SOURCE_IGTL
+        liveNode = self._receivedLiveViewVolume()
+        connector = widget.logic.getOrCreateConnector(
+            CONNECTOR_ACQUISITION, connectorFactory=lambda role: self._FakeConnector()
+        )
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
+
+        firstReport = widget._displayLiveViewNode()
+        self.assertEqual(firstReport["summaryStatus"], "PASS", firstReport)
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_DISPLAYING
+        )
+        connector.state = widget.logic.CONNECTOR_STATE_WAIT_CONNECTION
+        widget._onConnectorEvent(
+            CONNECTOR_ACQUISITION, widget.logic.CONNECTOR_DISCONNECTED_EVENT
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_CONNECTING
+        )
+        self.assertIn("not connected", widget.ui.statusLabel.text.lower())
+
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
+        widget._onConnectorEvent(
+            CONNECTOR_ACQUISITION, widget.logic.CONNECTOR_CONNECTED_EVENT
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_RECEIVING
+        )
+
+        retainedReport = widget._displayLiveViewNode()
+        self.assertEqual(retainedReport["summaryStatus"], "PASS", retainedReport)
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_RECEIVING
+        )
+        self.assertIn("not connected", widget.ui.statusLabel.text.lower())
+
+        frame = np.zeros((1, 4, 6, 3), dtype=np.uint8)
+        frame[..., 1] = 180
+        slicer.util.updateVolumeFromArray(liveNode, frame)
+        widget._onConnectorEvent(
+            CONNECTOR_ACQUISITION, widget.logic.CONNECTOR_DEVICE_MODIFIED_EVENT
+        )
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_DISPLAYING
+        )
+        self.assertNotIn("not connected", widget.ui.statusLabel.text.lower())
+
+    def test_staleWordingSurvivesBrowsingAfterADrop(self) -> None:
+        """Pane-level resets do not make a retained image fresh again.
+
+        Browsing to a map with no data, or toggling the live source, resets
+        the "ever displayed" flags. Coming back to the retained image over a
+        dropped link must still say it is not being updated.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        widget._parameterNode.liveSource = LIVE_SOURCE_IGTL
+        self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        self._receivedLiveViewVolume()
+        connectors = {
+            role: widget.logic.getOrCreateConnector(
+                role, connectorFactory=lambda role: self._FakeConnector()
+            )
+            for role in (CONNECTOR_UC1, CONNECTOR_ACQUISITION)
+        }
+        for connector in connectors.values():
+            connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
+        self.assertEqual(widget._refreshResultPresentation()["summaryStatus"], "PASS")
+        self.assertEqual(widget._displayLiveViewNode()["summaryStatus"], "PASS")
+
+        for role, connector in connectors.items():
+            connector.state = widget.logic.CONNECTOR_STATE_WAIT_CONNECTION
+            widget._onConnectorEvent(role, widget.logic.CONNECTOR_DISCONNECTED_EVENT)
+
+        widget._parameterNode.resultMap = RESULT_MAP_SVM_PROB
+        self.assertEqual(widget._refreshResultPresentation()["summaryStatus"], "WARN")
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self.assertEqual(widget._refreshResultPresentation()["summaryStatus"], "PASS")
+        self.assertEqual(widget.connectionState(CONNECTOR_UC1), CONNECTION_CONNECTING)
+        self.assertIn("not connected", widget.ui.resultStatusLabel.text.lower())
+        self.assertNotIn("PASS", widget.ui.resultStatusLabel.text)
+
+        widget.ui.liveSourceSelector.setCurrentText(LIVE_SOURCE_LAPTOP)
+        widget._onLiveSourceChanged()
+        widget.ui.liveSourceSelector.setCurrentText(LIVE_SOURCE_IGTL)
+        widget._onLiveSourceChanged()
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_ACQUISITION), CONNECTION_CONNECTING
+        )
+        self.assertIn("not connected", widget.ui.statusLabel.text.lower())
+
+    def test_waitingConnectorLeavesNoStaleHistory(self) -> None:
+        """A connector that never connected does not caption a later result."""
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        connector = widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
+        )
+        connector.state = widget.logic.CONNECTOR_STATE_WAIT_CONNECTION
+        widget._onConnectorEvent(
+            CONNECTOR_UC1, widget.logic.CONNECTOR_DISCONNECTED_EVENT
+        )
+        self.assertFalse(widget._linkDropped[CONNECTOR_UC1])
+
+        self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        self.assertEqual(widget._refreshResultPresentation()["summaryStatus"], "PASS")
+        self.assertEqual(widget.connectionState(CONNECTOR_UC1), CONNECTION_CONNECTING)
+        self.assertIn("PASS", widget.ui.resultStatusLabel.text)
 
     def test_connectorLifecycleIsCleanAcrossTransitions(self) -> None:
         """Connectors are configured, stopped and dropped without leaking.
@@ -1964,9 +2173,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self._validResultValues(RESULT_MAP_TMD),
             RESULT_SOURCE_GENUINE_ORIGIN,
         )
-        widget.logic.getOrCreateConnector(
+        connector = widget.logic.getOrCreateConnector(
             CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
         )
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
         self.assertEqual(
             widget._refreshResultPresentation()["summaryStatus"], "PASS"
         )
@@ -1992,8 +2202,36 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             CONNECTION_DISCONNECTED,
             "A refresh after a disconnection reported the link as displaying",
         )
-        self.assertIn("disconnected", widget.ui.resultStatusLabel.text.lower())
+        self.assertIn("not connected", widget.ui.resultStatusLabel.text.lower())
         self.assertNotIn("PASS", widget.ui.resultStatusLabel.text)
+
+    def test_nonConnectedConnectorDoesNotReportInvalid(self) -> None:
+        """A non-connected connector is not an invalid live link."""
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            np.array([[[7.5, 0.2], [0.3, 0.4]]], dtype=np.float32),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        connector = widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
+        )
+        for state, expected in (
+            (widget.logic.CONNECTOR_STATE_OFF, CONNECTION_DISCONNECTED),
+            (widget.logic.CONNECTOR_STATE_WAIT_CONNECTION, CONNECTION_CONNECTING),
+        ):
+            with self.subTest(state=state):
+                connector.state = state
+                report = widget._refreshResultPresentation()
+
+                self.assertEqual(report["summaryStatus"], "FAIL", report)
+                self.assertEqual(
+                    widget.connectionState(CONNECTOR_UC1),
+                    expected,
+                    "A non-connected connector was reported as an invalid live link",
+                )
 
     def test_acquisitionLinkReportsDisplayingAndInvalid(self) -> None:
         """Both links expose all five states, not just the socket's three."""
@@ -2001,9 +2239,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         widget.initializeParameterNode()
         widget._parameterNode.liveSource = LIVE_SOURCE_IGTL
         liveNode = self._receivedLiveViewVolume()
-        widget.logic.getOrCreateConnector(
+        connector = widget.logic.getOrCreateConnector(
             CONNECTOR_ACQUISITION, connectorFactory=lambda role: self._FakeConnector()
         )
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
 
         self.assertEqual(widget._displayLiveViewNode()["summaryStatus"], "PASS")
         self.assertEqual(

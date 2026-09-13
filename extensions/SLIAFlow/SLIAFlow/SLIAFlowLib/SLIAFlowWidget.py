@@ -16,6 +16,7 @@ from .SLIAFlowParameterNode import (
     CONNECTION_DISCONNECTED,
     CONNECTION_DISPLAYING,
     CONNECTION_INVALID,
+    CONNECTION_RECEIVING,
     CONNECTOR_ACQUISITION,
     CONNECTOR_UC1,
     LIVE_SOURCE_CHOICES,
@@ -79,11 +80,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         "it is, so it is not displayed."
     )
     RESULT_STALE_STATUS = _(
-        "The UC1 link is disconnected. The last valid result is still shown "
+        "The UC1 link is not connected. The last valid result is still shown "
         "and is not being updated."
     )
     LIVE_STALE_STATUS = _(
-        "The acquisition link is disconnected. The last received frame is "
+        "The acquisition link is not connected. The last received frame is "
         "still shown and is not being updated."
     )
     OPENIGTLINK_UNAVAILABLE_STATUS = _(
@@ -146,12 +147,22 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # disconnection looks like: a stale last image, or black.
         self._resultEverDisplayed = False
         self._liveViewEverDisplayed = False
-        # Whether a link was established and then lost. It separates "no link"
-        # from "the link dropped": data that never came from a link must not
-        # be captioned as though one had failed.
+        # Whether a link that had connected or presented data was then lost.
+        # A connector that only ever waited leaves no history. Connector state is the
+        # authority for what the wire is doing now; this history keeps a
+        # retained node stale until a later received node update proves that
+        # the current connection has delivered new data.
         self._linkDropped = {
             CONNECTOR_ACQUISITION: False,
             CONNECTOR_UC1: False,
+        }
+        # A reconnect must not promote the node left by the previous socket.
+        # Store its identity and modification time at disconnect so that an
+        # actual update from the new socket can clear _linkDropped without
+        # mistaking a map selection change for new wire data.
+        self._linkDropSnapshots = {
+            CONNECTOR_ACQUISITION: None,
+            CONNECTOR_UC1: None,
         }
         self._lastResultSimulated = False
         self._lastResultRefreshTime = 0.0
@@ -526,7 +537,6 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._setStatus(self.OPENIGTLINK_UNAVAILABLE_STATUS)
             return CONNECTION_DISCONNECTED
         self._observeConnector(role, connector)
-        self._linkDropped[role] = False
         state = self.logic.startConnector(role)
         self._setConnectionState(role, state or CONNECTION_CONNECTING)
         return state
@@ -545,11 +555,14 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         for role in (CONNECTOR_ACQUISITION, CONNECTOR_UC1):
             connector = self.logic.connectorNode(role)
+            hadSession = connector is not None and self._linkHadSession(role)
             if connector is not None:
                 self.removeObservers(self._connectorCallback(role))
             self.logic.stopConnector(role)
             self._connectionStates[role] = CONNECTION_DISCONNECTED
-            self._linkDropped[role] = False
+            if hadSession:
+                self._linkDropped[role] = True
+                self._rememberLinkDrop(role)
         if hasattr(self, "ui"):
             self._refreshConnectionControls()
 
@@ -583,10 +596,25 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _onConnectorEvent(self, role: str, event=None) -> None:
         if self.logic is None:
             return
-        if event == self.logic.CONNECTOR_DISCONNECTED_EVENT:
+        # A client that loses its peer reports WaitConnection with
+        # DisconnectedEvent; a stopped connector reports Off with
+        # DeactivatedEvent. Both are losses, and both are handled before the
+        # panel state is overwritten so the loss can see what the link was.
+        if event in (
+            self.logic.CONNECTOR_DISCONNECTED_EVENT,
+            self.logic.CONNECTOR_DEACTIVATED_EVENT,
+        ):
             self._onLinkDisconnected(role)
             return
         self._setConnectionState(role, self.logic.connectorState(role))
+        # A connected event only says that the socket is back. The node left
+        # in the scene is not a new message, so leave it stale until a device
+        # modification event arrives for a new frame/result.
+        if event in (
+            self.logic.CONNECTOR_CONNECTED_EVENT,
+            self.logic.CONNECTOR_ACTIVATED_EVENT,
+        ):
+            return
         if role == CONNECTOR_ACQUISITION:
             if self._liveSource() == LIVE_SOURCE_IGTL:
                 self._displayLiveViewNode()
@@ -626,15 +654,113 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._lastResultRefreshTime = time.monotonic()
         self._refreshResultPresentation()
 
-    def _linkPresent(self, role: str) -> bool:
-        """Whether a module-owned connector for this link currently exists.
+    def _linkConnected(self, role: str) -> bool:
+        """Whether this link's connector currently reports StateConnected.
 
         `displaying` and `invalid` are claims about a live link. Without a
-        connector there is nothing to make them about, so the panel keeps
-        saying `disconnected` however often the retained scene node is
-        rediscovered.
+        connected connector there is nothing to make them about, so the panel
+        keeps reporting the connector's `disconnected` or `connecting` state
+        however often the retained scene node is rediscovered.
         """
-        return self.logic is not None and self.logic.connectorNode(role) is not None
+        return (
+            self.logic is not None
+            and self.logic.connectorState(role) == CONNECTION_RECEIVING
+        )
+
+    def _linkSelectionKey(self, role: str):
+        if role == CONNECTOR_UC1 and self._parameterNode is not None:
+            return self._parameterNode.resultMap
+        return None
+
+    def _linkSourceNode(self, role: str):
+        if self.logic is None:
+            return None
+        if role == CONNECTOR_ACQUISITION:
+            return self.logic.findLiveViewNode()
+        if self._parameterNode is None:
+            return None
+        descriptor = self.logic.resultDescriptor(self._parameterNode.resultMap)
+        if descriptor is None:
+            return None
+        return self.logic.findReceivedNode(descriptor.deviceName)
+
+    def _linkSourceSignature(self, role: str):
+        node = self._linkSourceNode(role)
+        if node is None:
+            return None
+        try:
+            return node.GetID(), int(node.GetMTime())
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return None
+
+    def _rememberLinkDrop(self, role: str) -> None:
+        self._linkDropSnapshots[role] = (
+            self._linkSelectionKey(role),
+            self._linkSourceSignature(role),
+        )
+
+    def _linkHadSession(self, role: str) -> bool:
+        """Whether losing this link now leaves presented data stale.
+
+        A link that reached StateConnected, or a pane that is holding an image,
+        has something a loss makes stale. A connector that only ever waited has
+        delivered nothing, so a result shown later was not captioned by it.
+        This is judged from the panel's own record, so it must be asked before
+        the loss overwrites the panel state.
+        """
+        retainedPresentation = (
+            self._liveViewEverDisplayed
+            if role == CONNECTOR_ACQUISITION
+            else self._resultEverDisplayed
+        )
+        return retainedPresentation or self.connectionState(role) in (
+            CONNECTION_RECEIVING,
+            CONNECTION_DISPLAYING,
+            CONNECTION_INVALID,
+        )
+
+    def _recordUnobservedLinkDrop(self, role: str) -> None:
+        """Preserve stale history if a refresh sees the socket drop first.
+
+        The connector normally emits DisconnectedEvent before a refresh runs,
+        but a refresh can be queued in the same event-loop turn. The previous
+        panel state is enough to distinguish a link that had been connected
+        from a pre-existing scene node that never belonged to a link.
+        """
+        if self._linkConnected(role) or self.connectionState(role) not in (
+            CONNECTION_RECEIVING,
+            CONNECTION_DISPLAYING,
+            CONNECTION_INVALID,
+        ):
+            return
+        self._linkDropped[role] = True
+        self._rememberLinkDrop(role)
+
+    def _linkHasFreshData(self, role: str) -> bool:
+        """Clear stale history only after a connected link changes its node.
+
+        OpenIGTLink reuses the same MRML node for subsequent messages. A node
+        already present when the socket reconnects is therefore not enough to
+        prove that the new socket has delivered anything. Comparing the node
+        ID and MTime also prevents an update for another selected result map
+        from reviving this map's old image.
+        """
+        if not self._linkDropped.get(role, False) or not self._linkConnected(role):
+            return not self._linkDropped.get(role, False)
+        snapshot = self._linkDropSnapshots.get(role)
+        if snapshot is None:
+            return False
+        selectionKey, sourceSignature = snapshot
+        currentKey = self._linkSelectionKey(role)
+        currentSignature = self._linkSourceSignature(role)
+        if currentKey != selectionKey:
+            self._linkDropSnapshots[role] = (currentKey, currentSignature)
+            return False
+        if currentSignature is None or currentSignature == sourceSignature:
+            return False
+        self._linkDropped[role] = False
+        self._linkDropSnapshots[role] = None
+        return True
 
     def _onLinkDisconnected(self, role: str) -> None:
         """Report the loss without throwing away what was already valid.
@@ -644,8 +770,16 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         to say the image is no longer being updated. Only a pane that never had
         a valid image returns to black.
         """
-        self._setConnectionState(role, CONNECTION_DISCONNECTED)
-        self._linkDropped[role] = True
+        hadSession = self._linkHadSession(role)
+        state = (
+            self.logic.connectorState(role)
+            if self.logic is not None
+            else CONNECTION_DISCONNECTED
+        )
+        self._setConnectionState(role, state)
+        if hadSession:
+            self._linkDropped[role] = True
+            self._rememberLinkDrop(role)
         if role == CONNECTOR_UC1:
             if self._resultEverDisplayed:
                 self._setResultStatus("WARN", self._staleResultStatus())
@@ -673,8 +807,14 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return self.RESULT_STALE_STATUS
 
     def _setConnectionState(self, role: str, state: str) -> None:
-        self._connectionStates[role] = state or CONNECTION_DISCONNECTED
-        self._refreshConnectionControls()
+        newState = state or CONNECTION_DISCONNECTED
+        changed = self._connectionStates.get(role) != newState
+        self._connectionStates[role] = newState
+        # Rebuilding the controls is useful when the state changes, or when
+        # the connector was removed while the label stayed the same. Avoid
+        # doing it for every validation refresh that reasserts the same state.
+        if changed or self.logic is None or self.logic.connectorNode(role) is None:
+            self._refreshConnectionControls()
 
     def connectionState(self, role: str) -> str:
         """The state this panel is currently reporting for one link."""
@@ -718,14 +858,23 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return {"summaryStatus": "WARN", "summaryMessage": "No parameter node."}
         liveNode = self.logic.findLiveViewNode()
         report = self.logic.validateLiveViewNode(liveNode)
+        connectorState = self.logic.connectorState(CONNECTOR_ACQUISITION)
+        self._recordUnobservedLinkDrop(CONNECTOR_ACQUISITION)
+        self._linkHasFreshData(CONNECTOR_ACQUISITION)
         if report["summaryStatus"] != "PASS":
             self._parameterNode.parameterNode.SetNodeReferenceID(
                 "liveSourceVolume", None
             )
-            if report["summaryStatus"] == "FAIL" and self._linkPresent(
-                CONNECTOR_ACQUISITION
-            ):
-                self._setConnectionState(CONNECTOR_ACQUISITION, CONNECTION_INVALID)
+            self._setConnectionState(
+                CONNECTOR_ACQUISITION,
+                CONNECTION_INVALID
+                if (
+                    report["summaryStatus"] == "FAIL"
+                    and self._linkConnected(CONNECTOR_ACQUISITION)
+                    and not self._linkDropped[CONNECTOR_ACQUISITION]
+                )
+                else connectorState,
+            )
             self._setStatus(
                 self.LIVE_VIEW_WAITING_STATUS
                 if report["summaryStatus"] == "WARN"
@@ -738,8 +887,25 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # stream resolved to is a fact about the scene and not about whether
         # this Slicer session happens to have a layout.
         self._parameterNode.liveSourceVolume = liveNode
-        if self._linkPresent(CONNECTOR_ACQUISITION):
-            self._setConnectionState(CONNECTOR_ACQUISITION, CONNECTION_DISPLAYING)
+        self._setConnectionState(
+            CONNECTOR_ACQUISITION,
+            CONNECTION_DISPLAYING
+            if (
+                self._linkConnected(CONNECTOR_ACQUISITION)
+                and not self._linkDropped[CONNECTOR_ACQUISITION]
+            )
+            else connectorState,
+        )
+
+        # Stale is a fact about the link's history, not about this pane: a
+        # source toggle resets _liveViewEverDisplayed but does not make the
+        # retained frame any newer.
+        stalePresentation = self._linkDropped[CONNECTOR_ACQUISITION]
+        self._liveViewEverDisplayed = True
+        if stalePresentation:
+            self._setStatus(self.LIVE_STALE_STATUS)
+        else:
+            self._setStatus(report["summaryMessage"])
 
         if layoutManager is None:
             layoutManager = slicer.app.layoutManager()
@@ -755,11 +921,9 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             liveComposite.SetForegroundVolumeID(None)
             liveComposite.SetLabelVolumeID(None)
             liveLogic.FitSliceToBackground()
-        self._liveViewEverDisplayed = True
         liveView = liveWidget.sliceView()
         if liveView is not None:
             liveView.forceRender()
-        self._setStatus(report["summaryMessage"])
         return report
 
     def _setStatus(self, message: str) -> None:
@@ -789,6 +953,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.logic is None or self._parameterNode is None:
             return {"summaryStatus": "WARN", "summaryMessage": "No parameter node."}
 
+        connectorState = self.logic.connectorState(CONNECTOR_UC1)
+        self._recordUnobservedLinkDrop(CONNECTOR_UC1)
+        self._linkHasFreshData(CONNECTOR_UC1)
+        linkConnected = self._linkConnected(CONNECTOR_UC1)
         report = self.logic.presentSelectedResult(
             self._parameterNode, allowSimulated=self._demoModeEnabled
         )
@@ -819,21 +987,25 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             message = report["summaryMessage"]
             if simulated:
                 message = self.SIMULATED_STATUS_PREFIX + message
-            if self._linkPresent(CONNECTOR_UC1):
+            # Browsing to a map with no data resets _resultEverDisplayed, so
+            # the link history alone decides whether this result is stale.
+            stalePresentation = self._linkDropped[CONNECTOR_UC1]
+            if linkConnected and not stalePresentation:
                 self._setResultStatus("PASS", message, report.get("sourceNodeName"))
                 self._setConnectionState(CONNECTOR_UC1, CONNECTION_DISPLAYING)
-            elif self._linkDropped[CONNECTOR_UC1]:
+            elif stalePresentation:
                 # The image is real and still worth showing, but nothing is
                 # feeding it any more, and rediscovering it on a later refresh
                 # does not change that.
                 self._setResultStatus(
                     "WARN", self._staleResultStatus(), report.get("sourceNodeName")
                 )
-                self._setConnectionState(CONNECTOR_UC1, CONNECTION_DISCONNECTED)
+                self._setConnectionState(CONNECTOR_UC1, connectorState)
             else:
                 # No link was ever established, so this result did not arrive
                 # over one and its status makes no claim about one.
                 self._setResultStatus("PASS", message, report.get("sourceNodeName"))
+                self._setConnectionState(CONNECTOR_UC1, connectorState)
         else:
             self.logic.clearResultReferences(self._parameterNode)
             self._clearResultView()
@@ -849,17 +1021,18 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     "FAIL",
                     f"{invalidStatus} {report['summaryMessage']}",
                 )
-                if self._linkPresent(CONNECTOR_UC1):
-                    self._setConnectionState(CONNECTOR_UC1, CONNECTION_INVALID)
+                self._setConnectionState(
+                    CONNECTOR_UC1,
+                    CONNECTION_INVALID
+                    if (
+                        linkConnected
+                        and not self._linkDropped[CONNECTOR_UC1]
+                    )
+                    else connectorState,
+                )
             else:
                 self._setResultStatus("WARN", report["summaryMessage"])
-                if self.connectionState(CONNECTOR_UC1) in (
-                    CONNECTION_DISPLAYING,
-                    CONNECTION_INVALID,
-                ):
-                    self._setConnectionState(
-                        CONNECTOR_UC1, self.logic.connectorState(CONNECTOR_UC1)
-                    )
+                self._setConnectionState(CONNECTOR_UC1, connectorState)
         return report
 
     def _clearResultView(self, layoutManager=None) -> None:

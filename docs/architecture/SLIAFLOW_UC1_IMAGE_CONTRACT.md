@@ -276,9 +276,18 @@ Leaving the module, closing the scene and module cleanup all stop both.
 
 The panel reports one of five states per link. `disconnected`, `connecting` and
 `receiving` are translations of the connector's own `StateOff`,
-`StateWaitConnection` and `StateConnected`; `displaying` and `invalid` are
-stronger claims about what was made of the data and are set by the result path
-rather than by the socket.
+`StateWaitConnection` and `StateConnected`. `displaying` and `invalid` are
+stronger claims about what was made of the data, and the result path may use
+either one only while the connector itself reports `StateConnected`. A valid
+or invalid node retained in the scene cannot turn `StateOff` into
+`displaying`/`invalid`, and `StateWaitConnection` remains `connecting` during
+refreshes.
+
+For an active OpenIGTLink client, a peer loss normally changes the connector
+from `StateConnected` to `StateWaitConnection` while it retries. It reaches
+`StateOff` when the connector is stopped. Therefore an automatically retrying
+link is expected to show `connecting`, not `disconnected`, after the
+disconnection event has been processed.
 
 A lost connection is not a reason to blank a pane that is showing an image that
 really did arrive and really did validate. The pane keeps that image and the
@@ -295,9 +304,12 @@ its own button, so changing which source the pane shows releases the pane, not
 the connection. A frame arriving while the camera is selected reaches no view.
 
 `displaying` and `invalid` are claims about a live link, so neither is reported
-while no connector exists. The received node stays in the scene after a link
-drops and is rediscovered by every later refresh, but rediscovery is not news
-from the wire and never restores a `displaying` state to a link that is gone. `LiveView` carries no
+unless the connector reports `StateConnected` and the current connection has
+delivered the node being presented. The received node stays in the scene after
+a link drops and is rediscovered by every later refresh, but rediscovery is not
+news from the wire. Reconnection reports `receiving` and keeps the retained
+image stale until a changed received node proves that the new socket has
+delivered data. `LiveView` carries no
 `SLIAFlow.ResultMap`, is never discoverable as a result, and is bound only to
 the live pane; the UC1 result contract does not apply to it, but nothing
 reaches a view before it is known to be displayable.
