@@ -6,6 +6,7 @@
 /config/local.json
 /.venv/
 /build/
+/input/
 
 # Common generated artifacts
 *.pyc
