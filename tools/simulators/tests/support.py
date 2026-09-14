@@ -7,6 +7,7 @@ of them.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -159,3 +160,134 @@ def makeTestFrame(samples: int, lines: int) -> numpy.ndarray:
     red = 0.5 * (x + y[::-1])
     frame = numpy.stack([blue, green, red], axis=-1)
     return numpy.clip(frame * 255.0, 0.0, 255.0).astype(numpy.uint8)
+
+
+# The marker the HSI Human Brain Database stamps into every case's `gtMap.hdr`.
+# Read from all 61 cases in `input/bin/bin` on 2026-09-11 and again on
+# 2026-09-13. It is not in `raw.hdr`.
+RECORDED_DATABASE_MARKER = "HSI Human Brain Database"
+
+# Every recorded case shares this grid: 440 to 900 nm in 5 nm steps, written six
+# values to a line.
+RECORDED_FIRST_WAVELENGTH_NM = 440
+RECORDED_WAVELENGTH_STEP_NM = 5
+RECORDED_VALUES_PER_WAVELENGTH_LINE = 6
+
+
+def buildRecordedRawHeader(samples: int, lines: int, bands: int, description: str = "") -> str:
+    """Reproduce the layout every recorded `raw.hdr` has.
+
+    The two properties a reader has to survive are reproduced rather than
+    tidied: the wavelength block is closed by a `}` on its last value line, and
+    `lines` and `samples` come after the block. Value lines end in `", "` before
+    the newline, as they do on disk.
+    """
+    wavelengths = [
+        str(RECORDED_FIRST_WAVELENGTH_NM + RECORDED_WAVELENGTH_STEP_NM * index)
+        for index in range(bands)
+    ]
+    rows = [
+        ", ".join(wavelengths[start:start + RECORDED_VALUES_PER_WAVELENGTH_LINE])
+        for start in range(0, bands, RECORDED_VALUES_PER_WAVELENGTH_LINE)
+    ]
+
+    headerLines = ["ENVI"]
+    if description:
+        headerLines.append(f"description = {{{description}}}")
+    headerLines += [
+        f"bands = {bands}",
+        "data type = 12",
+        "interleave = bsq",
+        "header offset = 0",
+        "wavelength units = Nanometers",
+        "byte order = 0",
+        "wavelength = {" + ", \n".join(rows) + "}",
+        f"lines = {lines}",
+        f"samples = {samples}",
+    ]
+    return "\n".join(headerLines) + "\n"
+
+
+def buildRecordedGroundTruthHeader(samples: int, lines: int, marker: str) -> bytes:
+    """Reproduce a recorded `gtMap.hdr`, including its CR-only line endings.
+
+    An empty `marker` writes a description that does not identify the database,
+    which is the shape of a folder that is not a database case.
+    """
+    description = (
+        f"description = {{{marker} - https://hsibraindatabase.iuma.ulpgc.es/}}"
+        if marker
+        else "description = {unlabelled}"
+    )
+    fields = [
+        "ENVI",
+        description,
+        f"samples = {samples}",
+        f"lines = {lines}",
+        "bands = 1",
+        "data type = 12",
+        "byte order = 0",
+        "interleave = bil",
+        "header offset = 0",
+        "Class ID (0) = Pixel Not Labeled",
+        "Class ID (1) = Normal Tissue",
+        "Class ID (2) = Tumor Tissue",
+        "Class ID (3) = Hypervascularized Tissue",
+        "Class ID (4) = Background",
+    ]
+    return "\r".join(fields).encode("ascii")
+
+
+def writeRecordedCaseFixture(
+    caseFolder: Path,
+    samples: int = TINY_DATASET_SAMPLES,
+    lines: int = TINY_DATASET_LINES,
+    bands: int = TINY_DATASET_BANDS,
+    groundTruthMarker: str = RECORDED_DATABASE_MARKER,
+    rawHeaderDescription: str = "",
+) -> Path:
+    """Write a tiny test folder laid out like a recorded database case.
+
+    The arrays are counting placeholders, not imagery. Only the file set and the
+    two header layouts copy a recorded case, because those are what the reader
+    and the identification have to handle. Returns the resolved folder.
+    """
+    caseFolder = Path(caseFolder)
+    caseFolder.mkdir(parents=True)
+
+    shape = (bands, lines, samples)
+    voxelCount = int(numpy.prod(shape))
+    cubes = {
+        "raw": numpy.arange(voxelCount, dtype=numpy.int64) % 40000 + 1200,
+        "whiteReference": numpy.full(voxelCount, 51200),
+        "darkReference": numpy.full(voxelCount, 1200),
+    }
+    headerBytes = buildRecordedRawHeader(samples, lines, bands, rawHeaderDescription).encode("ascii")
+    for stem, values in cubes.items():
+        (caseFolder / f"{stem}.hdr").write_bytes(headerBytes)
+        (caseFolder / f"{stem}.dat").write_bytes(numpy.asarray(values, dtype="<u2").tobytes())
+
+    (caseFolder / "gtMap").write_bytes(bytes(samples * lines * 2))
+    (caseFolder / "gtMap.hdr").write_bytes(
+        buildRecordedGroundTruthHeader(samples, lines, groundTruthMarker)
+    )
+    return caseFolder.resolve()
+
+
+def folderFingerprint(folder: Path) -> dict[str, tuple[str, int, int]]:
+    """Every file under a folder, with its SHA-256, size and modification time.
+
+    The file list is part of the fingerprint, so an added or removed file
+    changes it as surely as a rewritten or merely touched one.
+    """
+    folder = Path(folder)
+    fingerprint = {}
+    for path in sorted(folder.rglob("*")):
+        if path.is_file():
+            status = path.stat()
+            fingerprint[path.relative_to(folder).as_posix()] = (
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                status.st_size,
+                status.st_mtime_ns,
+            )
+    return fingerprint

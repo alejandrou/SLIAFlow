@@ -4,9 +4,12 @@ One console, one command, and a numbered list of what to do and why. This is the
 short version of `end_to_end_verification.md`, which is the full procedure with
 its evidence tables. Read this to run a session; read that one to record one.
 
-Nothing here is a clinical result. The scene is a synthetic optical phantom and
-every map is produced from invented data. See `synthetic_tissue_phantom.md` for
-what the phantom is and, more importantly, what it is not.
+Nothing here is a clinical result. The default session's scene is an optical
+phantom the simulator builds, and its maps are produced from invented data. See
+`synthetic_tissue_phantom.md` for what the phantom is and, more importantly, what
+it is not. A `-Case` session is different: it shows a recorded case of the public
+HSI Human Brain Database and the laptop camera, and nothing made up. See
+*A recorded case*, below.
 
 ## What you are actually testing
 
@@ -63,7 +66,10 @@ size, Slicer from the build.
 | `-RunSeconds 30` | End the session by itself after 30 seconds. With `-NoSlicer`, this is the way to check the rig comes up and tears down cleanly without sitting through a session. |
 | `-SlicerFrom Source` | Run the configured Slicer with `extensions\SLIAFlow\SLIAFlow` on the module path. Use this while editing the module. |
 | `-DatasetFolder <path>` | Reuse an existing dataset instead of writing a new one. |
-| `-StopStrays` | Kill whatever already holds 18944 or 18945 rather than refusing to start. |
+| `-StopStrays` | Kill whatever already holds 18944 or 18945 - and 18947 and 18950 with `-Case` - rather than refusing to start. |
+| `-Case 004-02` | Run a recorded case of the HSI Human Brain Database instead of the phantom. See *A recorded case*, below. |
+| `-DatasetRoot <path>` | With `-Case`: where the cases live, when that is not `input\bin\bin`. |
+| `-InstantCapture` | With `-Case`: complete each capture at once instead of after 5 to 8 seconds. |
 
 ## Step by step
 
@@ -198,14 +204,57 @@ at the end of this one rather than discovered at the start of that one.
 
 | Key | What it does |
 | --- | --- |
-| `s` | Swap the map producer on 18945 (step 4). |
+| `s` | Swap the map producer on 18945 (step 4). Refused with `-Case`. |
+| `c` | With `-Case`: trigger a capture. |
 | `m` | Measure the delivered LiveView frame rate (step 5). |
 | `l` | Start Slicer again after closing it. |
-| `n` | Show what is listening on 18944 and 18945. |
+| `n` | Show what is listening on 18944 and 18945. With `-Case`, also 18947, 18950 and the reserved 18948 and 18949. |
 | `d` | Print the dataset folder and both log paths. |
 | `q` | Stop both producers and end the session. |
 
 The launcher never stops Slicer - close that yourself.
+
+## A recorded case
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\development\run-end-to-end-session.ps1 -Case 004-02
+```
+
+The same session over a recorded case of the public, anonymized HSI Human Brain
+Database instead of the phantom. The cube is real brain-surface imagery; only the
+acquisition is simulated, and every label says exactly that. Nothing under
+`input\` is written.
+
+What changes:
+
+- LiveView is the laptop camera, and nothing else: a recorded session shows
+  recorded data and a real camera, never a generated scene. Only one process can
+  hold the camera, so leave SLIAFlow's own camera path off.
+- The stand-in opens three ports - LiveView on 18944, `HSCube` on 18947 and the
+  capture control channel on 18950 - and nothing on 18948 or 18949.
+- **The map producer does not start until you press `c`.** That is the order the
+  demonstration shows: camera, capture, cube, UC1.
+- `s` is refused. The arithmetic stand-in accepts only datasets the simulator
+  wrote.
+
+A capture reads roughly like this, the delay drawn between 5 and 8 seconds:
+
+```
+[session]  Capture trigger 1: sending CAPTURE to 127.0.0.1:18950.
+[capture-1] Sent CAPTURE to 127.0.0.1:18950.
+[capture-1] CaptureReply: CAPTURING capture=1 case=004-02 delay=6.4
+[acq]        Trigger 'CAPTURE': CAPTURING capture=1 case=004-02 delay=6.4
+[acq]        Capture 1 complete: READY capture=1 case=004-02 folder=C:\stratum\input\bin\bin\004-02
+[session]  The first capture is ready. Starting the genuine UC1 pipeline on C:\stratum\input\bin\bin\004-02.
+[uc1-genuine] Origin:     simulated - real UC1 pipeline, recorded HSI case 004-02 (simulated acquisition)
+```
+
+Press `c` again during the delay and the second trigger client reports
+`IGNORED capture 1 already in progress`: one capture at a time, and nothing is
+queued.
+
+SLIAFlow has no consumer for `HSCube` yet - the band browser is `SLIA-022` - so
+the stand-in says the cube is waiting for a client on 18947. That is expected.
 
 ## How long things actually take
 
@@ -264,6 +313,10 @@ is a measurement, not a target - the phantom is never tuned to change it.
 | `A client from an earlier session is still retrying these ports` | The check above, firing before anything starts. Close the Slicer it names, or re-run with `-StopStrays` to have it killed for you. |
 | The map never appears, live view is fine | Check the **Result map** name is `majorityVotingMap` and that the UC1 link row is connected. The `[status]` line says whether 18945 has a client. |
 | Nothing happens for minutes after launch | Check the last `[session]` line for which stage is waiting. If both ports are serving, the rig is ready and the wait is Slicer's. |
+| `There is no recorded case folder ...` | `-Case` names a folder that is not under `input\bin\bin`, or under `-DatasetRoot` when one is given. |
+| `... does not identify as a case of the HSI Human Brain Database` | The folder has no `gtMap.hdr` carrying the database marker. Only approved database cases are read. |
+| `capture-N finished with exit code 1` | The trigger client got no answer. Read the `[acq]` lines: the stand-in has to be running with `-Case` and listening on 18950. |
+| With `-Case`, the UC1 link never connects | Correct until the first capture: the map producer starts when a capture reports `READY`. Press `c`. |
 
 Everything from a session lands in one folder -
 `workspace\simulators\sessions\session-<timestamp>\` - with the dataset and both

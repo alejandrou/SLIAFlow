@@ -100,10 +100,10 @@ started on a port that is already reserved and the panel lights up.
 | 18944 | `LiveView` | Acquisition stand-in (laptop camera) | Same as the real application; interchangeable |
 | 18945 | `UC1_MV_CLASS` **and** `UC1_RGB` | `uc1_runner.py` (CUDA) | `UC1_MV_CLASS` exists; `UC1_RGB` is new |
 | 18946 | `UC2_BV` | `uc2_runner.py` (C) | New |
-| 18947 | `HSCube` | Acquisition stand-in | New |
+| 18947 | `HSCube` | Acquisition stand-in | In use (`SLIA-023`) |
 | 18948 | `Stereoscopic` | - | **Reserved: black panel** |
 | 18949 | `UC2_STO2` | - | **Reserved: black panel** |
-| 18950 | `Control` | Bidirectional STRING | New: capture trigger |
+| 18950 | `Control`: `CaptureTrigger`, `CaptureReply`, `CaptureStatus` | Acquisition stand-in; Slicer side `SLIA-022` | Producer side in use (`SLIA-023`) |
 
 `UC1_RGB` shares port 18945 with `UC1_MV_CLASS` rather than taking a port of its
 own. The reason is in [Workstream C](#workstream-c--make-the-uc1-result-visible).
@@ -147,6 +147,10 @@ control.
 
 ## Workstream A - let recorded cubes through without touching the contract
 
+**Status, 2026-09-14:** implemented under `SLIA-023` and verified. All 61 cases
+load through `envi.loadDataset`, each identified by its `gtMap.hdr` marker, with
+no change to the contract's origins.
+
 **Plainly:** today the system refuses a cube whose header does not carry the
 `STRATUM SIMULATED CUBE` marker. That guard exists so the tooling can never
 process data it has no business processing. Recorded cases do not carry it. They
@@ -188,12 +192,28 @@ stops - and so does **UC2's**. The defect is on our side only.
 
 ## Workstream B - the stand-in behaves like theatre equipment
 
+**Status, 2026-09-14:** implemented under `SLIA-023`, and its launcher session on
+`004-02` verified with the laptop camera. The largest-case GPU measurement on
+`058-02` is deferred by the project owner until the pipeline is complete, so that
+the large cubes are tested against the finished pipeline; it is recorded here once
+it has been taken. A recorded session takes LiveView from the laptop camera only:
+the owner decided on 2026-09-14 that nothing generated is shown beside recorded
+data.
+
+Two things changed while building it. The control channel carries three device
+names - `CaptureTrigger`, `CaptureReply` and `CaptureStatus` - rather than one,
+and repeats its state every 0.5 s, because pyigtl 0.3.4 does not release a client
+that has left until a send to it fails. And the launcher's capture key starts a
+client that leaves once the capture has started, so that a second press is
+answered `IGNORED` rather than being read after the first capture.
+`tools/simulators/README.md` has the wording.
+
 **Plainly:** a process that impersonates the rig. It does not invent data - the
 data is real - it imitates *what the machine does*.
 
 `tools/simulators/stratum_sim/acquisition_sim.py`:
 
-- `--source recorded --case 004-02`, default root `input/bin/bin`. **Writes
+- `--scene-mode recorded --case 004-02`, default root `input/bin/bin`. **Writes
   nothing**: the case folder already is the dataset and is opened read-only, so
   `input/` stays untouched.
 - The laptop camera goes out on `LiveView`, port 18944, which is the path
@@ -205,8 +225,8 @@ data is real - it imitates *what the machine does*.
 - It announces over the control channel that the capture is ready and where.
 - The stereoscopic channel is **not opened**. Black panel with its reason.
 
-`scripts/development/run-end-to-end-session.ps1` gains `-Case` and
-`-DatasetRoot`, reusing the port preflight it already has.
+`scripts/development/run-end-to-end-session.ps1` gains `-Case`, `-DatasetRoot`
+and `-InstantCapture`, reusing the port preflight it already has.
 
 **Why the theatre rather than going straight to the point:** the day the real
 rig arrives this process is stopped and the real one started on the same port.

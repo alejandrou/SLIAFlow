@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import spectra
+from . import contract, spectra
 
 # Frame presets are (samples, lines). Every `samples` value is a multiple of 4
 # so a BMP row written from a frame needs no padding.
@@ -31,6 +31,9 @@ DEFAULT_BAND_COUNT = 93
 
 FRAME_SOURCE_NAMES = ("synthetic", "webcam")
 
+# The only LiveView source scene mode `recorded` accepts: the laptop camera.
+RECORDED_FRAME_SOURCE = "webcam"
+
 # How the spectral scene is built.
 #
 # `tissue` is the default because it is the only one the genuine UC1 pipeline
@@ -44,9 +47,25 @@ FRAME_SOURCE_NAMES = ("synthetic", "webcam")
 # `channel` is kept because it is the only mode that can carry a moving scene
 # or a webcam: it turns a frame into a cube, where `tissue` renders its frame
 # from the cube.
+#
+# `recorded` builds nothing. It reads one case of the public HSI Human Brain
+# Database where it lies, streams LiveView from the frame source, and publishes
+# the case's cube when a capture is triggered. It is its own mode rather than a
+# flag on the other two because it is the only one in which the LiveView frame
+# and the cube are unrelated: the camera stands in for the rig, and the cube was
+# recorded by a different one.
 SCENE_MODE_TISSUE = "tissue"
 SCENE_MODE_CHANNEL = "channel"
-SCENE_MODE_NAMES = (SCENE_MODE_TISSUE, SCENE_MODE_CHANNEL)
+SCENE_MODE_RECORDED = "recorded"
+SCENE_MODE_NAMES = (SCENE_MODE_TISSUE, SCENE_MODE_CHANNEL, SCENE_MODE_RECORDED)
+
+# Where `.ai/policies/medical-data-policy.md` records the approved cases live.
+RECORDED_ROOT_RELATIVE_PATH = Path("input") / "bin" / "bin"
+
+# "a configurable 5-8 s" delay, from the WP5 plan's workstream B. Drawn uniformly
+# per capture; both bounds at 0 make a capture instant.
+DEFAULT_CAPTURE_DELAY_MIN_SEC = 5.0
+DEFAULT_CAPTURE_DELAY_MAX_SEC = 8.0
 
 # `OpenIGTLinkServer.cpp` serves LiveView on 18944. The UC1 map stream gets
 # 18945 in SLIA-012; nothing here listens on it.
@@ -96,6 +115,12 @@ class SimulatorConfig:
     textureFeatureCount: int = 6
     frameCount: int = 0
     datasetRoot: Path | None = None
+    case: str | None = None
+    recordedRoot: Path | None = None
+    hsCubePort: int = contract.HS_CUBE_PORT
+    controlPort: int = contract.CONTROL_PORT
+    captureDelayMinSec: float = DEFAULT_CAPTURE_DELAY_MIN_SEC
+    captureDelayMaxSec: float = DEFAULT_CAPTURE_DELAY_MAX_SEC
 
     def __post_init__(self) -> None:
         if self.presetName not in FRAME_PRESETS:
@@ -123,6 +148,46 @@ class SimulatorConfig:
                 f"so it cannot take frames from frameSource {self.frameSource!r}. Use "
                 f"sceneMode {SCENE_MODE_CHANNEL!r} to drive the cube from a camera."
             )
+        if self.sceneMode == SCENE_MODE_RECORDED:
+            if self.frameSource != RECORDED_FRAME_SOURCE:
+                # A recorded session shows recorded data and the laptop camera.
+                # A generated LiveView scene beside a recorded cube would put
+                # made-up imagery next to real imagery, so it is refused rather
+                # than kept as a fallback for a machine without a camera.
+                raise ConfigurationError(
+                    f"Scene mode {SCENE_MODE_RECORDED!r} takes LiveView from the laptop camera "
+                    f"only, so frameSource must be {RECORDED_FRAME_SOURCE!r}, not "
+                    f"{self.frameSource!r}."
+                )
+            if self.case is None:
+                raise ConfigurationError(
+                    f"Scene mode {SCENE_MODE_RECORDED!r} reads one recorded case, so it needs "
+                    "case: the case folder name under recordedRoot, for example '004-02'."
+                )
+            if (
+                not self.case
+                or self.case in (".", "..")
+                or "/" in self.case
+                or "\\" in self.case
+                or Path(self.case).name != self.case
+            ):
+                raise ConfigurationError(
+                    f"case must be one folder name under recordedRoot, not {self.case!r}. A path "
+                    "would let a session read from somewhere recordedRoot does not say."
+                )
+        elif self.case is not None:
+            # Ignoring it would leave an operator believing the scene on
+            # screen was the recorded case they named.
+            raise ConfigurationError(
+                f"case {self.case!r} is only read in scene mode {SCENE_MODE_RECORDED!r}, and "
+                f"scene mode {self.sceneMode!r} would ignore it. Use sceneMode "
+                f"{SCENE_MODE_RECORDED!r} to read a recorded case."
+            )
+        if self.captureDelayMinSec < 0.0 or self.captureDelayMaxSec < self.captureDelayMinSec:
+            raise ConfigurationError(
+                "The capture delay needs 0 <= captureDelayMinSec <= captureDelayMaxSec, not "
+                f"{self.captureDelayMinSec} and {self.captureDelayMaxSec}."
+            )
         if self.bands < MINIMUM_BAND_COUNT:
             raise ConfigurationError(
                 f"bands must be at least {MINIMUM_BAND_COUNT}, not {self.bands}: the dataset "
@@ -146,6 +211,10 @@ class SimulatorConfig:
         if self.datasetRoot is None:
             object.__setattr__(
                 self, "datasetRoot", self.repositoryRoot / DATASET_ROOT_RELATIVE_PATH
+            )
+        if self.recordedRoot is None:
+            object.__setattr__(
+                self, "recordedRoot", self.repositoryRoot / RECORDED_ROOT_RELATIVE_PATH
             )
 
     @property
@@ -197,8 +266,9 @@ def loadSimulatorConfig(
 
     if "preset" in settings:
         settings["presetName"] = settings.pop("preset")
-    if "datasetRoot" in settings and settings["datasetRoot"] is not None:
-        settings["datasetRoot"] = Path(str(settings["datasetRoot"])).expanduser()
+    for pathSetting in ("datasetRoot", "recordedRoot"):
+        if settings.get(pathSetting) is not None:
+            settings[pathSetting] = Path(str(settings[pathSetting])).expanduser()
 
     known = {field for field in SimulatorConfig.__dataclass_fields__ if field != "repositoryRoot"}
     unknown = sorted(set(settings) - known)

@@ -188,6 +188,22 @@ class ImageStreamServer:
 
         return self._sendMessage(buildStringMessage(text, deviceName))
 
+    def receiveStrings(self, deviceName: str) -> list[str]:
+        """Return the text of STRING messages received under one name since the last call.
+
+        pyigtl keeps only the latest message per device name, so two messages
+        under the same name between calls arrive as one; a command polled every
+        frame loses nothing a person could press twice that fast. Messages under
+        any other name are discarded.
+        """
+        if self._server is None:
+            raise RuntimeError("The image stream server was not started.")
+        return [
+            message.string
+            for message in self._server.get_latest_messages()
+            if isinstance(message, pyigtl.StringMessage) and message.device_name == deviceName
+        ]
+
     def _sendMessage(self, message: pyigtl.MessageBase) -> bool:
         try:
             self._server.send_message(message, wait=False)

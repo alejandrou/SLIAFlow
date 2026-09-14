@@ -5,19 +5,23 @@ Usage:
     python -m stratum_sim acquisition [options]
     python -m stratum_sim uc1 [options]
     python -m stratum_sim uc1-real [options]
+    python -m stratum_sim capture [options]
 
 `uc1` is the CUDA-free arithmetic stand-in from SLIA-012, which produces all
 five contract maps and is not a classifier. `uc1-real` runs the genuine UC1 CUDA
 pipeline from SLIA-013, which produces exactly one of them. They plug into the
 same producer/consumer seam, and they are never run together: five maps from two
 different boxes in one session would imply UC1 produced all five.
+
+`capture` is not a producer. It sends one capture trigger to an acquisition
+stand-in running in scene mode `recorded` and reports the answer (SLIA-023).
 """
 
 from __future__ import annotations
 
 import sys
 
-SIMULATOR_NAMES = ("acquisition", "uc1", "uc1-real")
+SIMULATOR_NAMES = ("acquisition", "uc1", "uc1-real", "capture")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,6 +46,10 @@ def main(argv: list[str] | None = None) -> int:
         from .uc1_runner import main as uc1RealMain
 
         return uc1RealMain(remaining)
+    if simulatorName == "capture":
+        from .capture_client import main as captureMain
+
+        return captureMain(remaining)
 
     print(
         f"Unknown simulator {simulatorName!r}. Choose one of: {', '.join(SIMULATOR_NAMES)}.",

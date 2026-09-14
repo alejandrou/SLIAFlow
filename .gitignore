@@ -8,6 +8,7 @@
 /build/
 /input/
 .vscode/
+CLAUDE.md
 
 # Common generated artifacts
 *.pyc

@@ -18,6 +18,12 @@
     "noiseCounts": 0,
     "textureFeatureCount": 6,
     "frameCount": 0,
-    "datasetRoot": null
+    "datasetRoot": null,
+    "case": null,
+    "recordedRoot": null,
+    "hsCubePort": 18947,
+    "controlPort": 18950,
+    "captureDelayMinSec": 5.0,
+    "captureDelayMaxSec": 8.0
   }
 }
