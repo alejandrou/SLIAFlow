@@ -614,6 +614,99 @@ class SceneProvenanceTest(Uc1RunnerTestCase):
                 self.assertEqual(observedDetails, [expectedDetail])
 
 
+class RecordedCaseRunnerTest(unittest.TestCase):
+    """A recorded database case is approved input, and has to be described as one."""
+
+    CASE_NAME = "004-02"
+
+    # The detail the WP5 plan's provenance section and the medical-data policy
+    # require: the pipeline, the case, and that only the acquisition was
+    # simulated.
+    EXPECTED_DETAIL = "real UC1 pipeline, recorded HSI case 004-02 (simulated acquisition)"
+
+    def setUp(self) -> None:
+        self._temporaryDirectory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporaryDirectory.cleanup)
+        root = Path(self._temporaryDirectory.name)
+        self.build = makeStagedBuild(root / "build" / "uc1" / "UC1")
+        self.caseRoot = root / "input" / "bin" / "bin"
+        self.rgb = bmp.classMapToRgb(FIXTURE_CLASS_MAP)
+
+    def writeCase(self, **keywords) -> contract.DatasetRef:
+        lines, samples = FIXTURE_CLASS_MAP.shape
+        caseFolder = support.writeRecordedCaseFixture(
+            self.caseRoot / self.CASE_NAME,
+            samples=samples,
+            lines=lines,
+            bands=uc1_runner.UC1_MODEL_BAND_COUNT,
+            **keywords,
+        )
+        return contract.loadDataset(caseFolder)
+
+    def classify(self, dataset: contract.DatasetRef, **keywords):
+        process = RecordedRun(self.build, dataset.folder.name, self.rgb)
+        classifier = uc1_runner.RealUc1Classifier(
+            build=self.build, processRunner=process, **keywords
+        )
+        return classifier.classify(dataset), process
+
+    def test_recordedCaseRunsWithoutForceUnmarked(self) -> None:
+        maps, process = self.classify(self.writeCase())
+
+        self.assertEqual(maps.presentMapNames(), ("majorityVotingMap",))
+        self.assertEqual(len(process.commands), 1)
+
+    def test_recordedCaseDetailNamesTheCase(self) -> None:
+        dataset = self.writeCase()
+
+        detail = uc1_runner.simulationDetailForDataset(dataset)
+        self.assertEqual(detail, self.EXPECTED_DETAIL)
+        self.assertNotIn("synthetic", detail.lower())
+
+        maps, _ = self.classify(dataset)
+        (_, _, metadata), = uc1_runner.mapMessages(maps, detail)
+        self.assertEqual(metadata[contract.METADATA_SIMULATION_DETAIL_KEY], self.EXPECTED_DETAIL)
+        # The origin describes the acquisition, which was simulated, so a
+        # recorded cube does not soften it.
+        self.assertEqual(
+            metadata[contract.METADATA_DATA_ORIGIN_KEY], contract.DATA_ORIGIN_SIMULATED
+        )
+
+    def test_runnerTextNeverCallsARecordedCubeSynthetic(self) -> None:
+        detail = uc1_runner.simulationDetailForDataset(self.writeCase())
+        texts = {
+            "cycle banner": uc1_runner.CYCLE_BANNER.format(cycle=1, detail=detail),
+            "single-class warning": uc1_runner.uniformClassWarning(
+                numpy.full((1, 2, 3), 4, dtype=numpy.uint8)
+            ),
+        }
+        for name, text in texts.items():
+            with self.subTest(text=name):
+                self.assertTrue(text)
+                self.assertNotIn("synthetic", text.lower())
+
+    def test_unidentifiedFolderIsStillRefused(self) -> None:
+        dataset = self.writeCase(groundTruthMarker="")
+        process = RecordedRun(self.build, dataset.folder.name, self.rgb)
+        classifier = uc1_runner.RealUc1Classifier(build=self.build, processRunner=process)
+
+        with self.assertRaises(uc1_maps.SimulatedMarkerRequiredError) as caught:
+            classifier.classify(dataset)
+
+        # The wording `uc1_runner.py` used before recorded cases existed, at
+        # commit 3ff2f38. A folder that is neither kind meets exactly that.
+        self.assertEqual(
+            str(caught.exception),
+            f"Refusing to run UC1 on {dataset.folder}: raw.hdr lacks the STRATUM SIMULATED "
+            "CUBE marker. Pass --force-unmarked only for an explicitly approved synthetic "
+            "test dataset.",
+        )
+        self.assertEqual(process.commands, [])
+
+        maps, _ = self.classify(dataset, requireSimulatedMarker=False)
+        self.assertEqual(maps.presentMapNames(), ("majorityVotingMap",))
+
+
 class RealBinaryIntegrationTest(unittest.TestCase):
     """Exercise the parts the injected process cannot reach.
 

@@ -394,7 +394,7 @@ are never run in the same session.
 | `SLIAFlow.ResultMap` | `majorityVotingMap` |
 | `SLIAFlow.DeviceName` | `UC1_MV_CLASS` |
 | `SLIAFlow.DataOrigin` | `simulated` |
-| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, synthetic input`, or `real UC1 pipeline, synthetic tissue phantom` for a phantom dataset |
+| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, synthetic input`; `real UC1 pipeline, synthetic tissue phantom` for a phantom dataset; or `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` for a recorded database case |
 
 The origin is `simulated` even though the algorithm is genuine, and that is the
 point of `SimulationDetail` carrying the distinction. A genuine algorithm run
@@ -424,18 +424,26 @@ VRAM, and what the scene has to look like before UC1 resolves it to anything.
 
 ### The input scene is part of the provenance
 
-Two scenes exist and they are not equally fake, so both streams name which one
-produced a message:
+Three inputs exist and they are not the same kind of thing, so every stream names
+which one produced a message:
 
-| Scene | LiveView detail | Map-stream detail | What UC1 makes of it |
+| Input | LiveView detail | Map-stream detail | What UC1 makes of it |
 | --- | --- | --- | --- |
 | channel | `acquisition stand-in, synthetic scene` | `real UC1 pipeline, synthetic input` | every pixel class 4, background |
 | tissue phantom | `acquisition stand-in, synthetic tissue phantom` | `real UC1 pipeline, synthetic tissue phantom` | two classes, coherent regions |
+| recorded case (`SLIA-023`) | `acquisition stand-in, laptop camera`, which names the camera and never the case | `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` | not characterised here |
 
-The runner decides by looking for the phantom record in the dataset folder, not
-by taking a flag, so the detail cannot disagree with the data that was read.
-`DataOrigin` stays `simulated` in both cases: the origin describes the data and
-never softens because the algorithm is genuine.
+A recorded case is a case of the public, anonymized HSI Human Brain Database. Its
+`HSCube` message carries `acquisition stand-in, recorded HSI case <case> (simulated
+acquisition)`. It is never described as synthetic: that would understate what is
+on screen, which is the direction of error the simulated banner does not guard
+against.
+
+The runner decides from the folder itself - the `gtMap.hdr` marker for a recorded
+case, the phantom record for a phantom - not from a flag, so the detail cannot
+disagree with the data that was read. `DataOrigin` stays `simulated` in every
+case: in this repository the acquisition is always simulated, and the origin
+never softens because the algorithm is genuine or the cube was recorded.
 
 The phantom's spectra are built from a haemoglobin absorption and scattering
 model so that they have the *shape* of brain reflectance, because UC1 min-max

@@ -30,12 +30,37 @@ METADATA_RESULT_MAP_KEY = "SLIAFlow.ResultMap"
 METADATA_DEVICE_NAME_KEY = "SLIAFlow.DeviceName"
 METADATA_DATA_ORIGIN_KEY = "SLIAFlow.DataOrigin"
 METADATA_SIMULATION_DETAIL_KEY = "SLIAFlow.SimulationDetail"
+# Carried by `HSCube` only. The band browser needs each band's wavelength, and
+# the folder is where Mode A's algorithms read the same capture from disk.
+METADATA_WAVELENGTHS_KEY = "SLIAFlow.WavelengthsNm"
+METADATA_DATASET_FOLDER_KEY = "SLIAFlow.DatasetFolder"
 
 DATA_ORIGIN_SIMULATED = "simulated"
 DATA_ORIGIN_EXTERNAL_GENUINE = "external-genuine"
 
 LIVE_VIEW_DEVICE_NAME = "LiveView"
 UC1_MAP_PORT = 18945
+
+# The WP5 demonstrator's channels, from `docs/architecture/WP5_MS5_DEMO_PLAN.md`.
+HS_CUBE_PORT = 18947
+HS_CUBE_DEVICE_NAME = "HSCube"
+CONTROL_PORT = 18950
+
+# Reserved for producers that do not exist yet. Nothing in this package binds
+# them: a panel that is black because nothing listens has to be black for that
+# reason and no other.
+RESERVED_PORTS = {18948: "Stereoscopic", 18949: "UC2_STO2"}
+
+# The control channel carries three device names, not one. A Slicer connector
+# re-sends an outgoing node when a message of the same name updates it, so the
+# trigger and everything sent back travel under different names. And pyigtl keeps
+# only the latest message per device name on the receiving side, so the one reply
+# to a trigger cannot share a name with the state repeated every half second, or
+# the state would overwrite it before a client read it.
+CAPTURE_TRIGGER_DEVICE_NAME = "CaptureTrigger"
+CAPTURE_REPLY_DEVICE_NAME = "CaptureReply"
+CAPTURE_STATUS_DEVICE_NAME = "CaptureStatus"
+CAPTURE_COMMAND = "CAPTURE"
 
 # SLIAFlow's `findResultSource` matches on role, device and origin together, so
 # a producer that sends origin alone is received and then never discovered.
@@ -57,6 +82,12 @@ class DatasetRef:
 
     `wavelengthsNm` is a tuple rather than an array so that two references to
     the same folder compare equal.
+
+    Two kinds of folder are approved input. `simulated` means this simulator
+    wrote it. `recorded` means it is a case of the public HSI Human Brain
+    Database, identified by the marker in its `gtMap.hdr`, which is read and
+    never written. Both travel as `simulated` on the wire, because in this
+    repository the acquisition is always simulated; neither is a third origin.
     """
 
     folder: Path
@@ -65,6 +96,12 @@ class DatasetRef:
     bands: int
     wavelengthsNm: tuple[float, ...]
     simulated: bool
+    recorded: bool = False
+
+    @property
+    def approvedInput(self) -> bool:
+        """Whether the folder is one of the two kinds the tooling may process."""
+        return self.simulated or self.recorded
 
     def loadCalibratedCube(self) -> numpy.ndarray:
         """Read the dataset and apply UC1's calibration, returning float32 counts.
@@ -146,6 +183,34 @@ def liveViewMetadata(
         METADATA_DEVICE_NAME_KEY: deviceName,
         METADATA_DATA_ORIGIN_KEY: DATA_ORIGIN_SIMULATED,
         METADATA_SIMULATION_DETAIL_KEY: simulationDetail,
+    }
+
+
+def recordedCaseDetail(producer: str, caseName: str) -> str:
+    """Name a recorded case, and say that only its acquisition was simulated.
+
+    Every producer describes a recorded cube through this one form. A detail
+    that called it synthetic would understate what is on screen, which is the
+    direction of error the simulated banner does not guard against.
+    """
+    return f"{producer}, recorded HSI case {caseName} (simulated acquisition)"
+
+
+def hsCubeMetadata(
+    dataset: DatasetRef, simulationDetail: str, deviceName: str = HS_CUBE_DEVICE_NAME
+) -> dict[str, str]:
+    """Provenance for a published cube.
+
+    Like LiveView it carries no `SLIAFlow.ResultMap`: a cube is an input to the
+    algorithms, not a result, and a result role would make it discoverable as
+    one.
+    """
+    return {
+        METADATA_DEVICE_NAME_KEY: deviceName,
+        METADATA_DATA_ORIGIN_KEY: DATA_ORIGIN_SIMULATED,
+        METADATA_SIMULATION_DETAIL_KEY: simulationDetail,
+        METADATA_WAVELENGTHS_KEY: ",".join(f"{value:g}" for value in dataset.wavelengthsNm),
+        METADATA_DATASET_FOLDER_KEY: str(dataset.folder),
     }
 
 

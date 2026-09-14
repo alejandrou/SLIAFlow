@@ -30,6 +30,14 @@ ENVI_DATA_TYPE_UINT16 = 12
 BYTES_PER_SAMPLE = 2
 
 DATASET_MARKER = "STRATUM SIMULATED CUBE"
+
+# The HSI Human Brain Database stamps this into the description of every case's
+# `gtMap.hdr`, and not into `raw.hdr`: all 61 cases in `input/bin/bin` were read on
+# 2026-09-11 and 2026-09-13. Only that header is read for it. `gtMap` itself is
+# the database's own labelling and is never opened here.
+RECORDED_DATASET_MARKER = "HSI Human Brain Database"
+GROUND_TRUTH_HEADER_FILE_NAME = "gtMap.hdr"
+
 DATASET_FOLDER_PREFIX = "sim-"
 DATASET_FOLDER_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 
@@ -118,7 +126,16 @@ def buildHeaderText(samples: int, lines: int, bands: int, wavelengthsNm: numpy.n
 
 
 def parseHeaderText(headerText: str) -> tuple[dict[str, str], tuple[float, ...]]:
-    """Return the key/value entries and the wavelength list from a header."""
+    """Return the key/value entries and the wavelength list from a header.
+
+    Two layouts are read. The simulator writes the closing `}` on a line of its
+    own. Every recorded database case closes the block on its last value line
+    (`890, 895,  900}`) and puts `lines` and `samples` after it. So the block
+    ends on whichever line carries the brace, and key order does not matter.
+
+    A wavelength that is not a number raises `DatasetReadError`, which every
+    caller handles, rather than a bare `ValueError` that escapes all of them.
+    """
     values: dict[str, str] = {}
     wavelengths: list[float] = []
     insideWavelengthBlock = False
@@ -128,34 +145,48 @@ def parseHeaderText(headerText: str) -> tuple[dict[str, str], tuple[float, ...]]
         if not line:
             continue
 
-        if insideWavelengthBlock:
-            if line.startswith("}"):
-                insideWavelengthBlock = False
+        if not insideWavelengthBlock:
+            separatorIndex = line.find("=")
+            if separatorIndex < 0:
                 continue
-            for token in line.lstrip(",").split(","):
-                token = token.strip().rstrip("}")
-                if token:
-                    wavelengths.append(float(token))
-            continue
-
-        separatorIndex = line.find("=")
-        if separatorIndex < 0:
-            continue
-
-        key = line[:separatorIndex].strip().lower()
-        value = line[separatorIndex + 1:].strip()
-        if key == "wavelength":
+            key = line[:separatorIndex].strip().lower()
+            value = line[separatorIndex + 1:].strip()
+            if key != "wavelength":
+                values[key] = value
+                continue
             insideWavelengthBlock = True
-            remainder = value.lstrip("{").strip()
-            if remainder:
-                for token in remainder.split(","):
-                    token = token.strip().rstrip("}")
-                    if token:
-                        wavelengths.append(float(token))
-            continue
-        values[key] = value
+            line = value.lstrip("{")
+
+        closesBlock = "}" in line
+        for token in line.split("}", 1)[0].split(","):
+            token = token.strip()
+            if token:
+                wavelengths.append(_parseWavelength(token))
+        if closesBlock:
+            insideWavelengthBlock = False
 
     return values, tuple(wavelengths)
+
+
+def _parseWavelength(token: str) -> float:
+    try:
+        return float(token)
+    except ValueError as error:
+        raise DatasetReadError(f"wavelength {token!r} is not a number.") from error
+
+
+def isRecordedDatabaseCase(folder: Path) -> bool:
+    """Whether a folder is a case of the HSI Human Brain Database.
+
+    Read from the data rather than from a flag, so there is nothing to pass and
+    nothing to forget. Only the sibling `gtMap.hdr` counts: the marker anywhere
+    else, `raw.hdr` included, identifies nothing.
+    """
+    groundTruthHeader = Path(folder) / GROUND_TRUTH_HEADER_FILE_NAME
+    if not groundTruthHeader.is_file():
+        return False
+    headerText = groundTruthHeader.read_text(encoding="ascii", errors="replace")
+    return RECORDED_DATASET_MARKER in headerText
 
 
 def _assertShapesAgree(
@@ -312,26 +343,69 @@ def writeDataset(
 
 
 def loadDataset(folder: Path) -> DatasetRef:
-    """Build a DatasetRef from an existing dataset folder."""
+    """Build a DatasetRef from an existing dataset folder, reading headers only.
+
+    `simulated` is set for a folder this simulator wrote and `recorded` for a
+    database case. A folder that is neither loads with both false, and it is
+    each consumer's interlock that refuses it.
+    """
     folder = Path(folder).resolve()
     headerPath = folder / HEADER_FILE_NAME
     if not headerPath.is_file():
         raise DatasetReadError(f"{folder} has no {HEADER_FILE_NAME}.")
 
     headerText = headerPath.read_text(encoding="ascii", errors="replace")
-    values, wavelengths = parseHeaderText(headerText)
+    try:
+        values, wavelengths = parseHeaderText(headerText)
+    except DatasetReadError as error:
+        raise DatasetReadError(f"{headerPath} cannot be read: {error}") from error
 
     missing = [key for key in ("samples", "lines", "bands") if key not in values]
     if missing:
         raise DatasetReadError(f"{headerPath} is missing: {', '.join(missing)}.")
 
+    try:
+        samples, lines, bands = (int(values[key]) for key in ("samples", "lines", "bands"))
+    except ValueError as error:
+        raise DatasetReadError(f"{headerPath} has a dimension that is not an integer: {error}.") from error
+
+    simulated = DATASET_MARKER in headerText
     return DatasetRef(
         folder=folder,
-        samples=int(values["samples"]),
-        lines=int(values["lines"]),
-        bands=int(values["bands"]),
+        samples=samples,
+        lines=lines,
+        bands=bands,
         wavelengthsNm=wavelengths,
-        simulated=DATASET_MARKER in headerText,
+        simulated=simulated,
+        recorded=not simulated and isRecordedDatabaseCase(folder),
+    )
+
+
+def assertDataFilesMatchHeader(datasetRef: DatasetRef) -> None:
+    """Check the three data files are the size the header describes, reading none of them."""
+    expectedBytes = datasetRef.bands * datasetRef.lines * datasetRef.samples * BYTES_PER_SAMPLE
+    for fileName in (RAW_DATA_FILE_NAME, WHITE_REFERENCE_FILE_NAME, DARK_REFERENCE_FILE_NAME):
+        path = datasetRef.folder / fileName
+        if not path.is_file():
+            raise DatasetReadError(f"{path} is missing.")
+        actualBytes = path.stat().st_size
+        if actualBytes != expectedBytes:
+            raise DatasetReadError(
+                f"{path} is {actualBytes} bytes but the header describes {expectedBytes}."
+            )
+
+
+def loadRawCube(datasetRef: DatasetRef) -> numpy.ndarray:
+    """Read the raw counts as a (bands, lines, samples) uint16 array.
+
+    The file is opened for reading and nothing else. The array is a read-only
+    view of the bytes as they are on disk: uncalibrated, unrotated, unscaled.
+    """
+    return _readBsq(
+        datasetRef.folder / RAW_DATA_FILE_NAME,
+        datasetRef.bands,
+        datasetRef.lines,
+        datasetRef.samples,
     )
 
 

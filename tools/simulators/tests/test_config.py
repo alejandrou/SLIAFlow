@@ -122,6 +122,76 @@ class ConfigurationTest(unittest.TestCase):
         self.assertEqual(loaded.bands, config.MINIMUM_BAND_COUNT)
 
 
+class RecordedModeConfigurationTest(unittest.TestCase):
+    """A recorded session names one case and nothing it cannot honour."""
+
+    def setUp(self):
+        self._temporaryDirectory = tempfile.TemporaryDirectory()
+        self.repositoryRoot = Path(self._temporaryDirectory.name).resolve()
+        (self.repositoryRoot / "config").mkdir()
+        self.addCleanup(self._temporaryDirectory.cleanup)
+
+    def load(self, **overrides) -> config.SimulatorConfig:
+        return config.loadSimulatorConfig(self.repositoryRoot, overrides=overrides)
+
+    def loadRecorded(self, **overrides) -> config.SimulatorConfig:
+        settings = {"sceneMode": "recorded", "case": "004-02", "frameSource": "webcam"}
+        settings.update(overrides)
+        return self.load(**settings)
+
+    def test_recordedModeRequiresAPlainCaseName(self):
+        loaded = self.loadRecorded()
+        self.assertEqual(loaded.case, "004-02")
+        # Where `.ai/policies/medical-data-policy.md` records the cases live.
+        self.assertEqual(loaded.recordedRoot, self.repositoryRoot / "input" / "bin" / "bin")
+
+        with self.assertRaises(config.ConfigurationError) as missing:
+            self.loadRecorded(case=None)
+        self.assertIn("case", str(missing.exception))
+
+        # A case is a folder name under the recorded root. A path would let a
+        # session read from anywhere while the root claims otherwise.
+        for badCase in ("", "..", "bin/004-02", "bin\\004-02"):
+            with self.subTest(case=badCase):
+                with self.assertRaises(config.ConfigurationError):
+                    self.loadRecorded(case=badCase)
+
+    def test_recordedLiveViewComesOnlyFromTheLaptopCamera(self):
+        # The project owner's decision of 2026-09-14: a recorded session shows
+        # recorded data and the laptop camera, and nothing made up. A generated
+        # LiveView scene beside a recorded cube is refused, not quietly allowed.
+        self.assertEqual(self.loadRecorded().frameSource, "webcam")
+
+        with self.assertRaises(config.ConfigurationError) as refused:
+            self.loadRecorded(frameSource="synthetic")
+        self.assertIn("webcam", str(refused.exception))
+
+    def test_recordedSettingsOutsideRecordedModeAreRejected(self):
+        # A case named in tissue mode would be ignored, and an operator would
+        # believe the phantom was the recorded case.
+        with self.assertRaises(config.ConfigurationError) as rejected:
+            self.load(case="004-02")
+        self.assertIn("recorded", str(rejected.exception))
+
+    def test_captureDelayBoundsMustBeOrdered(self):
+        loaded = self.loadRecorded()
+        # "a configurable 5-8 s" capture delay, from the WP5 plan's workstream B.
+        self.assertEqual((loaded.captureDelayMinSec, loaded.captureDelayMaxSec), (5.0, 8.0))
+
+        instant = self.loadRecorded(captureDelayMinSec=0.0, captureDelayMaxSec=0.0)
+        self.assertEqual((instant.captureDelayMinSec, instant.captureDelayMaxSec), (0.0, 0.0))
+
+        for bounds in (
+            {"captureDelayMinSec": -1.0},
+            {"captureDelayMinSec": 6.0, "captureDelayMaxSec": 5.0},
+        ):
+            with self.subTest(bounds=bounds):
+                with self.assertRaises(config.ConfigurationError) as refused:
+                    self.loadRecorded(**bounds)
+                # Refused for the delay, not for some other setting.
+                self.assertIn("captureDelay", str(refused.exception))
+
+
 class LiveViewStreamShapeTest(unittest.TestCase):
 
     def test_configuredPresetAndDeviceNameReachTheWire(self):

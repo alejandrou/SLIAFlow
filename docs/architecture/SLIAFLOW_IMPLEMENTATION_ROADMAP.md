@@ -147,8 +147,10 @@ The networking tasks use these device names and data shapes:
 | `UC1_KNN_PROB` | Four-component `float32` in `[0,1]` |
 | `UC1_RGB` | Three-component `uint8`, composed from the cube's 710/540/480 nm bands (`SLIA-024`) |
 | `UC2_BV` | Three-component `uint8`, the PNG UC2 writes, as written (`SLIA-021`) |
-| `HSCube` | The captured cube, `uint16` (`SLIA-023`) |
-| `Control` | `STRING`, bidirectional: capture trigger and readiness (`SLIA-023`) |
+| `HSCube` | One-component `uint16`, shape `(bands, lines, samples)` in `(k, j, i)` order: the captured cube's raw counts, with `SLIAFlow.WavelengthsNm` and `SLIAFlow.DatasetFolder` in its metadata (`SLIA-023`) |
+| `CaptureTrigger` | `STRING` to the acquisition stand-in: `CAPTURE` (`SLIA-023`) |
+| `CaptureReply` | `STRING` from the stand-in, one per trigger: `CAPTURING`, `IGNORED` or `REFUSED` (`SLIA-023`) |
+| `CaptureStatus` | `STRING` from the stand-in, on change and every 0.5 s: `IDLE`, `CAPTURING` or `READY ... folder=<case folder>` (`SLIA-023`) |
 
 Ports, one per channel:
 
@@ -157,10 +159,17 @@ Ports, one per channel:
 | 18944 | `LiveView` | In use |
 | 18945 | `UC1_MV_CLASS` and `UC1_RGB` | In use; `UC1_RGB` added by `SLIA-024` |
 | 18946 | `UC2_BV` | `SLIA-021` |
-| 18947 | `HSCube` | `SLIA-023` |
+| 18947 | `HSCube` | In use by the recorded-case stand-in (`SLIA-023`) |
 | 18948 | `Stereoscopic` | **Reserved. No producer. Black panel with its reason.** |
 | 18949 | `UC2_STO2` | **Reserved. No algorithm. Black panel with its reason.** |
-| 18950 | `Control` | `SLIA-023` producer side, `SLIA-022` Slicer side |
+| 18950 | `Control`: `CaptureTrigger`, `CaptureReply`, `CaptureStatus` | Producer side in use (`SLIA-023`); Slicer side `SLIA-022` |
+
+The control channel carries three device names rather than one. A connector
+re-sends an outgoing node when a message of the same name updates it, so the
+trigger and the answers travel under different names; and pyigtl keeps only the
+latest message per device name, so the one reply to a trigger cannot share a name
+with the state repeated every half second. The exact wording, and why the state is
+repeated at all, is in `tools/simulators/README.md`.
 
 `UC1_RGB` shares port 18945 with `UC1_MV_CLASS` deliberately. One producer
 sending a result and its background from one cube over one connection makes

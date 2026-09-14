@@ -27,11 +27,27 @@ param(
     # and tears down cleanly without sitting through a session.
     [int]$RunSeconds = 0,
 
-    # Stop whatever already holds 18944 or 18945 instead of refusing to start.
+    # Stop whatever already holds 18944 or 18945 (and 18947 and 18950 with -Case)
+    # instead of refusing to start.
     # Off by default: a stray producer from an earlier run is indistinguishable
     # from a healthy session in the panel, and that is what forced a whole run
     # to be discarded the first time this procedure was followed.
-    [switch]$StopStrays
+    [switch]$StopStrays,
+
+    # Run a recorded case of the public HSI Human Brain Database instead of
+    # writing a phantom dataset, for example -Case 004-02. The acquisition
+    # stand-in then streams the laptop camera on LiveView, publishes the case's
+    # cube on each capture (the c key), and writes nothing. The map producer
+    # starts on the case once the first capture reports READY. Only one process
+    # can hold the camera, so leave SLIAFlow's own camera path off.
+    [string]$Case,
+
+    # Where recorded cases live, for -Case. Defaults to input\bin\bin. Read,
+    # never written.
+    [string]$DatasetRoot,
+
+    # Complete each capture at once instead of holding the 5-8 s delay.
+    [switch]$InstantCapture
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,6 +62,13 @@ $uc1BuildRoot = Join-Path $repositoryRoot "build\uc1\UC1"
 
 $liveViewPort = 18944
 $mapPort = 18945
+$cubePort = 18947
+$controlPort = 18950
+# Reserved for producers that do not exist yet. Nothing in this rig binds them.
+$reservedPorts = @(18948, 18949)
+
+$recordedSession = -not [string]::IsNullOrWhiteSpace($Case)
+$sessionPorts = if ($recordedSession) { @($liveViewPort, $mapPort, $cubePort, $controlPort) } else { @($liveViewPort, $mapPort) }
 
 $sessionStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $sessionRoot = Join-Path $repositoryRoot "workspace\simulators\sessions\session-$sessionStamp"
@@ -58,6 +81,9 @@ $script:slicerExitReported = $false
 $script:datasetFolder = $null
 $script:lastLinkReport = ""
 $script:keyboardUsable = $true
+$script:mapProducerStarted = $false
+$script:captureReadySeen = $false
+$script:captureCount = 0
 
 function Write-Stage {
     param([string]$Text)
@@ -173,7 +199,7 @@ function Assert-NoStaleClients {
     $owners = @($owners | Sort-Object -Unique)
 
     if ($owners.Count -eq 0) {
-        Write-Tagged "check" "Nothing is already dialling 18944 or 18945. No stale client." "Green"
+        Write-Tagged "check" "Nothing is already dialling $($Ports -join ', '). No stale client." "Green"
         return
     }
 
@@ -208,6 +234,10 @@ function Start-Producer {
     $process = Start-Process -FilePath $pythonPath -ArgumentList $Arguments `
         -WorkingDirectory $repositoryRoot -NoNewWindow -PassThru `
         -RedirectStandardOutput $logPath -RedirectStandardError "$logPath.err"
+    # Touching the handle keeps the exit code readable after the process ends.
+    # Without it `ExitCode` can come back empty for a process that has exited,
+    # and a trigger client's exit code is how its outcome is reported.
+    $null = $process.Handle
 
     $stream = New-Object System.IO.FileStream(
         $logPath,
@@ -237,6 +267,13 @@ function Show-ProducerOutput {
             if ($null -eq $line) { break }
             if ($line.Trim().Length -eq 0) { continue }
             Write-Tagged $producer.Name $line $producer.Color
+
+            # The stand-in says when a capture is complete. The map producer is
+            # started from the session loop rather than from here, because
+            # starting it waits on its port and that wait tails output too.
+            if ($recordedSession -and $producer.Name -eq "acq" -and $line -match "complete: READY ") {
+                $script:captureReadySeen = $true
+            }
         }
     }
 }
@@ -264,10 +301,15 @@ function Show-LinkState {
     $mapClients = Get-EstablishedCount -Port $mapPort
     $mapName = if ($script:producers.ContainsKey("uc1-genuine")) { "genuine UC1 pipeline" }
     elseif ($script:producers.ContainsKey("uc1-standin")) { "arithmetic stand-in" }
+    elseif ($recordedSession -and -not $script:mapProducerStarted) { "waiting for the first capture" }
     else { "no producer" }
     $slicerState = if ($script:slicerProcess -and -not $script:slicerProcess.HasExited) { "running" } else { "not running" }
 
-    $report = "live 18944: $liveClients client(s) | map 18945: $mapClients client(s), $mapName | Slicer: $slicerState"
+    $report = "live ${liveViewPort}: $liveClients client(s) | map ${mapPort}: $mapClients client(s), $mapName"
+    if ($recordedSession) {
+        $report += " | cube ${cubePort}: $(Get-EstablishedCount -Port $cubePort) client(s)"
+    }
+    $report += " | Slicer: $slicerState"
     if (-not $Always -and $report -eq $script:lastLinkReport) { return }
 
     $script:lastLinkReport = $report
@@ -293,6 +335,8 @@ function Wait-ForListener {
         Show-ProducerOutput
 
         foreach ($producer in @($script:producers.Values)) {
+            # A trigger client is meant to exit, so its exit is not a producer failing.
+            if ($producer.Name -like "capture-*") { continue }
             if ($producer.Process.HasExited) {
                 Show-ProducerOutput
                 Get-Content -LiteralPath ($producer.Log + ".err") -ErrorAction SilentlyContinue |
@@ -327,6 +371,7 @@ function Start-MapProducer {
             "--port", "$mapPort", "--cycles", "0", "--send-notice")
         Wait-ForListener -Port $mapPort -What "The arithmetic stand-in" | Out-Null
     }
+    $script:mapProducerStarted = $true
 }
 
 function Invoke-ProducerSwap {
@@ -352,6 +397,37 @@ function Invoke-ProducerSwap {
         Start-MapProducer -Which "genuine"
         Write-Tagged "expect" "Banner should change to: SIMULATED INPUT - REAL UC1 PIPELINE, NOT A CLINICAL RESULT" "Cyan"
         Write-Tagged "expect" "                          real UC1 pipeline, synthetic tissue phantom" "Cyan"
+    }
+}
+
+function Start-CaptureTrigger {
+    if (-not $recordedSession) {
+        Write-Tagged "session" "c triggers a capture only in a recorded session. Start with -Case, for example -Case 004-02." "Yellow"
+        return
+    }
+
+    # One short-lived client per press, leaving as soon as the stand-in has
+    # answered. pyigtl serves one client at a time, so a client that waited for
+    # READY would hold the control port for the whole delay: a second press
+    # would then be read only after the first capture, and start a new one
+    # instead of being answered IGNORED.
+    $script:captureCount++
+    Write-Tagged "session" "Capture trigger $($script:captureCount): sending CAPTURE to 127.0.0.1:$controlPort." "Cyan"
+    Start-Producer -Name "capture-$($script:captureCount)" -Color "Green" -Arguments @(
+        "-m", "stratum_sim", "capture", "--port", "$controlPort", "--no-wait", "--timeout", "15")
+}
+
+function Show-ReservedPorts {
+    $held = @()
+    foreach ($port in $reservedPorts) {
+        $owners = @(Get-ListenerProcessIds -Port $port | Where-Object { $_ -and $_ -ne 0 })
+        if ($owners.Count -gt 0) { $held += "$port (PID $($owners -join ', '))" }
+    }
+    if ($held.Count -eq 0) {
+        Write-Tagged "check" "Nothing is listening on the reserved ports $($reservedPorts -join ' or ')." "Green"
+    }
+    else {
+        Write-Tagged "check" "A reserved port is held: $($held -join '; '). Nothing in this rig may bind it; record that as a finding." "Red"
     }
 }
 
@@ -438,10 +514,15 @@ function Read-SessionKey {
 
 function Show-Help {
     Write-Stage "Keys"
-    Write-Host "  s   swap the map producer on port $mapPort        (manual step 3)"
+    if ($recordedSession) {
+        Write-Host "  c   trigger a capture of case $Case on port $controlPort"
+    }
+    else {
+        Write-Host "  s   swap the map producer on port $mapPort        (manual step 3)"
+    }
     Write-Host "  m   measure the delivered LiveView frame rate  (manual step 2)"
     Write-Host "  l   start Slicer again after closing it       (manual step 6)"
-    Write-Host "  n   show what is listening on $liveViewPort and $mapPort"
+    Write-Host "  n   show what is listening on $($sessionPorts -join ', ')"
     Write-Host "  d   print the dataset folder and the log paths"
     Write-Host "  ?   this list"
     Write-Host "  q   stop both producers and end the session"
@@ -453,9 +534,29 @@ function Show-Help {
 # ---------------------------------------------------------------------------
 
 Write-Stage "STRATUM end-to-end session"
-Write-Host "Nothing here is a clinical result: the scene is a synthetic phantom and the" -ForegroundColor DarkGray
-Write-Host "pipeline is run over invented data. Procedure and evidence tables:" -ForegroundColor DarkGray
-Write-Host "docs\development\end_to_end_verification.md" -ForegroundColor DarkGray
+if ($recordedSession) {
+    Write-Host "Nothing here is a clinical result. The cube is recorded case $Case of the public," -ForegroundColor DarkGray
+    Write-Host "anonymized HSI Human Brain Database, read where it lies and never written; only" -ForegroundColor DarkGray
+    Write-Host "the acquisition is simulated. Quick start: docs\development\pipeline_test_quickstart.md" -ForegroundColor DarkGray
+}
+else {
+    Write-Host "Nothing here is a clinical result: the scene is a synthetic phantom and the" -ForegroundColor DarkGray
+    Write-Host "pipeline is run over invented data. Procedure and evidence tables:" -ForegroundColor DarkGray
+    Write-Host "docs\development\end_to_end_verification.md" -ForegroundColor DarkGray
+}
+
+foreach ($recordedOnly in @("DatasetRoot", "InstantCapture")) {
+    if (-not $recordedSession -and $PSBoundParameters.ContainsKey($recordedOnly)) {
+        Stop-WithError "-$recordedOnly is only used with -Case."
+    }
+}
+if ($recordedSession -and $MapProducer -ne "genuine") {
+    Stop-WithError ("-MapProducer $MapProducer cannot run on a recorded case: the arithmetic stand-in's " +
+        "marker interlock accepts only datasets this simulator wrote. A recorded session uses the genuine pipeline.")
+}
+if ($recordedSession -and $DatasetFolder) {
+    Stop-WithError "-DatasetFolder names a dataset this simulator wrote and -Case names a recorded one. Pass one of them."
+}
 
 if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
     Stop-WithError "The repository virtual environment was not found at $pythonPath. Create it and install tools\simulators\requirements.txt."
@@ -471,12 +572,31 @@ if ($MapProducer -eq "genuine") {
 
 Assert-PortAvailable -Port $liveViewPort -Purpose "LiveView"
 Assert-PortAvailable -Port $mapPort -Purpose "UC1 maps"
-Assert-NoStaleClients -Ports @($liveViewPort, $mapPort)
+if ($recordedSession) {
+    Assert-PortAvailable -Port $cubePort -Purpose "HSCube"
+    Assert-PortAvailable -Port $controlPort -Purpose "capture control"
+}
+Assert-NoStaleClients -Ports $sessionPorts
 
 New-Item -ItemType Directory -Path $sessionRoot -Force | Out-Null
 Write-Tagged "check" "Session folder: $sessionRoot" "Green"
 
-if ($DatasetFolder) {
+if ($recordedSession) {
+    if ($DatasetRoot) {
+        if (-not (Test-Path -LiteralPath $DatasetRoot -PathType Container)) {
+            Stop-WithError "The dataset root does not exist: $DatasetRoot"
+        }
+        $recordedRoot = (Resolve-Path -LiteralPath $DatasetRoot).Path
+    }
+    else {
+        $recordedRoot = Join-Path $repositoryRoot "input\bin\bin"
+    }
+    $script:datasetFolder = Join-Path $recordedRoot $Case
+    if (-not (Test-Path -LiteralPath $script:datasetFolder -PathType Container)) {
+        Stop-WithError "There is no recorded case folder $($script:datasetFolder). Check -Case and -DatasetRoot."
+    }
+}
+elseif ($DatasetFolder) {
     if (-not (Test-Path -LiteralPath $DatasetFolder -PathType Container)) {
         Stop-WithError "The dataset folder does not exist: $DatasetFolder"
     }
@@ -485,7 +605,8 @@ if ($DatasetFolder) {
 else {
     $script:datasetFolder = Join-Path $sessionRoot "dataset"
 }
-Write-Tagged "check" "Dataset: $($script:datasetFolder)" "Green"
+$datasetNote = if ($recordedSession) { " (recorded case, read-only)" } else { "" }
+Write-Tagged "check" "Dataset: $($script:datasetFolder)$datasetNote" "Green"
 
 # `stratum_sim` is a standalone package rather than an installed distribution,
 # so its parent goes on PYTHONPATH for the duration of this session.
@@ -499,15 +620,35 @@ try {
     # Startup, in the order the procedure fixes
     # -----------------------------------------------------------------------
 
-    Write-Stage "Acquisition stand-in on 127.0.0.1:$liveViewPort"
-    Write-Tagged "session" "It writes the ENVI dataset first and serves LiveView afterwards. The dataset write is the slow part." "DarkGray"
-    Start-Producer -Name "acq" -Color "Blue" -Arguments @(
-        "-m", "stratum_sim", "acquisition", "--preset", $Preset,
-        "--port", "$liveViewPort", "--dataset-folder", $script:datasetFolder)
-    Wait-ForListener -Port $liveViewPort -What "The acquisition stand-in" | Out-Null
+    if ($recordedSession) {
+        Write-Stage "Acquisition stand-in on 127.0.0.1:$liveViewPort, $cubePort and $controlPort"
+        Write-Tagged "session" "It reads recorded case $Case and writes nothing. LiveView comes from the laptop camera; the cube is published on each capture." "DarkGray"
+        $acquisitionArguments = @(
+            "-m", "stratum_sim", "acquisition", "--scene-mode", "recorded",
+            "--case", $Case, "--recorded-root", $recordedRoot, "--frame-source", "webcam",
+            "--preset", $Preset, "--port", "$liveViewPort",
+            "--cube-port", "$cubePort", "--control-port", "$controlPort")
+        if ($InstantCapture) { $acquisitionArguments += "--instant-capture" }
+        Start-Producer -Name "acq" -Color "Blue" -Arguments $acquisitionArguments
+        Wait-ForListener -Port $liveViewPort -What "The acquisition stand-in's LiveView" | Out-Null
+        Wait-ForListener -Port $cubePort -What "The HSCube channel" | Out-Null
+        Wait-ForListener -Port $controlPort -What "The capture control channel" | Out-Null
+        Show-ReservedPorts
 
-    Write-Stage "Map producer on 127.0.0.1:$mapPort"
-    Start-MapProducer -Which $MapProducer
+        Write-Stage "Map producer on 127.0.0.1:$mapPort"
+        Write-Tagged "session" "Not started yet. It starts on the case when the first capture reports READY: camera, capture, cube, UC1. Press c." "Yellow"
+    }
+    else {
+        Write-Stage "Acquisition stand-in on 127.0.0.1:$liveViewPort"
+        Write-Tagged "session" "It writes the ENVI dataset first and serves LiveView afterwards. The dataset write is the slow part." "DarkGray"
+        Start-Producer -Name "acq" -Color "Blue" -Arguments @(
+            "-m", "stratum_sim", "acquisition", "--preset", $Preset,
+            "--port", "$liveViewPort", "--dataset-folder", $script:datasetFolder)
+        Wait-ForListener -Port $liveViewPort -What "The acquisition stand-in" | Out-Null
+
+        Write-Stage "Map producer on 127.0.0.1:$mapPort"
+        Start-MapProducer -Which $MapProducer
+    }
 
     if ($NoSlicer) {
         Write-Tagged "session" "Slicer was not started (-NoSlicer). Press l when you want it." "Yellow"
@@ -521,6 +662,9 @@ try {
     Write-Host "  1. Open SLIAFlow from the STRATUM category."
     Write-Host "  2. Live source -> AcquisitionSystemApp LiveView, then Connect on the Acquisition link row."
     Write-Host "  3. Result map -> majorityVotingMap, then Connect on the UC1 link row."
+    if ($recordedSession) {
+        Write-Host "     In a recorded session nothing serves the UC1 link until the first capture is READY. Press c here first." -ForegroundColor Yellow
+    }
     Write-Host "  4. Tick Demo mode. The red banner appears over the result pane."
     Write-Host ""
     Write-Host "  The status line below turns green once Slicer has connected to both ports." -ForegroundColor DarkGray
@@ -554,10 +698,22 @@ try {
         foreach ($producer in @($script:producers.Values)) {
             if ($producer.Process.HasExited) {
                 Show-ProducerOutput
-                Write-Tagged "session" "$($producer.Name) exited on its own with code $($producer.Process.ExitCode). Its log is $($producer.Log)." "Red"
+                if ($producer.Name -like "capture-*") {
+                    $colour = if ($producer.Process.ExitCode -eq 0) { "DarkGray" } else { "Yellow" }
+                    Write-Tagged "session" "$($producer.Name) finished with exit code $($producer.Process.ExitCode) (0 started, 2 ignored, 1 failed)." $colour
+                }
+                else {
+                    Write-Tagged "session" "$($producer.Name) exited on its own with code $($producer.Process.ExitCode). Its log is $($producer.Log)." "Red"
+                }
                 $producer.Reader.Dispose()
                 $script:producers.Remove($producer.Name)
             }
+        }
+
+        if ($recordedSession -and $script:captureReadySeen -and -not $script:mapProducerStarted) {
+            Write-Stage "Map producer on 127.0.0.1:$mapPort"
+            Write-Tagged "session" "The first capture is ready. Starting the genuine UC1 pipeline on $($script:datasetFolder)." "Cyan"
+            Start-MapProducer -Which "genuine"
         }
 
         if ($script:slicerProcess -and $script:slicerProcess.HasExited -and -not $script:slicerExitReported) {
@@ -570,12 +726,18 @@ try {
         $pressedKey = Read-SessionKey
         if ($null -ne $pressedKey) {
             switch ($pressedKey) {
-                "s" { Invoke-ProducerSwap }
+                "s" {
+                    if ($recordedSession) {
+                        Write-Tagged "session" "No swap in a recorded session: the arithmetic stand-in refuses a recorded case, so there is nothing to swap to." "Yellow"
+                    }
+                    else { Invoke-ProducerSwap }
+                }
+                "c" { Start-CaptureTrigger }
                 "m" { Invoke-RateMeasurement }
                 "l" { Start-Slicer }
                 "n" {
                     netstat -ano -p TCP |
-                        Select-String -Pattern (":" + $liveViewPort + "\s|:" + $mapPort + "\s") |
+                        Select-String -Pattern (($sessionPorts + $reservedPorts | ForEach-Object { ":$_\s" }) -join "|") |
                         ForEach-Object { Write-Tagged "netstat" $_.ToString().Trim() "Gray" }
                 }
                 "d" {
@@ -595,15 +757,17 @@ try {
 }
 finally {
     Write-Stage "Shutdown"
+    if ($recordedSession) { Show-ReservedPorts }
     foreach ($name in @($script:producers.Keys)) { Stop-Producer -Name $name }
 
     $remaining = @()
-    foreach ($port in @($liveViewPort, $mapPort)) {
+    foreach ($port in $sessionPorts) {
         $owners = @(Get-ListenerProcessIds -Port $port | Where-Object { $_ -and $_ -ne 0 })
         if ($owners.Count -gt 0) { $remaining += "$port (PID $($owners -join ', '))" }
     }
     if ($remaining.Count -eq 0) {
-        Write-Tagged "check" "Nothing is listening on $liveViewPort or $mapPort. No socket was left held." "Green"
+        $portList = if ($recordedSession) { $sessionPorts -join ", " } else { "$liveViewPort or $mapPort" }
+        Write-Tagged "check" "Nothing is listening on $portList. No socket was left held." "Green"
     }
     else {
         Write-Tagged "check" "Still listening: $($remaining -join '; '). Record that in the failures table." "Red"

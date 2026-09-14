@@ -3,7 +3,8 @@
 Nothing here computes a classification. The calibration, PCA, SVM, KNN, K-means
 and majority voting are the vendored UC1 code, compiled unmodified and executed
 on the local GPU; this module stages the run, reads back what the binary wrote,
-and sends it. Only the scene is synthetic.
+and sends it. Only the acquisition is simulated: the cube is either a synthetic
+scene or a recorded case of the public HSI Human Brain Database.
 
 The binary yields exactly one of the five contract maps. `main.cu` writes
 `output/rgb/{red,green,blue}.txt` and `output/<dataset>/imageRGB.bmp` and
@@ -58,10 +59,16 @@ RGB_TO_CLASS = bmp.RGB_TO_CLASS
 SIMULATION_DETAIL = "real UC1 pipeline, synthetic input"
 SIMULATION_DETAIL_PHANTOM = "real UC1 pipeline, synthetic tissue phantom"
 
+# A recorded case is described through `contract.recordedCaseDetail`, as
+# `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)`. Calling
+# it synthetic input would understate what is on screen.
+SIMULATION_DETAIL_PRODUCER = "real UC1 pipeline"
+
+# The detail says what the cube is, so the banner does not repeat a claim about
+# it that is only true of some cubes.
 CYCLE_BANNER = (
-    "REAL UC1 OUTPUT cycle {cycle}: genuine UC1 pipeline on a synthetic cube "
-    "({detail}). Only majorityVotingMap is produced; the other four maps are "
-    "not sent."
+    "REAL UC1 OUTPUT cycle {cycle}: genuine UC1 pipeline ({detail}). Only "
+    "majorityVotingMap is produced; the other four maps are not sent."
 )
 
 DEFAULT_PORT = contract.UC1_MAP_PORT
@@ -429,7 +436,10 @@ class RealUc1Classifier:
 
     def classify(self, dataset: contract.DatasetRef) -> contract.Uc1Maps:
         """Run the pipeline and return the one map it actually produces."""
-        if self.requireSimulatedMarker and not dataset.simulated:
+        # A recorded database case is approved input and passes. The refusal a
+        # folder of neither kind meets is worded exactly as it was before
+        # recorded cases existed.
+        if self.requireSimulatedMarker and not dataset.approvedInput:
             raise uc1_maps.SimulatedMarkerRequiredError(
                 f"Refusing to run UC1 on {dataset.folder}: raw.hdr lacks the "
                 f"{uc1_maps.enviMarkerName()} marker. Pass --force-unmarked only for an "
@@ -502,10 +512,13 @@ class RealUc1Classifier:
 def simulationDetailForDataset(dataset: contract.DatasetRef) -> str:
     """Name the scene the pipeline was fed, read from the dataset itself.
 
-    A phantom dataset carries the record the acquisition stand-in wrote beside
-    it. Reading the folder rather than taking a flag means the detail cannot
-    disagree with the data: there is no argument to forget to pass.
+    A recorded case is named, from its folder. A phantom dataset carries the
+    record the acquisition stand-in wrote beside it. Reading the folder rather
+    than taking a flag means the detail cannot disagree with the data: there is
+    no argument to forget to pass.
     """
+    if dataset.recorded:
+        return contract.recordedCaseDetail(SIMULATION_DETAIL_PRODUCER, dataset.folder.name)
     phantomRecord = dataset.folder / tissue.REGION_LEGEND_FILE_NAME
     return SIMULATION_DETAIL_PHANTOM if phantomRecord.is_file() else SIMULATION_DETAIL
 
@@ -608,16 +621,16 @@ def uniformClassWarning(classMap: numpy.ndarray) -> str:
 
     A single-class map is a valid contract map and a useless demonstration, and
     the two are easy to confuse when only the picture is looked at. It is
-    reported rather than corrected: the classifier is never tuned, and a
-    synthetic scene the model does not recognise is a fact about the scene.
+    reported rather than corrected: the classifier is never tuned, and an input
+    the model does not recognise is a fact about the input.
     """
     values = numpy.unique(classMap)
     if values.size != 1:
         return ""
     return (
         f"WARNING: UC1 resolved every pixel to class {int(values[0])}. The run is genuine and "
-        "the map is valid, but it shows nothing. This is a property of the synthetic scene, "
-        "not of the pipeline; do not tune the classifier to change it."
+        "the map is valid, but it shows nothing. This is how the model sees this input, not a "
+        "fault in the pipeline; do not tune the classifier to change it."
     )
 
 
@@ -639,16 +652,20 @@ def buildArgumentParser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m stratum_sim uc1-real",
         description=(
-            "Run the genuine UC1 CUDA pipeline on a simulated dataset and send its "
-            "majority-voting class map as UC1_MV_CLASS. The pipeline is real; the scene "
-            "is synthetic. UC1 discards the other four contract maps, so they are never "
-            "sent and never substituted."
+            "Run the genuine UC1 CUDA pipeline on a simulated dataset or a recorded case "
+            "of the HSI Human Brain Database, and send its majority-voting class map as "
+            "UC1_MV_CLASS. The pipeline is real; the acquisition is simulated. UC1 "
+            "discards the other four contract maps, so they are never sent and never "
+            "substituted."
         ),
     )
     parser.add_argument(
         "datasetFolder",
         type=Path,
-        help="Folder containing the ENVI dataset written by the acquisition stand-in.",
+        help=(
+            "A dataset folder written by the acquisition stand-in, or a recorded "
+            "database case folder, which is read and never written."
+        ),
     )
     parser.add_argument(
         "--build-root",

@@ -1,10 +1,20 @@
 # STRATUM stand-in simulators
 
-**Everything these processes produce is synthetic and non-clinical.** It is not
-patient data, it is not derived from patient data, and no output of these
-simulators carries diagnostic meaning. The scene is invented. A genuine
-algorithm run over an invented brain is still not a genuine clinical result, so
-data leaving these processes is always marked `simulated` on the wire.
+**Nothing these processes produce is a clinical result, and no output carries
+diagnostic meaning.** In the `tissue` and `channel` scenes everything is
+synthetic: it is not patient data and it is not derived from patient data. A
+genuine algorithm run over an invented brain is still not a genuine clinical
+result.
+
+The one exception is scene mode `recorded`, which reads a case of the public,
+anonymized *HSI Human Brain Database* published by ULPGC. Its cube is recorded
+brain-surface imagery. It is read where it lies and never written, and wherever it
+is described it is described as a recorded case - never as synthetic. See
+[Running a recorded case](#running-a-recorded-case) and
+`.ai/policies/medical-data-policy.md`.
+
+In every mode the acquisition event is simulated, so data leaving these
+processes is always marked `simulated` on the wire.
 
 ## Why they live here
 
@@ -119,10 +129,137 @@ throughput rather than a measurement of it.
 
 ### The webcam conflict
 
-`frameSource` defaults to `synthetic`, which needs no hardware. The `webcam`
-source opens camera index 0 - and so does `SLIAFlowLogic.startCamera`. On
+`frameSource` defaults to `synthetic`, which needs no hardware, except in scene
+mode `recorded`, which takes only `webcam`. The `webcam` source opens camera
+index 0 - and so does `SLIAFlowLogic.startCamera`. On
 Windows the second open fails, so the SLIAFlow live pane and this source cannot
 run at the same time. Close one before starting the other.
+
+## Running a recorded case
+
+Scene mode `recorded` imitates what the acquisition rig *does* without inventing
+what it *sees*. It streams LiveView, waits for a capture trigger, holds a capture
+delay, and then publishes the cube of one recorded case of the HSI Human Brain
+Database. The whole loop runs from one console:
+
+```powershell
+.\scripts\development\run-end-to-end-session.ps1 -Case 004-02
+```
+
+The stand-in and a trigger on their own:
+
+```powershell
+$env:PYTHONPATH = "$PWD\tools\simulators"
+.\.venv\Scripts\python.exe -m stratum_sim acquisition --scene-mode recorded --case 004-02
+
+# In a second shell:
+.\.venv\Scripts\python.exe -m stratum_sim capture
+```
+
+The cases live in `input/bin/bin/`, which is gitignored; `--recorded-root` points
+elsewhere. **Nothing is written.** The case folder is opened for reading only and
+`input/` is byte-identical after a session, so `--dataset-only` and
+`--dataset-folder`, which write a dataset, are refused in this mode.
+
+### Which folders are read
+
+A folder is read as a recorded case only when its `gtMap.hdr` carries the
+`HSI Human Brain Database` marker. The marker is not in `raw.hdr`, and anywhere
+other than `gtMap.hdr` it identifies nothing. `gtMap` itself is never opened. A
+folder that is neither a simulator dataset nor a database case is refused as
+before, by the stand-in and by the UC1 runner alike.
+
+Recorded headers are laid out differently from the ones the simulator writes: the
+wavelength block is closed by `}` on its last value line, and `lines` and
+`samples` come after it. The reader accepts both, and a header it cannot parse
+raises `DatasetReadError`.
+
+### Ports
+
+| Port | Device names | Direction |
+| ---: | --- | --- |
+| 18944 | `LiveView` | from the stand-in, as in the other scenes |
+| 18947 | `HSCube` | from the stand-in, once per completed capture |
+| 18950 | `CaptureTrigger` | to the stand-in |
+| 18950 | `CaptureReply`, `CaptureStatus` | from the stand-in |
+
+18948 (stereoscopic) and 18949 (StO2) are reserved and never bound.
+
+### The control channel
+
+Send `CAPTURE` as a `STRING` under the device name `CaptureTrigger`. Every
+message back starts with one upper-case word, and `folder=` is always last, so a
+path containing spaces is simply the rest of the line.
+
+| Device | Text | When |
+| --- | --- | --- |
+| `CaptureReply` | `CAPTURING capture=<n> case=<case> delay=<seconds>` | once, when a trigger starts capture `n` |
+| `CaptureReply` | `IGNORED capture <n> already in progress` | once, for a trigger during a capture, which is dropped rather than queued |
+| `CaptureReply` | `REFUSED unknown command <text>` | once, for anything but `CAPTURE` |
+| `CaptureStatus` | `IDLE` | before the first capture |
+| `CaptureStatus` | `CAPTURING capture=<n> case=<case> delay=<seconds>` | during a capture |
+| `CaptureStatus` | `READY capture=<n> case=<case> folder=<case folder>` | after capture `n` |
+
+`CaptureStatus` is sent whenever it changes, and repeated every 0.5 s while a
+client is connected. The repeat is load-bearing. pyigtl 0.3.4 treats an empty
+`recv` as "no message" rather than as a closed connection, so the server only
+lets go of a client that has left when a send to it fails, and until then the
+next client waits unserved in the accept backlog. Measured: with no repeat, a
+second and third one-shot client were never served; with it, each was served
+within 0.2 s.
+
+There are three names rather than one for two reasons. A Slicer connector re-sends
+an outgoing node when a message of the same name updates it, so a trigger and its
+answer sharing a name would echo. And pyigtl keeps only the latest message per
+device name, so a reply sharing a name with the repeated state would be
+overwritten before a client read it. The capture number is what lets a client
+tell the `READY` that answers its trigger from an earlier one the repeat is still
+sending.
+
+The delay is drawn for each capture between `captureDelayMinSec` and
+`captureDelayMaxSec`, 5 and 8 s by default; `--instant-capture` sets both to 0.
+LiveView keeps streaming throughout.
+
+### The HSCube message
+
+One `IMAGE` at header version 2: a single-component `uint16` array of shape
+`(bands, lines, samples)` in pyigtl's `(k, j, i)` order, so the band is k. It holds
+the raw counts from `raw.dat` - uncalibrated, unrotated - with the identity matrix
+and LPS, so its (j, i) grid is the UC1 map's grid. A 752x721 case is about 100 MB
+in one message.
+
+| Metadata key | Value |
+| --- | --- |
+| `SLIAFlow.DeviceName` | `HSCube` |
+| `SLIAFlow.DataOrigin` | `simulated` |
+| `SLIAFlow.SimulationDetail` | `acquisition stand-in, recorded HSI case <case> (simulated acquisition)` |
+| `SLIAFlow.WavelengthsNm` | one value per band, comma-separated |
+| `SLIAFlow.DatasetFolder` | the case folder |
+
+It is sent once per capture: to the client connected on 18947 at that moment, or
+to the next one that connects. `READY` is reported either way, because in this
+arrangement the algorithms read the announced folder from disk.
+
+### The trigger client
+
+`python -m stratum_sim capture` connects, sends one `CAPTURE`, prints what comes
+back, and disconnects. It exits 0 once the capture its trigger started is
+`READY`, 2 when the trigger was ignored, and 1 on a refusal, on no connection, or
+on a timeout. With `--no-wait` it leaves as soon as the capture has started.
+That is how the launcher's `c` key runs it: a client waiting for `READY` would
+hold the control port for the whole delay, so a second press would be read only
+afterwards, and would start a new capture instead of being answered `IGNORED`.
+
+### LiveView in recorded mode
+
+LiveView is the laptop camera, which is what the demonstration shows, and it is
+the only source the mode accepts: a recorded session shows recorded data and a
+real camera, and nothing made up. `--frame-source` defaults to `webcam` in this
+mode, and any other value is refused. On a machine without a camera the stand-in
+stops with the camera error rather than falling back to a generated scene. The
+webcam conflict above applies. LiveView's `SimulationDetail` names its source -
+`acquisition stand-in, laptop camera` - and never the case, because the camera is
+not looking at it.
 
 ## Running the UC1 arithmetic stand-in
 
@@ -224,13 +361,16 @@ the rest absent rather than substituting zeros. Never run `uc1` and `uc1-real`
 together: five maps from two different boxes in one session would imply UC1
 produced all five.
 
-The pipeline is real; only the scene is invented, so the output is still marked
-`simulated` on the wire. `SLIAFlow.SimulationDetail` names which scene it was:
-`real UC1 pipeline, synthetic tissue phantom` when the dataset folder carries a
-phantom record, `real UC1 pipeline, synthetic input` otherwise. The runner reads
-that from the folder rather than from a switch, so it cannot be told to claim a
-scene the data does not support. The same `STRATUM SIMULATED CUBE` marker
-interlock applies, with the same `--force-unmarked` escape.
+The pipeline is real and the acquisition is simulated, so the output is still
+marked `simulated` on the wire. `SLIAFlow.SimulationDetail` names what the cube
+was: `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` for a
+recorded database case, `real UC1 pipeline, synthetic tissue phantom` when the
+dataset folder carries a phantom record, and `real UC1 pipeline, synthetic input`
+otherwise. The runner reads that from the folder rather than from a switch, so it
+cannot be told to claim an input the data does not support. A recorded case is
+approved input and runs with no switch; any other folder without the
+`STRATUM SIMULATED CUBE` marker is refused as before, with the same
+`--force-unmarked` escape.
 
 Failure is always loud. A non-zero exit, a missing output, an output left over
 from an earlier run, or an RGB triple outside the UC1 palette each stop the run;
@@ -265,8 +405,8 @@ than one that stops.
 | --- | --- | --- |
 | `preset` | `"demo"` | Frame size: `demo`, `medium` or `full`. |
 | `bands` | `93` | Bands in the generated cube. Minimum 8, see below - but the genuine UC1 runner accepts **only 93**. |
-| `frameSource` | `"synthetic"` | `synthetic` or `webcam`. Only used by the `channel` scene. |
-| `sceneMode` | `"tissue"` | `tissue` or `channel`. See "The two scenes" above. |
+| `frameSource` | `"synthetic"` | `synthetic` or `webcam`. Used by the `channel` scene. Scene mode `recorded` accepts only `webcam`, and its command line defaults to it. |
+| `sceneMode` | `"tissue"` | `tissue`, `channel` or `recorded`. See "The two scenes" and "Running a recorded case" above. |
 | `webcamIndex` | `0` | Camera index for the `webcam` source. |
 | `liveViewPort` | `18944` | Port the LiveView server socket listens on. |
 | `liveViewDeviceName` | `"LiveView"` | OpenIGTLink device name for the stream. |
@@ -277,6 +417,12 @@ than one that stops.
 | `textureFeatureCount` | `6` | Independent narrow features added to the spectral basis. Minimum 5, see below. Only used by the `channel` scene. |
 | `frameCount` | `0` | Stop after this many frames. 0 streams until Ctrl-C. |
 | `datasetRoot` | `null` | Dataset folder. `null` means `workspace/simulators/datasets`. |
+| `case` | `null` | Recorded case folder name. Required by, and only accepted in, the `recorded` scene. |
+| `recordedRoot` | `null` | Where recorded cases live. `null` means `input/bin/bin`. Read, never written. |
+| `hsCubePort` | `18947` | Port the `HSCube` server socket listens on, in the `recorded` scene. |
+| `controlPort` | `18950` | Port the capture control channel listens on, in the `recorded` scene. |
+| `captureDelayMinSec` | `5.0` | Shortest capture delay, in the `recorded` scene. |
+| `captureDelayMaxSec` | `8.0` | Longest capture delay, in the `recorded` scene; each capture draws a delay between the two. |
 
 ### 93 bands, for the genuine runner
 
