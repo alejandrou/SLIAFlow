@@ -951,12 +951,17 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         colorNode.SetHideFromEditors(True)
         colorNode.SetTypeToUser()
         colorNode.SetNumberOfColors(5)
+        # Classes 1-4 use the UC1 pipeline's own majority-voting palette, so a
+        # map on screen reads the same as the pipeline's output: majorityVoting
+        # in gpu_single_bsq/source/functions_cuda.cu fills a B,G,R buffer that
+        # writeMatrixRGB in BitmapWriter.cpp writes out as R,G,B. Index 0 is
+        # not a UC1 class and stays fully transparent.
         colors = (
             ("Unused", 0.0, 0.0, 0.0, 0.0),
-            ("Normal", 0.1, 0.8, 0.2, 1.0),
-            ("Tumour", 0.9, 0.1, 0.1, 1.0),
-            ("Hypervascularized", 1.0, 0.65, 0.0, 1.0),
-            ("Background", 0.2, 0.2, 0.2, 1.0),
+            ("Normal", 0.0, 1.0, 0.0, 1.0),
+            ("Tumour", 1.0, 0.0, 0.0, 1.0),
+            ("Hypervascularized", 0.0, 0.0, 1.0, 1.0),
+            ("Background", 0.0, 0.0, 0.0, 1.0),
         )
         for index, (name, red, green, blue, alpha) in enumerate(colors):
             colorNode.SetColor(index, name, red, green, blue, alpha)

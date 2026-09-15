@@ -68,7 +68,11 @@ catch.
    through the next real defect.
 6. **One behaviour per test.** Tests must be independent and must not depend on
    execution order. `setUp` clears the MRML scene.
-7. **Synthetic data only.** See `.ai/policies/medical-data-policy.md`.
+7. **Use approved data for the level being tested.** Automated unit tests may use
+   small synthetic fixtures for deterministic assertions. Manual and integration
+   image checks must use the real approved input named by the task; a simulator
+   phantom image is not evidence for a recorded-input check. See
+   `.ai/policies/medical-data-policy.md`.
 
 ## Traceability
 
@@ -93,10 +97,19 @@ Rules:
 
 `SLIAFlowTest` derives `moduleTestNames` from `unittest.TestLoader`, so Slicer's
 `Reload and Test` button and the command-line runner execute exactly the same
-set of test methods. Do not hand-maintain a list of test names and do not
-override `runTest`: a hand-written list silently omits any test method that is
-forgotten, and the two execution paths then disagree about what "all tests
-pass" means.
+set of test methods. Do not hand-maintain a list of test names: a hand-written
+list silently omits any test method that is forgotten, and the two execution
+paths then disagree about what "all tests pass" means.
+
+They must also agree about what a skip means. `Reload and Test` calls `runTest`
+on one instance, and the inherited `ScriptedLoadableModuleTest.runTest` calls
+each test method directly, so a `skipTest` escapes as an exception and every
+later test silently does not run. `SLIAFlowTest.runTest` therefore overrides it
+to run `moduleTestNames` through `unittest.TextTestRunner`, the same machinery
+as the command-line runner: skips are reported in the Python console and the
+run continues, and any failure or error fails the button.
+`SLIAFlowTest.test_reloadAndTestRunsPastSkippedTests` guards this. Keep the
+override; do not replace it with a hand-written loop.
 
 The command-line runner reports one test more than `SLIAFlowTest` defines.
 Slicer requires `ScriptedLoadableModuleTest` to be imported into the module
