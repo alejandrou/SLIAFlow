@@ -8,8 +8,11 @@ stale output and an unmapped colour without owning a graphics card.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shutil
+import socket
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -612,6 +615,107 @@ class SceneProvenanceTest(Uc1RunnerTestCase):
 
                 self.assertEqual(completed, 1)
                 self.assertEqual(observedDetails, [expectedDetail])
+
+
+def freeLocalPort() -> int:
+    """Return a port nothing holds at this moment."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class Uc1RunnerPortTest(unittest.TestCase):
+    """The runner's refusal of an occupied port, from its command line (SLIA-017).
+
+    The runner classifies before it serves, so a refusal that waited for the bind
+    would arrive after a GPU run. The dataset is the first thing it reads, and a
+    port that is served has to be refused before that.
+    """
+
+    def test_anOccupiedPortExitsBeforeTheDatasetIsRead(self):
+        port = freeLocalPort()
+        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(holder.close)
+        holder.bind(("127.0.0.1", port))
+        holder.listen()
+
+        # The override cannot join a holder that did not ask to share, so it has to
+        # be refused before the GPU run too.
+        for arguments in ([], ["--allow-shared-port"]):
+            with self.subTest(arguments=arguments):
+                errors = io.StringIO()
+                with (
+                    mock.patch.object(
+                        uc1_runner.contract,
+                        "loadDataset",
+                        side_effect=AssertionError("The dataset was read."),
+                    ) as loadDataset,
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    exitCode = uc1_runner.main(
+                        ["unread-dataset-folder", "--port", str(port), *arguments]
+                    )
+
+                self.assertEqual(exitCode, 1, errors.getvalue())
+                self.assertIn(f"127.0.0.1:{port}", errors.getvalue())
+                loadDataset.assert_not_called()
+
+    def test_allowSharedPortReachesTheServer(self):
+        dataset = contract.DatasetRef(Path("dataset-folder"), 3, 2, 93, tuple(range(93)), True)
+        maps = contract.Uc1Maps(majorityVotingMap=FIXTURE_CLASS_MAP[numpy.newaxis, ...])
+
+        class Classifier:
+            def classify(self, _dataset):
+                return maps
+
+        class Interrupt:
+            requested = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_arguments):
+                return False
+
+        for arguments, expected in (([], False), (["--allow-shared-port"], True)):
+            with self.subTest(arguments=arguments):
+                port = freeLocalPort()
+                with (
+                    mock.patch.object(uc1_runner.contract, "loadDataset", return_value=dataset),
+                    mock.patch.object(uc1_runner, "Uc1Build"),
+                    mock.patch.object(uc1_runner, "RealUc1Classifier", return_value=Classifier()),
+                    mock.patch.object(
+                        uc1_runner, "simulationDetailForDataset", return_value="test detail"
+                    ),
+                    mock.patch.object(uc1_runner.igtl_transport, "ImageStreamServer") as serverClass,
+                    mock.patch.object(
+                        uc1_runner.igtl_transport, "InterruptFlag", return_value=Interrupt()
+                    ),
+                    mock.patch.object(uc1_runner, "sendMaps", return_value=True),
+                    mock.patch.object(uc1_runner.time, "sleep"),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    exitCode = uc1_runner.main(
+                        [
+                            "dataset-folder",
+                            "--build-root",
+                            "build-root",
+                            "--port",
+                            str(port),
+                            "--cycles",
+                            "1",
+                            "--interval",
+                            "0",
+                            *arguments,
+                        ]
+                    )
+
+                self.assertEqual(exitCode, 0)
+                serverClass.assert_called_once()
+                self.assertEqual(serverClass.call_args.kwargs["port"], port)
+                self.assertIs(serverClass.call_args.kwargs.get("allowSharedPort", False), expected)
 
 
 class RecordedCaseRunnerTest(unittest.TestCase):

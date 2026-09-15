@@ -564,6 +564,7 @@ def streamMaps(
     port: int = DEFAULT_PORT,
     cycles: int = 0,
     intervalSec: float = DEFAULT_INTERVAL_SEC,
+    allowSharedPort: bool = False,
 ) -> int:
     """Serve the recovered class map until interrupted, or until `cycles` succeed.
 
@@ -587,7 +588,7 @@ def streamMaps(
     completedCycles = 0
 
     with (
-        igtl_transport.ImageStreamServer(port=port) as server,
+        igtl_transport.ImageStreamServer(port=port, allowSharedPort=allowSharedPort) as server,
         igtl_transport.InterruptFlag() as interrupt,
     ):
         print(
@@ -700,12 +701,27 @@ def buildArgumentParser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run the pipeline and report the recovered map without opening a server.",
     )
+    parser.add_argument(
+        "--allow-shared-port",
+        dest="allowSharedPort",
+        action="store_true",
+        help=(
+            "Serve a port another producer is serving. Both must be started with this "
+            "switch; without it an occupied port is refused."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = buildArgumentParser().parse_args(argv)
     try:
+        # Before the dataset and the pipeline: a refusal that waited for the bind
+        # would arrive after a GPU run.
+        if not arguments.classifyOnly:
+            igtl_transport.assertPortCanBeServed(
+                arguments.port, allowSharedPort=arguments.allowSharedPort
+            )
         dataset = contract.loadDataset(arguments.datasetFolder)
         if arguments.forceUnmarked:
             print(
@@ -741,6 +757,7 @@ def main(argv: list[str] | None = None) -> int:
             port=arguments.port,
             cycles=arguments.cycles,
             intervalSec=arguments.intervalSec,
+            allowSharedPort=arguments.allowSharedPort,
         )
     except (OSError, ValueError, RuntimeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

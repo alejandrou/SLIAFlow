@@ -8,7 +8,9 @@ the intervals it actually spans.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import io
 import socket
 import tempfile
 import threading
@@ -476,6 +478,151 @@ class RecordedCaptureWireTest(unittest.TestCase):
         self.assertTrue(
             any("IGNORED capture 1 already in progress" in line for line in printed), printed
         )
+
+
+class StoppedInterrupt:
+    """An `InterruptFlag` that has already been asked to stop."""
+
+    requested = True
+
+    def __enter__(self) -> StoppedInterrupt:
+        return self
+
+    def __exit__(self, *_arguments) -> None:
+        return None
+
+
+class AcquisitionPortTest(unittest.TestCase):
+    """The stand-in's refusal of an occupied port, from its command line (SLIA-017)."""
+
+    def setUp(self):
+        self._temporaryDirectory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporaryDirectory.cleanup)
+        repositoryRoot = Path(self._temporaryDirectory.name).resolve()
+        support.writeRecordedCaseFixture(repositoryRoot / "input" / "bin" / "bin" / CASE_NAME)
+
+        ports: set[int] = set()
+        while len(ports) < 3:
+            ports.add(freeLocalPort())
+        self.liveViewPort, self.hsCubePort, self.controlPort = sorted(ports)
+
+        self.simulatorConfig = config.loadSimulatorConfig(
+            repositoryRoot,
+            overrides={
+                "sceneMode": "recorded",
+                "case": CASE_NAME,
+                "frameSource": "webcam",
+                "captureDelayMinSec": 0.0,
+                "captureDelayMaxSec": 0.0,
+                "liveViewPort": self.liveViewPort,
+                "hsCubePort": self.hsCubePort,
+                "controlPort": self.controlPort,
+            },
+        )
+        self.commandLine = ["--scene-mode", "recorded", "--case", CASE_NAME]
+
+    def runMain(self, arguments, **patches) -> tuple[int, str]:
+        errors = io.StringIO()
+        with (
+            mock.patch.object(
+                acquisition_sim.config, "loadSimulatorConfig", return_value=self.simulatorConfig
+            ),
+            contextlib.ExitStack() as stack,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(errors),
+        ):
+            for target, attribute, patch in patches.values():
+                stack.enter_context(mock.patch.object(target, attribute, **patch))
+            exitCode = acquisition_sim.main(arguments)
+        return exitCode, errors.getvalue()
+
+    def test_anOccupiedPortExitsBeforeTheCameraOpens(self):
+        # The cube port, the middle of the three, so that a check of LiveView
+        # alone would not find it.
+        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(holder.close)
+        holder.bind(("127.0.0.1", self.hsCubePort))
+        holder.listen()
+
+        # The override cannot join a holder that did not ask to share, so it has to
+        # be refused before the camera too.
+        for arguments in ([], ["--allow-shared-port"]):
+            with self.subTest(arguments=arguments):
+                camera = mock.Mock(side_effect=AssertionError("The camera was opened."))
+                caseRead = mock.Mock(side_effect=AssertionError("The case was read."))
+                exitCode, errors = self.runMain(
+                    self.commandLine + arguments,
+                    camera=(acquisition_sim.frames, "createFrameSource", {"new": camera}),
+                    case=(acquisition_sim, "loadRecordedCase", {"new": caseRead}),
+                )
+
+                self.assertEqual(exitCode, 1, errors)
+                self.assertIn(f"127.0.0.1:{self.hsCubePort}", errors)
+                camera.assert_not_called()
+                caseRead.assert_not_called()
+
+    def test_aPortConfiguredForTwoChannelsExitsBeforeTheCameraOpens(self):
+        # Probing each port on its own passes a port given twice, and the stand-in
+        # then either failed on its second server after opening the camera or, with
+        # the override, served two channels on one port.
+        self.simulatorConfig = dataclasses.replace(
+            self.simulatorConfig, controlPort=self.hsCubePort
+        )
+        for arguments in ([], ["--allow-shared-port"]):
+            with self.subTest(arguments=arguments):
+                camera = mock.Mock(side_effect=AssertionError("The camera was opened."))
+                caseRead = mock.Mock(side_effect=AssertionError("The case was read."))
+                exitCode, errors = self.runMain(
+                    self.commandLine + arguments,
+                    camera=(acquisition_sim.frames, "createFrameSource", {"new": camera}),
+                    case=(acquisition_sim, "loadRecordedCase", {"new": caseRead}),
+                )
+
+                self.assertEqual(exitCode, 1, errors)
+                self.assertIn("ERROR:", errors)
+                self.assertIn(f"hsCubePort and controlPort are both {self.hsCubePort}", errors)
+                camera.assert_not_called()
+                caseRead.assert_not_called()
+
+    def test_allowSharedPortReachesTheServers(self):
+        for arguments, expected in (([], False), (["--allow-shared-port"], True)):
+            with self.subTest(arguments=arguments):
+                constructed: list[dict] = []
+
+                def recordingServer(constructed=constructed, **serverArguments):
+                    constructed.append(serverArguments)
+                    return FakeServer(serverArguments["port"])
+
+                exitCode, errors = self.runMain(
+                    self.commandLine + arguments,
+                    server=(
+                        acquisition_sim.igtl_transport,
+                        "ImageStreamServer",
+                        {"side_effect": recordingServer},
+                    ),
+                    interrupt=(
+                        acquisition_sim.igtl_transport,
+                        "InterruptFlag",
+                        {"return_value": StoppedInterrupt()},
+                    ),
+                    camera=(
+                        acquisition_sim.frames,
+                        "createFrameSource",
+                        {
+                            "return_value": StillFrameSource(
+                                self.simulatorConfig.samples, self.simulatorConfig.lines
+                            )
+                        },
+                    ),
+                )
+
+                self.assertEqual(exitCode, 0, errors)
+                self.assertEqual(
+                    sorted(serverArguments["port"] for serverArguments in constructed),
+                    [self.liveViewPort, self.hsCubePort, self.controlPort],
+                )
+                for serverArguments in constructed:
+                    self.assertIs(serverArguments.get("allowSharedPort", False), expected)
 
 
 if __name__ == "__main__":

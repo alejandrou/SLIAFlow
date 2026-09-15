@@ -15,6 +15,7 @@ Nothing produced here is a clinical result.
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import sys
 import time
@@ -439,7 +440,11 @@ def enqueueRate(enqueuedFrameCount: int, measurementStart: float | None) -> floa
     return (enqueuedFrameCount - 1) / elapsed if elapsed > 0.0 else 0.0
 
 
-def streamLiveView(simulatorConfig: config.SimulatorConfig, frameSource) -> float:
+def streamLiveView(
+    simulatorConfig: config.SimulatorConfig,
+    frameSource,
+    serverFactory=igtl_transport.ImageStreamServer,
+) -> float:
     """Serve LiveView until interrupted. Returns the achieved enqueue rate.
 
     The rate returned is measured where the sender can measure it: frames handed
@@ -459,7 +464,7 @@ def streamLiveView(simulatorConfig: config.SimulatorConfig, frameSource) -> floa
     achievedFrameRate = 0.0
     reportedRate = False
 
-    with igtl_transport.ImageStreamServer(port=simulatorConfig.liveViewPort) as server, (
+    with serverFactory(port=simulatorConfig.liveViewPort) as server, (
         igtl_transport.InterruptFlag()
     ) as interrupt:
         print(
@@ -581,7 +586,54 @@ def buildArgumentParser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write the dataset and exit without serving LiveView.",
     )
+    parser.add_argument(
+        "--allow-shared-port",
+        dest="allowSharedPort",
+        action="store_true",
+        help=(
+            "Serve ports another producer is serving. Both must be started with this "
+            "switch; without it an occupied port is refused."
+        ),
+    )
     return parser
+
+
+def servedPortSettings(simulatorConfig: config.SimulatorConfig) -> dict[str, int]:
+    """Every port the configured scene opens a server on, by the setting that names it."""
+    if simulatorConfig.sceneMode == config.SCENE_MODE_RECORDED:
+        names = ("liveViewPort", "hsCubePort", "controlPort")
+    else:
+        names = ("liveViewPort",)
+    return {name: getattr(simulatorConfig, name) for name in names}
+
+
+def servedPorts(simulatorConfig: config.SimulatorConfig) -> tuple[int, ...]:
+    """Every port the configured scene opens a server on."""
+    return tuple(servedPortSettings(simulatorConfig).values())
+
+
+def repeatedServedPortMessage(simulatorConfig: config.SimulatorConfig) -> str | None:
+    """The refusal of one port configured for two channels, or `None` when all differ.
+
+    Each port is probed on its own, and a port given twice passes both probes.
+    """
+    settingsByPort: dict[int, list[str]] = {}
+    for name, port in servedPortSettings(simulatorConfig).items():
+        settingsByPort.setdefault(port, []).append(name)
+    clashes = [
+        f"{', '.join(names[:-1])} and {names[-1]} are {'all' if len(names) > 2 else 'both'} {port}"
+        for port, names in settingsByPort.items()
+        if len(names) > 1
+    ]
+    if not clashes:
+        return None
+    return (
+        "; ".join(clashes)
+        + ". Each channel needs a port of its own, or a client of one channel would reach the "
+        "server of another. Give them different ports in config/local.json or with --port, "
+        "--cube-port and --control-port. --allow-shared-port shares a port between producers, "
+        "never between one producer's own channels."
+    )
 
 
 def commandLineOverrides(arguments: argparse.Namespace) -> dict:
@@ -589,7 +641,7 @@ def commandLineOverrides(arguments: argparse.Namespace) -> dict:
     # `datasetFolder` names one folder rather than the root the folder is
     # created under, so it is not a configuration setting and is kept out of the
     # overrides the loader validates.
-    commandLineOnly = ("dataset_only", "datasetFolder", "instantCapture")
+    commandLineOnly = ("dataset_only", "datasetFolder", "instantCapture", "allowSharedPort")
     overrides = {
         key: value
         for key, value in vars(arguments).items()
@@ -614,8 +666,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
+    # Before the dataset and the camera: a refusal that waited for the bind would
+    # arrive after the camera had been taken from SLIAFlow.
+    if not arguments.dataset_only:
+        repeatedPorts = repeatedServedPortMessage(simulatorConfig)
+        if repeatedPorts is not None:
+            print(f"ERROR: {repeatedPorts}", file=sys.stderr)
+            return 1
+        try:
+            for port in servedPorts(simulatorConfig):
+                igtl_transport.assertPortCanBeServed(
+                    port, allowSharedPort=arguments.allowSharedPort
+                )
+        except igtl_transport.PortRefusedError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+    serverFactory = functools.partial(
+        igtl_transport.ImageStreamServer, allowSharedPort=arguments.allowSharedPort
+    )
+
     if simulatorConfig.sceneMode == config.SCENE_MODE_RECORDED:
-        return runRecordedStandIn(simulatorConfig, arguments)
+        return runRecordedStandIn(simulatorConfig, arguments, serverFactory)
 
     print(NON_CLINICAL_NOTICE)
     isPhantom = simulatorConfig.sceneMode == config.SCENE_MODE_TISSUE
@@ -681,7 +752,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        streamLiveView(simulatorConfig, frameSource)
+        streamLiveView(simulatorConfig, frameSource, serverFactory)
+    except igtl_transport.PortRefusedError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
     finally:
         closeSource = getattr(frameSource, "close", None)
         if callable(closeSource):
@@ -691,7 +765,11 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def runRecordedStandIn(simulatorConfig: config.SimulatorConfig, arguments) -> int:
+def runRecordedStandIn(
+    simulatorConfig: config.SimulatorConfig,
+    arguments,
+    serverFactory=igtl_transport.ImageStreamServer,
+) -> int:
     """Run scene mode 'recorded'. There is no dataset step, because nothing is written."""
     if arguments.dataset_only or arguments.datasetFolder:
         print(
@@ -738,7 +816,12 @@ def runRecordedStandIn(simulatorConfig: config.SimulatorConfig, arguments) -> in
         return 1
 
     try:
-        controller = serveRecordedCapture(simulatorConfig, frameSource, dataset)
+        controller = serveRecordedCapture(
+            simulatorConfig, frameSource, dataset, serverFactory=serverFactory
+        )
+    except igtl_transport.PortRefusedError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
     finally:
         closeSource = getattr(frameSource, "close", None)
         if callable(closeSource):

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import socket
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -9,6 +12,13 @@ from unittest import mock
 import numpy
 
 from stratum_sim import contract, uc1_maps, uc1_sim
+
+
+def freeLocalPort() -> int:
+    """Return a port nothing holds at this moment."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def validMaps() -> contract.Uc1Maps:
@@ -124,6 +134,69 @@ class SendMapsTest(unittest.TestCase):
                 server = FakeServer(imageResults=[True] * failureIndex + [False])
                 self.assertFalse(uc1_sim.sendMaps(server, validMaps()))
                 self.assertEqual(len(server.images), failureIndex + 1)
+
+
+class Uc1SimPortTest(unittest.TestCase):
+    """The stand-in's refusal of an occupied port, from its command line (SLIA-017)."""
+
+    def test_anOccupiedPortExitsBeforeTheDatasetIsRead(self):
+        port = freeLocalPort()
+        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(holder.close)
+        holder.bind(("127.0.0.1", port))
+        holder.listen()
+
+        # The override cannot join a holder that did not ask to share, so it has to
+        # be refused just as early.
+        for arguments in ([], ["--allow-shared-port"]):
+            with self.subTest(arguments=arguments):
+                errors = io.StringIO()
+                with (
+                    mock.patch.object(
+                        uc1_sim.contract,
+                        "loadDataset",
+                        side_effect=AssertionError("The dataset was read."),
+                    ) as loadDataset,
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    exitCode = uc1_sim.main(
+                        ["unread-dataset-folder", "--port", str(port), *arguments]
+                    )
+
+                self.assertEqual(exitCode, 1, errors.getvalue())
+                self.assertIn(f"127.0.0.1:{port}", errors.getvalue())
+                loadDataset.assert_not_called()
+
+    def test_allowSharedPortReachesTheServer(self):
+        dataset = contract.DatasetRef(Path("synthetic"), 3, 2, 4, (1.0, 2.0, 3.0, 4.0), True)
+        for arguments, expected in (([], False), (["--allow-shared-port"], True)):
+            with self.subTest(arguments=arguments):
+                port = freeLocalPort()
+                with (
+                    mock.patch.object(uc1_sim.contract, "loadDataset", return_value=dataset),
+                    mock.patch.object(
+                        uc1_sim.uc1_maps,
+                        "ArithmeticClassifier",
+                        return_value=FakeClassifier(validMaps()),
+                    ),
+                    mock.patch.object(
+                        uc1_sim.igtl_transport, "ImageStreamServer", return_value=FakeServer()
+                    ) as serverClass,
+                    mock.patch.object(
+                        uc1_sim.igtl_transport, "InterruptFlag", return_value=FakeInterrupt()
+                    ),
+                    mock.patch.object(uc1_sim.time, "sleep"),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    exitCode = uc1_sim.main(
+                        ["dataset-folder", "--port", str(port), "--cycles", "1", *arguments]
+                    )
+
+                self.assertEqual(exitCode, 0)
+                serverClass.assert_called_once()
+                self.assertEqual(serverClass.call_args.kwargs["port"], port)
+                self.assertIs(serverClass.call_args.kwargs.get("allowSharedPort", False), expected)
 
 
 class StreamMapsTest(unittest.TestCase):

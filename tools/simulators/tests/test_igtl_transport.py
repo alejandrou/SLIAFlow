@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
+import re
 import socket
+import subprocess
 import sys
 import time
 import unittest
 from importlib import metadata
+from pathlib import Path
+from unittest import mock
 
 import numpy
 import pyigtl
@@ -298,3 +303,334 @@ class ClientWatchTest(unittest.TestCase):
         self.assertTrue(warned, f"No warning was printed for a second client:\n{output}")
         self.assertTrue(withdrawn, f"The warning was not withdrawn after the waiting client left:\n{output}")
         self.assertEqual(output.count("WARNING:"), 1, output)
+
+
+# The port table in `docs/architecture/WP5_MS5_DEMO_PLAN.md` is the authority for
+# these, not the code under test.
+DOCUMENTED_RESERVED_CHANNELS = {18948: "Stereoscopic", 18949: "UC2_STO2"}
+
+# Where the package the scan below reads lives. A module constant so that a
+# scratch runner can point it at a copy when showing the scan fail.
+STRATUM_SIM_PACKAGE_ROOT = Path(igtl_transport.__file__).resolve().parent
+
+# A construction, a subclass or an import of pyigtl's server. `config.py` names the
+# C++ file `OpenIGTLinkServer.cpp` in a comment, which is not a server.
+PYIGTL_SERVER_REFERENCE = re.compile(r"\bOpenIGTLinkServer\b(?!\.cpp)")
+
+SERVED_DEADLINE_SEC = 10.0
+
+
+class PortRefusalTest(unittest.TestCase):
+    """What a producer does when its port is already served (SLIA-017).
+
+    pyigtl sets `SO_REUSEADDR`, and on Windows that lets a second server bind a
+    port another one is listening on. These start real servers on a free local
+    port and read the raised error, because its text is what reaches the
+    operator. The expected wording is the SLIA-017 card's.
+    """
+
+    def setUp(self) -> None:
+        self.port = freeLocalPort()
+        self.address = f"127.0.0.1:{self.port}"
+        self.servers: list[igtl_transport.ImageStreamServer] = []
+
+        # The client watch prints attach and release lines from its own thread.
+        silenced = contextlib.redirect_stdout(io.StringIO())
+        silenced.__enter__()
+        self.addCleanup(silenced.__exit__, None, None, None)
+        self.addCleanup(self.stopServers)
+
+    def stopServers(self) -> None:
+        for server in reversed(self.servers):
+            server.stop()
+
+    def startServer(self, **arguments) -> igtl_transport.ImageStreamServer:
+        server = igtl_transport.ImageStreamServer(port=self.port, **arguments)
+        self.servers.append(server)
+        server.start()
+        return server
+
+    def attachClient(self) -> pyigtl.OpenIGTLinkClient:
+        client = pyigtl.OpenIGTLinkClient(host="127.0.0.1", port=self.port)
+        self.addCleanup(client.stop)
+        return client
+
+    def waitFor(self, condition) -> bool:
+        deadline = time.monotonic() + SERVED_DEADLINE_SEC
+        while time.monotonic() < deadline:
+            if condition():
+                return True
+            time.sleep(SEND_PERIOD_SEC)
+        return condition()
+
+    def test_aSecondServerOnAnOccupiedPortIsRefused(self):
+        self.startServer()
+
+        with self.assertRaises(OSError) as refused:
+            self.startServer()
+
+        self.assertIsInstance(refused.exception, igtl_transport.PortRefusedError)
+        message = str(refused.exception)
+        self.assertIn(self.address, message)
+        self.assertIn("Stop the other producer", message)
+        self.assertIn("different port", message)
+        self.assertIn("--allow-shared-port", message)
+
+    @needsWindowsTcpTable
+    def test_theRefusalNamesTheProcessHoldingThePort(self):
+        self.startServer()
+
+        with self.assertRaises(OSError) as refused:
+            self.startServer()
+
+        message = str(refused.exception)
+        self.assertIn(f"PID {os.getpid()}", message)
+        # The venv's launcher and the interpreter it starts are both python.exe.
+        self.assertIn(Path(sys.executable).name.lower(), message.lower())
+
+    def test_aPortHeldByAnyListenerIsRefusedTheSameWay(self):
+        # A listener that did not set SO_REUSEADDR already stopped pyigtl's bind,
+        # as WinError 10013, whose text names neither the port nor the remedy.
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", self.port))
+        listener.listen()
+
+        with self.assertRaises(OSError) as refused:
+            self.startServer()
+
+        message = str(refused.exception)
+        self.assertIn(self.address, message)
+        self.assertIn("Stop the other producer", message)
+
+    def test_aReservedPortIsRefusedByNameWithoutBinding(self):
+        for port, channel in DOCUMENTED_RESERVED_CHANNELS.items():
+            for sharingArguments in ({}, {"allowSharedPort": True}):
+                with (
+                    self.subTest(port=port, **sharingArguments),
+                    mock.patch.object(igtl_transport, "_DepartureAwareServer") as serverClass,
+                    mock.patch.object(igtl_transport, "_SharedPortServer", create=True) as sharedClass,
+                    mock.patch.object(igtl_transport, "ClientWatch"),
+                ):
+                    server = igtl_transport.ImageStreamServer(port=port, **sharingArguments)
+                    with self.assertRaises(OSError) as refused:
+                        server.start()
+
+                    message = str(refused.exception)
+                    self.assertIn(str(port), message)
+                    self.assertIn(channel, message)
+                    self.assertIn("reserved", message)
+                    serverClass.assert_not_called()
+                    sharedClass.assert_not_called()
+
+            with self.subTest(port=port, check="early"):
+                with self.assertRaises(OSError) as refused:
+                    igtl_transport.assertPortCanBeServed(port, allowSharedPort=True)
+                self.assertIn(channel, str(refused.exception))
+
+    def test_twoProducersThatBothOptInShareAPort(self):
+        self.startServer(allowSharedPort=True)
+        self.startServer(allowSharedPort=True)
+
+        self.attachClient()
+
+        self.assertTrue(
+            self.waitFor(lambda: any(server.isConnected for server in self.servers)),
+            "Neither producer served the client.",
+        )
+
+    def test_theOverrideDoesNotJoinAProducerThatDidNotOptIn(self):
+        self.startServer()
+
+        with self.assertRaises(OSError) as refused:
+            self.startServer(allowSharedPort=True)
+
+        self.assertIn(self.address, str(refused.exception))
+
+    def test_theEarlyCheckWithTheOverrideRefusesAProducerThatDidNotOptIn(self):
+        # Without this the override skipped the early check, and `uc1-real` learnt
+        # of the refusal only at the bind, after its GPU run.
+        self.startServer()
+
+        with self.assertRaises(igtl_transport.PortRefusedError) as refused:
+            igtl_transport.assertPortCanBeServed(self.port, allowSharedPort=True)
+
+        message = str(refused.exception)
+        self.assertIn(self.address, message)
+        self.assertIn("was not started with --allow-shared-port", message)
+        self.assertIn("Stop the other producer", message)
+
+    def test_theEarlyCheckWithTheOverrideAcceptsAProducerThatOptedIn(self):
+        self.startServer(allowSharedPort=True)
+
+        igtl_transport.assertPortCanBeServed(self.port, allowSharedPort=True)
+
+    def test_aRestartThatFindsItsPortTakenSaysWhy(self):
+        # The send-failure restart leaves the port free for one delay. A listener
+        # that takes it then is refused at the restart's bind, and the operator is
+        # told that this producer stopped serving, and why, rather than only that
+        # some port is held.
+        server = self.startServer()
+        pyigtlServer = server._server
+        takenBy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(takenBy.close)
+        restartDelay = 0.0125
+        realSleep = time.sleep
+
+        def sleepTakingThePort(seconds):
+            if seconds == restartDelay:
+                takenBy.bind(("127.0.0.1", self.port))
+                takenBy.listen()
+            else:
+                realSleep(seconds)
+
+        with (
+            mock.patch.object(igtl_transport, "RECONNECT_DELAY_SEC", restartDelay),
+            mock.patch.object(igtl_transport.time, "sleep", side_effect=sleepTakingThePort),
+            mock.patch.object(pyigtlServer, "is_connected", return_value=True),
+            mock.patch.object(
+                pyigtlServer, "send_message", side_effect=ConnectionResetError("The client left.")
+            ),
+            self.assertLogs(igtl_transport.logger, "WARNING"),
+            self.assertRaises(igtl_transport.PortRefusedError) as refused,
+        ):
+            server.sendString("text", "Device")
+
+        message = str(refused.exception)
+        self.assertIn(self.address, message)
+        self.assertIn("restarted after a failed send", message)
+        self.assertIn("stopped serving", message)
+
+    def test_aProducerRestartsOnItsOwnPortAfterServingAClient(self):
+        # The previous clients leave TIME_WAIT rows on the port. A producer's own
+        # restart, and a new run straight after the last, must not read them as
+        # a holder.
+        server = self.startServer()
+        client = self.attachClient()
+        self.assertTrue(self.waitFor(lambda: server.isConnected), "The client was never served.")
+        server.stop()
+        client.stop()
+
+        restarted = self.startServer()
+
+        self.assertFalse(restarted.isConnected)
+
+    def test_onlyTheTransportConstructsAPyigtlServer(self):
+        # A later producer, such as SLIA-021's UC2 runner, inherits the refusal
+        # only by building its server through `ImageStreamServer`.
+        offenders = [
+            path.name
+            for path in sorted(STRATUM_SIM_PACKAGE_ROOT.glob("*.py"))
+            if path.name != "igtl_transport.py"
+            and PYIGTL_SERVER_REFERENCE.search(path.read_text(encoding="utf-8"))
+        ]
+
+        self.assertEqual(offenders, [])
+
+
+# A producer in its own interpreter: it serves until its standard input closes,
+# and reports the PID of the interpreter that owns the socket, which with the venv
+# launcher is not the PID `Popen` returns.
+SEPARATE_PRODUCER_SCRIPT = """
+import os, sys
+from stratum_sim import igtl_transport
+server = igtl_transport.ImageStreamServer(port=int(sys.argv[1]), allowSharedPort=sys.argv[2] == "shared")
+server.start()
+print(f"serving {os.getpid()}", flush=True)
+sys.stdin.read()
+server.stop()
+"""
+
+SEPARATE_PRODUCER_START_TIMEOUT_SEC = 20.0
+
+
+@needsWindowsTcpTable
+class SeparateProcessSharingTest(unittest.TestCase):
+    """`--allow-shared-port` between two producer processes, as it is used (SLIA-017).
+
+    Windows decides a shared bind per socket, whichever process owns it, but the
+    in-process tests above cannot show that, nor that the holder is named by the
+    PID of another process.
+    """
+
+    def setUp(self) -> None:
+        self.port = freeLocalPort()
+        self.address = f"127.0.0.1:{self.port}"
+
+    def startSeparateProducer(self, sharing: bool) -> int:
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [str(STRATUM_SIM_PACKAGE_ROOT.parent), environment.get("PYTHONPATH")])
+        )
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                SEPARATE_PRODUCER_SCRIPT,
+                str(self.port),
+                "shared" if sharing else "exclusive",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=environment,
+        )
+
+        def stopSeparateProducer() -> None:
+            process.stdin.close()
+            try:
+                process.wait(timeout=SEPARATE_PRODUCER_START_TIMEOUT_SEC)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            process.stdout.close()
+
+        self.addCleanup(stopSeparateProducer)
+
+        # The producer's client watch prints on the same stream.
+        deadline = time.monotonic() + SEPARATE_PRODUCER_START_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            line = process.stdout.readline()
+            if not line:
+                self.fail("The separate producer exited before it was serving.")
+            if line.startswith("serving "):
+                return int(line.split()[1])
+        self.fail("The separate producer did not start serving in time.")
+
+    def startServerHere(self) -> tuple[igtl_transport.ImageStreamServer, str]:
+        server = igtl_transport.ImageStreamServer(port=self.port, allowSharedPort=True)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
+            server.start()
+        self.addCleanup(server.stop)
+        return server, errors.getvalue()
+
+    def test_producersInSeparateProcessesShareWhenBothOptIn(self):
+        holderId = self.startSeparateProducer(sharing=True)
+
+        igtl_transport.assertPortCanBeServed(self.port, allowSharedPort=True)
+        _server, errors = self.startServerHere()
+
+        self.assertIn(os.getpid(), igtl_transport.listeningProcessIds(self.port))
+        self.assertIn(holderId, igtl_transport.listeningProcessIds(self.port))
+        # Sharing is on purpose, but a client now reaches either producer, and the
+        # console of each has to say so.
+        self.assertIn("WARNING:", errors)
+        self.assertIn(self.address, errors)
+        self.assertIn(f"PID {holderId}", errors)
+
+    def test_aSeparateProducerThatDidNotOptInIsNotJoined(self):
+        holderId = self.startSeparateProducer(sharing=False)
+
+        with self.assertRaises(igtl_transport.PortRefusedError) as early:
+            igtl_transport.assertPortCanBeServed(self.port, allowSharedPort=True)
+        with self.assertRaises(igtl_transport.PortRefusedError) as bound:
+            self.startServerHere()
+
+        for refused in (early, bound):
+            message = str(refused.exception)
+            self.assertIn(f"PID {holderId}", message)
+            self.assertIn("was not started with --allow-shared-port", message)
+            self.assertIn(f"Stop-Process -Id {holderId}", message)
+        self.assertEqual(igtl_transport.listeningProcessIds(self.port), [holderId])

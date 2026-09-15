@@ -45,7 +45,7 @@ reproduction, which is the most valuable thing the session can produce.
 | Vendored UC1 CUDA binary built for this GPU | `.\scripts\development\build-uc1.ps1` | `docs/development/uc1_local_build.md` |
 | SLIAFlow launcher built with SlicerOpenIGTLink | `.\scripts\development\build-sliaflow.ps1` produces `build\SLIAFlow\SlicerWithSLIAFlow.exe` | `README_SLIAFlow_Build.md` |
 | `config/local.json` present with a valid `slicerExecutable` | Copy `config/local.example.json` and edit | `AGENTS.md` |
-| Ports 18944 and 18945 free on the loopback interface | No earlier simulator or Slicer session still running | `netstat -ano \| findstr "18944 18945"` |
+| Ports 18944 and 18945 free on the loopback interface | No earlier simulator or Slicer session still running. Advisory since `SLIA-017`: a producer refuses an occupied or reserved port itself, names the process holding it and exits 1, so this check finds a stray before anything is started rather than being the only thing that would. Two producers share a port only when both are given `--allow-shared-port` | `netstat -ano \| findstr "18944 18945"` |
 
 ## Running the whole session from one console
 
