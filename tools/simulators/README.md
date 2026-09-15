@@ -122,6 +122,29 @@ Only one client at a time. `pyigtl.OpenIGTLinkServer` is a plain
 second client waits unserved until the first one goes away. Run this client with
 SLIAFlow's acquisition link disconnected, not alongside it.
 
+A client that closes is let go at once, even on a port that is sending nothing,
+such as HSCube between captures, so a client reopened in its place is served
+straight away and receives the next cube. pyigtl on its own notices a departure
+only when a send fails. The release prints a pyigtl traceback ending
+`Error while receiving data: The client closed the connection.` to standard
+error; that is the normal path, not a fault.
+
+Every producer says so when it happens (SLIA-018). Each port prints
+`127.0.0.1:<port>: serving 1 client.` and `serving 0 clients.` as its served
+client comes and goes. A second client that stays attached for 2 s draws one
+line:
+
+```text
+WARNING: 127.0.0.1:18944 has 2 clients attached, and a producer serves one client at a time. ...
+```
+
+Close the other client. When the extra client has gone, the port prints
+`only one client is attached again; the warning above no longer applies.` The
+warning is confirmed against the Windows TCP table before it is printed, because
+the listening socket alone goes on reporting a queued connection after the client
+behind it has given up; off Windows the attach and release lines still print but
+no warning is confirmed.
+
 The rate this client reports is the one to trust. The simulator's own figure
 counts frames handed to `send_message(wait=False)`, which returns as soon as the
 message is queued on the writer thread, so it is an upper bound on delivered
