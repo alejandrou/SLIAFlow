@@ -206,7 +206,9 @@ raises `DatasetReadError`.
 | 18950 | `CaptureTrigger` | to the stand-in |
 | 18950 | `CaptureReply`, `CaptureStatus` | from the stand-in |
 
-18948 (stereoscopic) and 18949 (StO2) are reserved and never bound.
+18948 (stereoscopic) and 18949 (StO2) are reserved and never bound. A producer asked
+to serve one refuses by name; see
+[A port that is already served](#a-port-that-is-already-served).
 
 ### The control channel
 
@@ -414,6 +416,55 @@ and swaps the map producer on a keypress. Use it rather than opening a shell per
 producer; the procedure document keeps the by-hand commands as well.
 `docs/development/pipeline_test_quickstart.md` is the short version: the command,
 what a good startup looks like, the session keys, and what to do when it fails.
+
+## A port that is already served
+
+Every producer refuses to start on a port another socket is already listening on
+(SLIA-017), and exits 1 with one line naming the port and the process holding it:
+
+```text
+ERROR: 127.0.0.1:18945 is already being served by PID 12345 (python.exe). A second producer on it would not take it over: both would listen, and a client would reach whichever one accepted. Stop the other producer, or pass a different port. Two producers share a port only when both are started with --allow-shared-port. To stop it: Stop-Process -Id 12345
+```
+
+The PID is the interpreter that owns the socket, the one `netstat` shows. A
+producer started through the `.venv` launcher runs as a child of the PID
+`Start-Process` reports, and stopping the launcher does not free the port, so stop
+the PID the message names.
+
+Before this, a second producer neither failed nor took over. pyigtl sets
+`SO_REUSEADDR`, which on Windows lets a second server bind a port that is already
+listening, so both listened and SLIAFlow reached whichever one accepted. A
+producer swap could look as though it had worked while the data still came from
+the old producer.
+
+The bind itself refuses: the transport's server does not set `SO_REUSEADDR`. Each
+command also checks its ports before its first slow step - `uc1-real` before the
+pipeline runs, `acquisition` before the camera opens - so the refusal comes at
+once rather than after a GPU run. That early check is only a convenience: a
+producer that takes the port between the check and the bind is still refused, at
+the bind.
+
+A reserved port is refused by name whatever the switches: 18948 (`Stereoscopic`)
+and 18949 (`UC2_STO2`) stay unbound, so a black panel for either is black because
+nothing listens.
+
+`--allow-shared-port`, on `acquisition`, `uc1` and `uc1-real`, lets two producers
+share a port on purpose. It has to be given to **both**: Windows refuses it over a
+producer that was started without it, so an ordinary producer cannot be joined by
+accident. That refusal also comes before the slow step, saying that the other
+producer was not started with the switch. A producer that does share prints a
+`WARNING:` naming the process it joined, and the first one warns that a later
+join would be silent. Starting again on the same port straight after a run is not
+refused; the `TIME_WAIT` connections a run leaves behind hold nothing.
+
+`acquisition` also refuses, before the camera opens, a port configured for two of
+its own channels, such as `hsCubePort` and `controlPort` both 18947. The switch
+does not change that: it shares a port between producers, never between one
+producer's channels.
+
+A producer restarts its server after a failed send. If something else takes the
+port during that one-second gap, the producer stops with an `ERROR:` that says the
+restart could not bind, followed by the refusal above, rather than joining.
 
 ## Configuration
 

@@ -67,6 +67,7 @@ def streamMaps(
     cycles: int = 0,
     intervalSec: float = DEFAULT_INTERVAL_SEC,
     sendNotice: bool = False,
+    allowSharedPort: bool = False,
 ) -> int:
     """Serve the five maps until interrupted, or until ``cycles`` succeed."""
     if cycles < 0:
@@ -80,7 +81,7 @@ def streamMaps(
     noticeSent = False
 
     with (
-        igtl_transport.ImageStreamServer(port=port) as server,
+        igtl_transport.ImageStreamServer(port=port, allowSharedPort=allowSharedPort) as server,
         igtl_transport.InterruptFlag() as interrupt,
     ):
         print(
@@ -154,12 +155,24 @@ def buildArgumentParser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also send a UC1_SIM_NOTICE STRING message when a client connects.",
     )
+    parser.add_argument(
+        "--allow-shared-port",
+        dest="allowSharedPort",
+        action="store_true",
+        help=(
+            "Serve a port another producer is serving. Both must be started with this "
+            "switch; without it an occupied port is refused."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = buildArgumentParser().parse_args(argv)
     try:
+        igtl_transport.assertPortCanBeServed(
+            arguments.port, allowSharedPort=arguments.allowSharedPort
+        )
         dataset = contract.loadDataset(arguments.datasetFolder)
         if arguments.forceUnmarked:
             print(
@@ -176,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             cycles=arguments.cycles,
             intervalSec=arguments.intervalSec,
             sendNotice=arguments.sendNotice,
+            allowSharedPort=arguments.allowSharedPort,
         )
     except (OSError, ValueError, RuntimeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
