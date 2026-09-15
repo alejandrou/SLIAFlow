@@ -1,3 +1,5 @@
+import contextlib
+import io
 import time
 import unittest
 from pathlib import Path
@@ -5,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import slicer
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleTest
+from vtk.util.numpy_support import vtk_to_numpy
 
 from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
@@ -47,6 +50,21 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.moduleTestNames = unittest.TestLoader().getTestCaseNames(type(self))
+
+    def runTest(self, **kwargs) -> None:
+        """Run every test through unittest, as the command-line runner does.
+
+        Slicer's Reload and Test calls this on a single instance. The inherited
+        loop called each test method directly, so the first ``skipTest`` left
+        it as an exception and every later test silently did not run.
+        """
+        suite = unittest.TestSuite(type(self)(name) for name in self.moduleTestNames)
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        if not result.wasSuccessful():
+            raise AssertionError(
+                f"{len(result.failures)} failed and {len(result.errors)} raised an "
+                f"error out of {result.testsRun} tests; see the test output above."
+            )
 
     WIDGET_STATE_FIELDS = (
         "_previousLayout",
@@ -162,6 +180,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     @staticmethod
     def _validResultValues(resultMap: str):
+        # These are deterministic unit-test fixtures, not pipeline images. They
+        # must never be used as evidence for the manual recorded-input check.
         if resultMap == RESULT_MAP_MV_CLASS:
             return np.array([[[1, 2], [3, 4]]], dtype=np.uint8)
         if resultMap in (RESULT_MAP_SVM_PROB, RESULT_MAP_KNN_PROB):
@@ -764,6 +784,110 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 self.assertEqual(tuple(transferFunction.GetRange()), (0.0, 1.0))
                 self.assertTrue(displayNode.GetInterpolate())
                 self.assertEqual(windowLevelRange, (0.0, 1.0), resultMap)
+
+    # The UC1 pipeline's own majority-voting palette, read from the source the
+    # genuine binary is built from: majorityVoting in
+    # gpu_single_bsq/source/functions_cuda.cu fills a B,G,R buffer, and
+    # writeMatrixRGB in gpu_single_bsq/source/BitmapWriter.cpp writes it out
+    # as R,G,B. Index 0 is SLIAFlow's own "no class" entry and stays invisible.
+    UC1_CLASS_PALETTE = (
+        ("Unused", (0.0, 0.0, 0.0, 0.0)),
+        ("Normal", (0.0, 1.0, 0.0, 1.0)),
+        ("Tumour", (1.0, 0.0, 0.0, 1.0)),
+        ("Hypervascularized", (0.0, 0.0, 1.0, 1.0)),
+        ("Background", (0.0, 0.0, 0.0, 1.0)),
+    )
+
+    def test_classColorTableMatchesUc1Palette(self) -> None:
+        logic = SLIAFlowLogic()
+        parameters = logic.getParameterNode()
+        self._createResultVolume(
+            RESULT_MAP_MV_CLASS, self._validResultValues(RESULT_MAP_MV_CLASS)
+        )
+        parameters.resultMap = RESULT_MAP_MV_CLASS
+        report = logic.presentSelectedResult(parameters)
+        self.assertEqual(report["summaryStatus"], "PASS", report)
+        colorNode = parameters.resultVolume.GetDisplayNode().GetColorNode()
+        self.assertEqual(colorNode.GetClassName(), "vtkMRMLColorTableNode")
+        self.assertEqual(colorNode.GetNumberOfColors(), len(self.UC1_CLASS_PALETTE))
+
+        for index, (expectedName, expectedRgba) in enumerate(self.UC1_CLASS_PALETTE):
+            rgba = [0.0, 0.0, 0.0, 0.0]
+            self.assertTrue(colorNode.GetColor(index, rgba), index)
+            self.assertEqual(colorNode.GetColorName(index), expectedName, index)
+            for component, (actual, expected) in enumerate(zip(rgba, expectedRgba, strict=True)):
+                self.assertAlmostEqual(
+                    actual,
+                    expected,
+                    places=6,
+                    msg=f"entry {index} ({expectedName}) component {component}: "
+                    f"got {tuple(rgba)}, expected {expectedRgba}",
+                )
+
+    def test_classMapSlicePipelineEmitsUc1Colors(self) -> None:
+        # The colour table alone does not prove what a slice view draws:
+        # window/level runs before the table, so a wrong range would paint
+        # every class in a neighbour's colour. This reads the RGBA the display
+        # node hands to the slice views.
+        logic = SLIAFlowLogic()
+        parameters = logic.getParameterNode()
+        self._createResultVolume(
+            RESULT_MAP_MV_CLASS, self._validResultValues(RESULT_MAP_MV_CLASS)
+        )
+        parameters.resultMap = RESULT_MAP_MV_CLASS
+        report = logic.presentSelectedResult(parameters)
+        self.assertEqual(report["summaryStatus"], "PASS", report)
+        resultNode = parameters.resultVolume
+        connection = resultNode.GetDisplayNode().GetOutputImageDataConnection()
+        producer = connection.GetProducer()
+        producer.Update()
+        output = producer.GetOutputDataObject(connection.GetIndex())
+        emitted = vtk_to_numpy(output.GetPointData().GetScalars())
+        classes = vtk_to_numpy(resultNode.GetImageData().GetPointData().GetScalars())
+        self.assertEqual(sorted(set(classes.tolist())), [1, 2, 3, 4])
+        self.assertEqual(emitted.shape, (classes.size, 4))
+
+        for voxel, classValue in enumerate(classes.tolist()):
+            name, expectedRgba = self.UC1_CLASS_PALETTE[classValue]
+            self.assertEqual(
+                tuple(int(component) for component in emitted[voxel]),
+                tuple(round(component * 255) for component in expectedRgba),
+                f"voxel {voxel}, class {classValue} ({name})",
+            )
+
+    def test_reloadAndTestRunsPastSkippedTests(self) -> None:
+        # Slicer's Reload and Test calls runTest on a single instance rather
+        # than going through a unittest runner. A skip must be reported and the
+        # run must go on; a failure must still fail the run.
+        ran = []
+
+        class SkipThenPassProbe(ScriptedLoadableModuleTest):
+            runTest = SLIAFlowTest.runTest
+
+            def test_aSkips(self) -> None:
+                ran.append("test_aSkips")
+                self.skipTest("probe skip")
+
+            def test_bPasses(self) -> None:
+                ran.append("test_bPasses")
+
+        class FailingProbe(ScriptedLoadableModuleTest):
+            runTest = SLIAFlowTest.runTest
+
+            def test_fails(self) -> None:
+                self.fail("probe failure")
+
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            try:
+                SkipThenPassProbe().runTest()
+            except unittest.SkipTest as error:
+                self.fail(f"a skipped test ended the run early: {error}")
+        self.assertEqual(ran, ["test_aSkips", "test_bPasses"], log.getvalue())
+        self.assertIn("skipped 'probe skip'", log.getvalue())
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(AssertionError):
+            FailingProbe().runTest()
 
     def test_resultValidationRejectsMalformedMaps(self) -> None:
         logic = SLIAFlowLogic()

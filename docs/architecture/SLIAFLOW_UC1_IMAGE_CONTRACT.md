@@ -27,6 +27,36 @@ Class values mean `1 = normal`, `2 = tumour`, `3 = hypervascularized`, and
 `4 = background`. SVM and KNN class selection is one-based (`1` through `4`)
 and copies only the selected component into the scalar display volume.
 
+SLIAFlow draws the class map in the UC1 pipeline's own palette, so a map on
+screen reads the same as the pipeline's output:
+
+| Class | Meaning | UC1 RGB | SLIAFlow RGBA |
+| --- | --- | --- | --- |
+| 0 | not a UC1 class | - | `(0, 0, 0, 0)`, fully transparent |
+| 1 | normal | `(0, 255, 0)` | `(0.0, 1.0, 0.0, 1.0)` |
+| 2 | tumour | `(255, 0, 0)` | `(1.0, 0.0, 0.0, 1.0)` |
+| 3 | hypervascularized | `(0, 0, 255)` | `(0.0, 0.0, 1.0, 1.0)` |
+| 4 | background | `(0, 0, 0)` | `(0.0, 0.0, 0.0, 1.0)` |
+
+The palette was read from the source the genuine binary is built from, not from
+a screenshot. `majorityVoting` in `gpu_single_bsq/source/functions_cuda.cu`
+fills a per-pixel buffer in **B, G, R** order, and `writeMatrixRGB` in
+`gpu_single_bsq/source/BitmapWriter.cpp` writes it out as R, G, B. Reading the
+first function alone swaps tumour and hypervascularized. `CLASS_PALETTE` in
+`tools/simulators/stratum_sim/bmp.py` holds the same four colours.
+`SLIAFlowTest.test_classColorTableMatchesUc1Palette` asserts every table entry,
+and `SLIAFlowTest.test_classMapSlicePipelineEmitsUc1Colors` asserts the RGBA the
+display node hands to the slice views for each class, after window/level. Both
+compare against a literal copied from the UC1 source, so a change to SLIAFlow's
+table is a failing test. A change on the UC1 side is not detected: nothing in
+this repository builds from that source, which lives in the ignored
+`workspace/`. When the pipeline source changes, read both functions again; the
+SHA-256 of the files the palette was read from is recorded in `SLIA-015`.
+
+Class 4 is black, and so is the result view behind it, so a background region is
+not visually distinct from an empty view. The result status, not the colour,
+tells the operator whether a map is displayed.
+
 ## Provenance attributes
 
 An external volume is eligible for normal UI discovery only when all of the
