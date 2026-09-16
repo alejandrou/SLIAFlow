@@ -114,14 +114,42 @@ next integration layer is added.
 
 ## User-visible behavior
 
-The module panel uses the following defaults:
+Since `SLIA-022` the module presents the six-view WP5 operator surface, in two
+rows of three:
 
-- Live source: `Laptop Camera`
-- Camera index: `0`
-- Result map: `tmdMap`
-- Acquisition endpoint: `127.0.0.1:18944`
-- UC1 endpoint: `127.0.0.1:18945`
-- Result status: `Waiting for genuine UC1 result`
+| LiveView | Stereoscopic | HS Cube |
+| --- | --- | --- |
+| **Relative StO2** | **Enhanced Vascularization** | **Tumour Delineation** |
+
+- **LiveView** shows the laptop camera or the received `LiveView` stream,
+  whichever the live-source selector names. Only one process may hold the camera.
+  With no image yet it is black and says what it is waiting for in the panel, as
+  every other panel does.
+- **Stereoscopic** and **Relative StO2** are black and carry their reason on
+  screen: no producer yet, and ports 18948 and 18949 reserved. SLIAFlow never
+  connects to either port.
+- **HS Cube** shows the received `HSCube` as received, with a band slider that
+  shows each band's index and wavelength. A wavelength that cannot be read from
+  `SLIAFlow.WavelengthsNm` is reported as unavailable, never guessed.
+- **Enhanced Vascularization** shows a validated `UC2_BV` map; **Tumour
+  Delineation** shows the validated UC1 result. Each is a layer in the layer
+  list, with show, hide and opacity, and each keeps the full safety gate:
+  recognised provenance, genuine over simulated, demo mode and a banner for
+  simulated data, and a black panel with a status for missing or invalid data.
+- One **Connect links** toggle starts or stops the five links: 18944, 18945,
+  18946, 18947 and 18950. Each link has one state label. A link whose peer goes
+  away is noticed by reading the connector's state once a second: the connector
+  queues the event that announces a lost link and then stops pumping the queue
+  that would deliver it, so the event never arrives.
+- **Capture** sends one `CaptureTrigger` per press over the control link, is
+  disabled with its reason while that link is down, and quotes the stand-in's
+  `CaptureStatus` and `CaptureReply`.
+- Camera index, camera-support install, the UC1 role selector, the result class
+  and a manual refresh are in a collapsed Developer section.
+
+Defaults: live source `Laptop Camera`, camera index `0`, delineation role
+`majorityVotingMap` (the map the genuine UC1 runner sends), every layer shown at
+full opacity, demo mode off and never persisted.
 
 The live and result images were originally placed in separate views, on the
 grounds that the laptop RGB image and HSI-derived maps are not registered.
@@ -131,7 +159,9 @@ over a background **derived from the same hyperspectral cube it was computed
 from**, which is registered with it by construction, and may never be composited
 over the laptop camera, which is not. SLIAFlow performs no registration or
 resampling; its only run-time safeguard is a refusal to composite images of
-different dimensions.
+different dimensions. Under rule 3 of that ADR a result is composited only over a
+background from its own producer on its own connection, so `UC2_BV` has its own
+panel and is never drawn over `UC1_RGB`.
 
 ## OpenIGTLink contract
 
@@ -148,7 +178,7 @@ The networking tasks use these device names and data shapes:
 | `UC1_RGB` | Three-component `uint8`, composed from the cube's 710/540/480 nm bands (`SLIA-024`) |
 | `UC2_BV` | Three-component `uint8`, the PNG UC2 writes, as written (`SLIA-021`) |
 | `HSCube` | One-component `uint16`, shape `(bands, lines, samples)` in `(k, j, i)` order: the captured cube's raw counts, with `SLIAFlow.WavelengthsNm` and `SLIAFlow.DatasetFolder` in its metadata (`SLIA-023`) |
-| `CaptureTrigger` | `STRING` to the acquisition stand-in: `CAPTURE` (`SLIA-023`) |
+| `CaptureTrigger` | `STRING` to the acquisition stand-in: `CAPTURE`, declared US-ASCII, IANA 3 (`SLIA-023`). A `vtkMRMLTextNode`'s encoding number travels to the receiver unchanged, and the VTK default, `VTK_ENCODING_US_ASCII`, is 1, which is not an IANA number and is refused |
 | `CaptureReply` | `STRING` from the stand-in, one per trigger: `CAPTURING`, `IGNORED` or `REFUSED` (`SLIA-023`) |
 | `CaptureStatus` | `STRING` from the stand-in, on change and every 0.5 s: `IDLE`, `CAPTURING` or `READY ... folder=<case folder>` (`SLIA-023`) |
 
@@ -162,7 +192,7 @@ Ports, one per channel:
 | 18947 | `HSCube` | In use by the recorded-case stand-in (`SLIA-023`) |
 | 18948 | `Stereoscopic` | **Reserved. No producer. Black panel with its reason.** |
 | 18949 | `UC2_STO2` | **Reserved. No algorithm. Black panel with its reason.** |
-| 18950 | `Control`: `CaptureTrigger`, `CaptureReply`, `CaptureStatus` | Producer side in use (`SLIA-023`); Slicer side `SLIA-022` |
+| 18950 | `Control`: `CaptureTrigger`, `CaptureReply`, `CaptureStatus` | Producer side in use (`SLIA-023`); Slicer side implemented (`SLIA-022`) |
 
 The control channel carries three device names rather than one. A connector
 re-sends an outgoing node when a message of the same name updates it, so the

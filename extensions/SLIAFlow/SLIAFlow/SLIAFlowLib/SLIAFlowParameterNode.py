@@ -66,14 +66,59 @@ WIRE_ATTRIBUTE_PREFIX = "OpenIGTLink."
 
 # OpenIGTLink endpoints. Both a stand-in and the genuine UC1 runner use the UC1
 # endpoint, so an endpoint carries no provenance information whatsoever.
+# The port table is docs/architecture/WP5_MS5_DEMO_PLAN.md.
 IGTL_HOST = "127.0.0.1"
 ACQUISITION_PORT = 18944
 UC1_PORT = 18945
+UC2_PORT = 18946
+HS_CUBE_PORT = 18947
+CONTROL_PORT = 18950
+# Reserved for producers that do not exist yet. SLIAFlow never connects to
+# them; their panels are black and say so.
+STEREOSCOPIC_PORT = 18948
+STO2_PORT = 18949
 LIVE_VIEW_DEVICE_NAME = "LiveView"
 
 CONNECTOR_ACQUISITION = "acquisition"
 CONNECTOR_UC1 = "uc1"
-CONNECTOR_ROLES = (CONNECTOR_ACQUISITION, CONNECTOR_UC1)
+CONNECTOR_UC2 = "uc2"
+CONNECTOR_HS_CUBE = "hsCube"
+CONNECTOR_CONTROL = "control"
+CONNECTOR_ROLES = (
+    CONNECTOR_ACQUISITION,
+    CONNECTOR_UC1,
+    CONNECTOR_UC2,
+    CONNECTOR_HS_CUBE,
+    CONNECTOR_CONTROL,
+)
+
+# UC2's blood-vessel map. It is a three-component uint8 image: the PNG UC2
+# writes, as written (SLIA-021).
+UC2_ROLE = "bloodVesselMap"
+UC2_DEVICE_NAME = "UC2_BV"
+
+# The captured cube and its per-band wavelengths (SLIA-023).
+HS_CUBE_DEVICE_NAME = "HSCube"
+CUBE_WAVELENGTHS_ATTRIBUTE = "SLIAFlow.WavelengthsNm"
+
+# The control channel carries three device names. The trigger and the answers
+# travel under different names so an answer can never echo back as a command;
+# tools/simulators/README.md has the wording.
+CAPTURE_TRIGGER_DEVICE_NAME = "CaptureTrigger"
+CAPTURE_REPLY_DEVICE_NAME = "CaptureReply"
+CAPTURE_STATUS_DEVICE_NAME = "CaptureStatus"
+CAPTURE_COMMAND = "CAPTURE"
+
+# The encoding number an outgoing STRING declares on the wire.
+#
+# OpenIGTLink's STRING body carries an IANA MIB character-set number, and 3 is
+# US-ASCII. `igtlioStringConverter::toIGTL` copies `vtkMRMLTextNode`'s encoding
+# straight into that field with no translation, and the VTK default,
+# `VTK_ENCODING_US_ASCII`, is the number 1, which is not an IANA number at all.
+# A trigger sent under it is undecodable: pyigtl accepts only 3 and 106 (UTF-8)
+# and refused the capture trigger outright. `CAPTURE` is pure ASCII, so 3
+# describes the bytes truthfully.
+IGTL_ENCODING_US_ASCII = 3
 
 # The connection vocabulary the panel exposes. "receiving" means the socket is
 # connected; "displaying" and "invalid" describe what was made of the data and
@@ -107,6 +152,10 @@ SIMULATED_BANNER_MESSAGE_REAL_PIPELINE = (
     "SIMULATED INPUT - REAL UC1 PIPELINE, NOT A CLINICAL RESULT"
 )
 
+# Displayed over a simulated UC2 map. The UC1 wordings name UC1 and would be
+# false over a UC2 panel.
+UC2_SIMULATED_BANNER_MESSAGE = "SIMULATED ACQUISITION - NOT A CLINICAL RESULT"
+
 
 def simulatedBannerMessage(detail: str | None) -> str:
     """Return the banner headline that matches a simulation detail string.
@@ -131,11 +180,16 @@ class SLIAFlowParameterNode:
     liveSourceVolume: slicer.vtkMRMLVolumeNode
     resultSourceVolume: slicer.vtkMRMLVolumeNode
     resultVolume: slicer.vtkMRMLScalarVolumeNode
+    uc2SourceVolume: slicer.vtkMRMLVolumeNode
+    uc2Volume: slicer.vtkMRMLVectorVolumeNode
+    cubeSourceVolume: slicer.vtkMRMLVolumeNode
     liveSource: Annotated[
         str, Choice(LIVE_SOURCE_CHOICES), Default(LIVE_SOURCE_LAPTOP)
     ]
     cameraIndex: Annotated[int, WithinRange(0, 99), Default(0)]
+    # The genuine UC1 runner sends the majority-voting class map and nothing
+    # else, so that is the delineation layer's default role (SLIA-022).
     resultMap: Annotated[
-        str, Choice(RESULT_MAP_CHOICES), Default(RESULT_MAP_TMD)
+        str, Choice(RESULT_MAP_CHOICES), Default(RESULT_MAP_MV_CLASS)
     ]
     resultClass: Annotated[int, WithinRange(1, 4), Default(1)]

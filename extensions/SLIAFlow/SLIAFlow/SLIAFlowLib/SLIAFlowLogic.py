@@ -10,12 +10,22 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
 
 from .SLIAFlowParameterNode import (
     ACQUISITION_PORT,
+    CAPTURE_COMMAND,
+    CAPTURE_TRIGGER_DEVICE_NAME,
     CONNECTION_CONNECTING,
     CONNECTION_DISCONNECTED,
     CONNECTION_RECEIVING,
     CONNECTOR_ACQUISITION,
+    CONNECTOR_CONTROL,
+    CONNECTOR_HS_CUBE,
     CONNECTOR_ROLES,
     CONNECTOR_UC1,
+    CONNECTOR_UC2,
+    CONTROL_PORT,
+    CUBE_WAVELENGTHS_ATTRIBUTE,
+    HS_CUBE_DEVICE_NAME,
+    HS_CUBE_PORT,
+    IGTL_ENCODING_US_ASCII,
     IGTL_HOST,
     LIVE_VIEW_DEVICE_NAME,
     RECOGNIZED_ORIGINS,
@@ -34,6 +44,9 @@ from .SLIAFlowParameterNode import (
     RESULT_SOURCE_ROLE_ATTRIBUTE,
     RESULT_SOURCE_SIMULATED_ORIGIN,
     UC1_PORT,
+    UC2_DEVICE_NAME,
+    UC2_PORT,
+    UC2_ROLE,
     WIRE_ATTRIBUTE_PREFIX,
     SLIAFlowParameterNode,
 )
@@ -68,10 +81,30 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     CONNECTOR_NAMES = {
         CONNECTOR_ACQUISITION: "SLIAFlow Acquisition Link",
         CONNECTOR_UC1: "SLIAFlow UC1 Link",
+        CONNECTOR_UC2: "SLIAFlow UC2 Link",
+        CONNECTOR_HS_CUBE: "SLIAFlow HS Cube Link",
+        CONNECTOR_CONTROL: "SLIAFlow Control Link",
     }
     CONNECTOR_ENDPOINTS = {
         CONNECTOR_ACQUISITION: (IGTL_HOST, ACQUISITION_PORT),
         CONNECTOR_UC1: (IGTL_HOST, UC1_PORT),
+        CONNECTOR_UC2: (IGTL_HOST, UC2_PORT),
+        CONNECTOR_HS_CUBE: (IGTL_HOST, HS_CUBE_PORT),
+        CONNECTOR_CONTROL: (IGTL_HOST, CONTROL_PORT),
+    }
+    UC2_RESULT_OWNER = "Uc2Presentation"
+    UC2_RESULT_VOLUME_NAME = "SLIAFlow UC2 Result"
+    SIMULATED_UC2_RESULT_VOLUME_NAME = "SLIAFlow UC2 Result (SIMULATED)"
+    UC2_COMPONENTS = 3
+    CAPTURE_OWNER = "Capture"
+    # The first word of every control-channel message, from the stand-in's
+    # table in tools/simulators/README.md, and what the panel calls it.
+    CAPTURE_MESSAGE_WORDS = {
+        "IDLE": "Idle",
+        "CAPTURING": "Capturing",
+        "READY": "Ready",
+        "IGNORED": "Ignored",
+        "REFUSED": "Refused",
     }
     # vtkMRMLIGTLConnectorNode's state enum, mirrored so that the state
     # translation stays testable in a Slicer that has no OpenIGTLink build.
@@ -170,6 +203,10 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         # the scene, so a test can inject a stand-in connector into a Slicer
         # build that has no OpenIGTLink, and so cleanup can never miss one.
         self._connectors: dict[str, Any] = {}
+        # The trigger node, and the connector it was registered with. It is
+        # registered once per connector, so a press never registers it again.
+        self._captureTriggerNode = None
+        self._captureTriggerConnector = None
 
     @staticmethod
     def openCVAvailable(importer=importlib.import_module) -> bool:
@@ -841,6 +878,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         removed from the scene.
         """
         connector = self._connectors.pop(role, None)
+        if role == CONNECTOR_CONTROL:
+            self._removeCaptureTriggerNode()
         if connector is None:
             return CONNECTION_DISCONNECTED
         try:
@@ -1129,3 +1168,326 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
                 descriptor=descriptor,
             )
         return self.presentResult(resultMap, sourceNode, resultClass, parameterNode)
+
+    # ------------------------------------------------------------------
+    # UC2 blood-vessel map (SLIA-022)
+    #
+    # The same four guards as the UC1 result, written out for a second role
+    # rather than shared, and tested separately: role, device and origin must
+    # all match; a genuine source wins; simulated data needs the caller's
+    # opt-in; and nothing is displayed before it validates.
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _matchesUc2Source(cls, volumeNode, requiredOrigin: str) -> bool:
+        if volumeNode is None or not volumeNode.IsA("vtkMRMLVolumeNode"):
+            return False
+        if volumeNode.GetAttribute("SLIAFlow.Owner") is not None:
+            return False
+        if volumeNode.GetAttribute(RESULT_SOURCE_ROLE_ATTRIBUTE) != UC2_ROLE:
+            return False
+        if volumeNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE) != requiredOrigin:
+            return False
+        deviceName = volumeNode.GetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE)
+        if deviceName is not None:
+            return deviceName == UC2_DEVICE_NAME
+        return volumeNode.GetName() == UC2_DEVICE_NAME
+
+    @classmethod
+    def findUc2Source(cls, allowSimulated: bool = False):
+        """Find a UC2 map, preferring a genuine one, as findResultSource does."""
+        volumeNodes = slicer.util.getNodesByClass("vtkMRMLVolumeNode")
+        for volumeNode in volumeNodes:
+            if cls._matchesUc2Source(volumeNode, RESULT_SOURCE_GENUINE_ORIGIN):
+                return volumeNode
+        if not allowSimulated:
+            return None
+        for volumeNode in volumeNodes:
+            if cls._matchesUc2Source(volumeNode, RESULT_SOURCE_SIMULATED_ORIGIN):
+                return volumeNode
+        return None
+
+    @classmethod
+    def unrecognizedUc2ProvenanceNode(cls):
+        """Return a received node that claims the UC2 map without a valid origin."""
+        for node in slicer.util.getNodesByClass("vtkMRMLVolumeNode"):
+            if node.GetAttribute("SLIAFlow.Owner") is not None:
+                continue
+            cls.normalizeReceivedProvenance(node)
+            if not any(
+                node.GetAttribute(attribute) for attribute in RESULT_SOURCE_ATTRIBUTES
+            ):
+                continue
+            claimsRole = node.GetAttribute(RESULT_SOURCE_ROLE_ATTRIBUTE) == UC2_ROLE
+            claimsDevice = (
+                node.GetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE) == UC2_DEVICE_NAME
+            )
+            if (claimsRole or claimsDevice) and cls.receivedOrigin(node) is None:
+                return node
+        return None
+
+    @classmethod
+    def validateUc2Volume(cls, volumeNode) -> dict[str, Any]:
+        """Check a UC2 map against its contract without changing anything."""
+        if volumeNode is None:
+            return cls._resultReport(
+                "WARN", "No UC2 blood-vessel map is available.", UC2_ROLE
+            )
+        if not volumeNode.IsA("vtkMRMLVectorVolumeNode"):
+            return cls._resultReport(
+                "FAIL",
+                "The UC2 map requires a vtkMRMLVectorVolumeNode.",
+                UC2_ROLE,
+                volumeNode,
+            )
+        imageData = volumeNode.GetImageData()
+        if imageData is None or imageData.GetPointData().GetScalars() is None:
+            return cls._resultReport(
+                "FAIL", "The UC2 map has no image scalar data.", UC2_ROLE, volumeNode
+            )
+        dimensions = tuple(int(value) for value in imageData.GetDimensions())
+        if any(value <= 0 for value in dimensions):
+            return cls._resultReport(
+                "FAIL", "UC2 map dimensions must be positive.", UC2_ROLE, volumeNode
+            )
+        components = int(imageData.GetNumberOfScalarComponents())
+        if components != cls.UC2_COMPONENTS:
+            return cls._resultReport(
+                "FAIL",
+                f"The UC2 map requires {cls.UC2_COMPONENTS} components, got {components}.",
+                UC2_ROLE,
+                volumeNode,
+            )
+        if int(imageData.GetScalarType()) != vtk.VTK_UNSIGNED_CHAR:
+            return cls._resultReport(
+                "FAIL", "The UC2 map requires uint8 values.", UC2_ROLE, volumeNode
+            )
+        return cls._resultReport(
+            "PASS",
+            "The UC2 map passed the image contract.",
+            UC2_ROLE,
+            volumeNode,
+            dimensions=dimensions,
+        )
+
+    @classmethod
+    def clearUc2References(cls, parameterNode) -> None:
+        parameterNode.parameterNode.SetNodeReferenceID("uc2SourceVolume", None)
+        parameterNode.parameterNode.SetNodeReferenceID("uc2Volume", None)
+
+    @classmethod
+    def getOrCreateUc2Volume(cls, parameterNode):
+        try:
+            uc2Node = parameterNode.uc2Volume
+        except (KeyError, TypeError):
+            uc2Node = None
+        if uc2Node is None or uc2Node.GetAttribute("SLIAFlow.Owner") != cls.UC2_RESULT_OWNER:
+            uc2Node = cls._ownedNode(
+                "vtkMRMLVectorVolumeNode", cls.UC2_RESULT_OWNER, cls.UC2_RESULT_VOLUME_NAME
+            )
+            uc2Node.SetAttribute("SLIAFlow.Owner", cls.UC2_RESULT_OWNER)
+            uc2Node.SetSaveWithScene(False)
+            parameterNode.uc2Volume = uc2Node
+        return uc2Node
+
+    def presentUc2(self, parameterNode=None, allowSimulated: bool = False) -> dict[str, Any]:
+        """Find, validate and copy the UC2 map into the module's presentation node."""
+        if parameterNode is None:
+            parameterNode = self.getParameterNode()
+        self.normalizeReceivedProvenance()
+        sourceNode = self.findUc2Source(allowSimulated=allowSimulated)
+        if sourceNode is None:
+            self.clearUc2References(parameterNode)
+            claimedNode = self.unrecognizedUc2ProvenanceNode()
+            if claimedNode is not None:
+                return self._resultReport(
+                    "FAIL",
+                    "A received node claims the UC2 map with absent or "
+                    "unrecognized provenance.",
+                    UC2_ROLE,
+                    claimedNode,
+                    provenance="unrecognized",
+                )
+            accepted = "genuine or simulated" if allowSimulated else "genuine"
+            return self._resultReport(
+                "WARN", f"Waiting for {accepted} {UC2_DEVICE_NAME} map.", UC2_ROLE
+            )
+
+        report = self.validateUc2Volume(sourceNode)
+        if report["summaryStatus"] != "PASS":
+            self.clearUc2References(parameterNode)
+            return report
+        try:
+            values = np.array(slicer.util.arrayFromVolume(sourceNode), copy=True)
+            uc2Node = self.getOrCreateUc2Volume(parameterNode)
+            slicer.util.updateVolumeFromArray(uc2Node, values)
+            uc2Node.CopyOrientation(sourceNode)
+            dataOrigin = sourceNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE)
+            uc2Node.SetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE, UC2_DEVICE_NAME)
+            uc2Node.SetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE, dataOrigin)
+            uc2Node.SetName(
+                self.SIMULATED_UC2_RESULT_VOLUME_NAME
+                if dataOrigin == RESULT_SOURCE_SIMULATED_ORIGIN
+                else self.UC2_RESULT_VOLUME_NAME
+            )
+            if uc2Node.GetDisplayNode() is None:
+                uc2Node.CreateDefaultDisplayNodes()
+            displayNode = uc2Node.GetDisplayNode()
+            if displayNode is not None:
+                displayNode.SetSaveWithScene(False)
+        except Exception as exc:
+            self.clearUc2References(parameterNode)
+            return self._resultReport(
+                "FAIL",
+                f"The validated UC2 map could not be displayed: {exc}",
+                UC2_ROLE,
+                sourceNode,
+            )
+        parameterNode.uc2SourceVolume = sourceNode
+        parameterNode.uc2Volume = uc2Node
+        return self._resultReport(
+            "PASS",
+            f"Displaying the UC2 blood-vessel map from {UC2_DEVICE_NAME}.",
+            UC2_ROLE,
+            sourceNode,
+            resultNodeID=uc2Node.GetID(),
+        )
+
+    # ------------------------------------------------------------------
+    # HS cube (SLIA-022)
+    #
+    # The cube is an input to the algorithms, not a result. It is shown as
+    # received and nothing is computed from it.
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def findCubeNode(cls):
+        return cls.findReceivedNode(HS_CUBE_DEVICE_NAME)
+
+    @staticmethod
+    def _wireAttribute(node, name: str):
+        """Read a wire attribute, preferring the connector's prefixed copy."""
+        value = node.GetAttribute(WIRE_ATTRIBUTE_PREFIX + name)
+        return value if value is not None else node.GetAttribute(name)
+
+    @classmethod
+    def cubeWavelengths(cls, node, bandCount: int):
+        """Return (wavelengths, None) or (None, reason). A value is never guessed."""
+        text = cls._wireAttribute(node, CUBE_WAVELENGTHS_ATTRIBUTE)
+        if not text:
+            return None, "The cube carries no wavelength list, so bands are shown by index only."
+        try:
+            values = tuple(float(token) for token in text.split(","))
+        except ValueError:
+            return None, (
+                "The cube's wavelength list could not be read, so bands are shown "
+                "by index only."
+            )
+        if len(values) != bandCount or not all(np.isfinite(values)):
+            return None, (
+                f"The cube's wavelength list has {len(values)} values for "
+                f"{bandCount} bands, so bands are shown by index only."
+            )
+        return values, None
+
+    @classmethod
+    def validateCubeNode(cls, volumeNode) -> dict[str, Any]:
+        if volumeNode is None:
+            return cls._resultReport("WARN", "No HS cube has been received.")
+        if not volumeNode.IsA("vtkMRMLScalarVolumeNode"):
+            return cls._resultReport(
+                "FAIL", "The HS cube is not a scalar volume.", sourceNode=volumeNode
+            )
+        imageData = volumeNode.GetImageData()
+        if imageData is None or imageData.GetPointData().GetScalars() is None:
+            return cls._resultReport(
+                "FAIL", "The HS cube has no image scalar data.", sourceNode=volumeNode
+            )
+        dimensions = tuple(int(value) for value in imageData.GetDimensions())
+        if any(value <= 0 for value in dimensions):
+            return cls._resultReport(
+                "FAIL", "HS cube dimensions must be positive.", sourceNode=volumeNode
+            )
+        if cls.receivedOrigin(volumeNode) is None:
+            return cls._resultReport(
+                "FAIL",
+                "The HS cube has absent or unrecognized provenance, so it is not shown.",
+                sourceNode=volumeNode,
+            )
+        bandCount = dimensions[2]
+        wavelengths, reason = cls.cubeWavelengths(volumeNode, bandCount)
+        return cls._resultReport(
+            "PASS",
+            reason or "Displaying the received HS cube.",
+            sourceNode=volumeNode,
+            bandCount=bandCount,
+            wavelengths=wavelengths,
+        )
+
+    # ------------------------------------------------------------------
+    # Capture trigger (SLIA-022)
+    # ------------------------------------------------------------------
+
+    def getOrCreateCaptureTriggerNode(self):
+        """The outgoing trigger, with its text written once and never again.
+
+        A connector re-sends an outgoing node when it is modified, so the node
+        is fully prepared before any connector registers it and a press only
+        pushes it. That includes the encoding: it travels to the receiver as
+        the STRING message's IANA character-set number, and the VTK default is
+        not one, so it is declared here rather than left to a default.
+        """
+        node = self._captureTriggerNode
+        if node is not None and slicer.mrmlScene.IsNodePresent(node):
+            return node
+        node = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLTextNode", CAPTURE_TRIGGER_DEVICE_NAME
+        )
+        node.SetAttribute("SLIAFlow.Owner", self.CAPTURE_OWNER)
+        node.SetSaveWithScene(False)
+        node.SetHideFromEditors(True)
+        node.SetEncoding(IGTL_ENCODING_US_ASCII)
+        node.SetText(CAPTURE_COMMAND)
+        self._captureTriggerNode = node
+        self._captureTriggerConnector = None
+        return node
+
+    def _removeCaptureTriggerNode(self) -> None:
+        node = self._captureTriggerNode
+        self._captureTriggerNode = None
+        self._captureTriggerConnector = None
+        if node is None:
+            return
+        try:
+            if slicer.mrmlScene.IsNodePresent(node):
+                slicer.mrmlScene.RemoveNode(node)
+        except Exception:
+            pass
+
+    def sendCaptureTrigger(self) -> bool:
+        """Send one CAPTURE over the control link. Refuse when it is not connected."""
+        if self.connectorState(CONNECTOR_CONTROL) != CONNECTION_RECEIVING:
+            return False
+        connector = self._connectors.get(CONNECTOR_CONTROL)
+        if connector is None:
+            return False
+        node = self.getOrCreateCaptureTriggerNode()
+        if self._captureTriggerConnector is not connector:
+            connector.RegisterOutgoingMRMLNode(node, "STRING")
+            self._captureTriggerConnector = connector
+        connector.PushNode(node)
+        return True
+
+    @classmethod
+    def captureText(cls, deviceName: str) -> str | None:
+        node = cls.findReceivedNode(deviceName, "vtkMRMLTextNode")
+        if node is None:
+            return None
+        return node.GetText() or ""
+
+    @classmethod
+    def describeCaptureMessage(cls, text: str) -> str:
+        """Name the stand-in's message and quote it, without reinterpreting it."""
+        words = text.split(None, 1)
+        word = cls.CAPTURE_MESSAGE_WORDS.get(words[0].upper()) if words else None
+        return f"{word or 'Unrecognized'}: {text}"

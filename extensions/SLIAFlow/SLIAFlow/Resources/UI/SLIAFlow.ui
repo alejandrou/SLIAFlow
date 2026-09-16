@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>440</width>
-    <height>420</height>
+    <height>720</height>
    </rect>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
@@ -22,11 +22,11 @@
     </widget>
    </item>
    <item>
-    <widget class="QGroupBox" name="presentationControlsGroupBox">
+    <widget class="QGroupBox" name="operatorGroupBox">
      <property name="title">
-      <string>Presentation controls</string>
+      <string>Operator</string>
      </property>
-     <layout class="QFormLayout" name="presentationControlsFormLayout">
+     <layout class="QFormLayout" name="operatorFormLayout">
       <item row="0" column="0">
        <widget class="QLabel" name="liveSourceLabel">
         <property name="text">
@@ -37,7 +37,7 @@
       <item row="0" column="1">
        <widget class="QComboBox" name="liveSourceSelector">
         <property name="toolTip">
-         <string>Choose between the Windows laptop camera and the LiveView stream received over OpenIGTLink.</string>
+         <string>Choose what the LiveView panel shows: this laptop's camera, or the LiveView stream received over OpenIGTLink. Only one process can hold the camera, so use one or the other.</string>
         </property>
         <property name="SlicerParameterName" stdset="0">
          <string>liveSource</string>
@@ -45,62 +45,13 @@
        </widget>
       </item>
       <item row="1" column="0">
-       <widget class="QLabel" name="cameraIndexLabel">
+       <widget class="QLabel" name="captureActionsLabel">
         <property name="text">
-         <string>Camera index:</string>
+         <string>Laptop camera:</string>
         </property>
        </widget>
       </item>
       <item row="1" column="1">
-       <widget class="QSpinBox" name="cameraIndexSpinBox">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
-        <property name="toolTip">
-         <string>Windows camera device index. The built-in laptop camera is normally index 0.</string>
-        </property>
-        <property name="minimum">
-         <number>0</number>
-        </property>
-        <property name="maximum">
-         <number>99</number>
-        </property>
-        <property name="value">
-         <number>0</number>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>cameraIndex</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="0">
-       <widget class="QLabel" name="cameraSupportLabel">
-        <property name="text">
-         <string>Camera support:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="1">
-       <widget class="QPushButton" name="installCameraSupportButton">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
-        <property name="toolTip">
-         <string>Install the pinned OpenCV package into Slicer's Python environment. Slicer must be restarted afterward.</string>
-        </property>
-        <property name="text">
-         <string>Install Camera Support</string>
-        </property>
-       </widget>
-      </item>
-      <item row="3" column="0">
-       <widget class="QLabel" name="captureActionsLabel">
-        <property name="text">
-         <string>Capture:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="3" column="1">
        <layout class="QHBoxLayout" name="captureActionsLayout">
         <item>
          <widget class="QPushButton" name="startButton">
@@ -108,7 +59,7 @@
            <bool>false</bool>
           </property>
           <property name="toolTip">
-           <string>Start the selected Windows laptop camera.</string>
+           <string>Show this laptop's camera in the LiveView panel. Leave it off while the acquisition stand-in is streaming the camera.</string>
           </property>
           <property name="text">
            <string>Start</string>
@@ -121,7 +72,7 @@
            <bool>false</bool>
           </property>
           <property name="toolTip">
-           <string>Stop capture and release the Windows camera.</string>
+           <string>Stop the laptop camera and release it for other applications.</string>
           </property>
           <property name="text">
            <string>Stop</string>
@@ -130,100 +81,219 @@
         </item>
        </layout>
       </item>
-      <item row="4" column="0">
-       <widget class="QLabel" name="resultMapLabel">
+      <item row="2" column="0">
+       <widget class="QLabel" name="linksLabel">
         <property name="text">
-         <string>Result map:</string>
+         <string>Links:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QPushButton" name="connectLinksButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="checkable">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>Connect to, or disconnect from, all five producer links at once. Nothing is connected until you press it.</string>
+        </property>
+        <property name="text">
+         <string>Connect links</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="acquisitionStateLabel">
+        <property name="text">
+         <string>LiveView (18944):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QLabel" name="acquisitionStateValueLabel">
+        <property name="text">
+         <string>disconnected</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="uc1StateLabel">
+        <property name="text">
+         <string>UC1 (18945):</string>
         </property>
        </widget>
       </item>
       <item row="4" column="1">
-       <widget class="QComboBox" name="resultMapSelector">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
-        <property name="toolTip">
-         <string>Select one of the five contract-defined genuine UC1 result roles.</string>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>resultMap</string>
+       <widget class="QLabel" name="uc1StateValueLabel">
+        <property name="text">
+         <string>disconnected</string>
         </property>
        </widget>
       </item>
       <item row="5" column="0">
-       <widget class="QLabel" name="resultClassLabel">
+       <widget class="QLabel" name="uc2StateLabel">
         <property name="text">
-         <string>Result class:</string>
+         <string>UC2 (18946):</string>
         </property>
        </widget>
       </item>
       <item row="5" column="1">
-       <widget class="QSpinBox" name="resultClassSpinBox">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
-        <property name="toolTip">
-         <string>Select the SVM or KNN probability component to display.</string>
-        </property>
-        <property name="minimum">
-         <number>1</number>
-        </property>
-        <property name="maximum">
-         <number>4</number>
-        </property>
-        <property name="value">
-         <number>1</number>
-        </property>
-        <property name="SlicerParameterName" stdset="0">
-         <string>resultClass</string>
+       <widget class="QLabel" name="uc2StateValueLabel">
+        <property name="text">
+         <string>disconnected</string>
         </property>
        </widget>
       </item>
       <item row="6" column="0">
-       <widget class="QLabel" name="resultSourceLabel">
+       <widget class="QLabel" name="hsCubeStateLabel">
         <property name="text">
-         <string>Result source:</string>
+         <string>HS Cube (18947):</string>
         </property>
        </widget>
       </item>
       <item row="6" column="1">
-       <widget class="QLabel" name="resultSourceValueLabel">
+       <widget class="QLabel" name="hsCubeStateValueLabel">
         <property name="text">
-         <string>None</string>
+         <string>disconnected</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="0">
+       <widget class="QLabel" name="controlStateLabel">
+        <property name="text">
+         <string>Control (18950):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="1">
+       <widget class="QLabel" name="controlStateValueLabel">
+        <property name="text">
+         <string>disconnected</string>
+        </property>
+       </widget>
+      </item>
+      <item row="8" column="0">
+       <widget class="QLabel" name="captureLabel">
+        <property name="text">
+         <string>Capture:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="8" column="1">
+       <widget class="QPushButton" name="captureButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Ask the acquisition stand-in to capture a hyperspectral cube. Available only while the control link is connected.</string>
+        </property>
+        <property name="text">
+         <string>Capture</string>
+        </property>
+       </widget>
+      </item>
+      <item row="9" column="0" colspan="2">
+       <widget class="QLabel" name="captureStatusLabel">
+        <property name="text">
+         <string>Capture needs the control link.</string>
         </property>
         <property name="wordWrap">
          <bool>true</bool>
         </property>
        </widget>
       </item>
-      <item row="7" column="0">
-       <widget class="QLabel" name="resultActionLabel">
+      <item row="10" column="0">
+       <widget class="QLabel" name="layerLabel">
         <property name="text">
-         <string>Result action:</string>
+         <string>Layers:</string>
         </property>
        </widget>
       </item>
-      <item row="7" column="1">
-       <widget class="QPushButton" name="refreshResultButton">
+      <item row="10" column="1">
+       <widget class="QTableWidget" name="layerTable">
+        <property name="toolTip">
+         <string>Tick a layer to show it in its panel, untick it to hide it. Select a row to set that layer's opacity below.</string>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>80</height>
+         </size>
+        </property>
+        <property name="selectionMode">
+         <enum>QAbstractItemView::SingleSelection</enum>
+        </property>
+        <property name="selectionBehavior">
+         <enum>QAbstractItemView::SelectRows</enum>
+        </property>
+       </widget>
+      </item>
+      <item row="11" column="0">
+       <widget class="QLabel" name="layerOpacityLabel">
+        <property name="text">
+         <string>Layer opacity:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="11" column="1">
+       <widget class="QSlider" name="layerOpacitySlider">
+        <property name="toolTip">
+         <string>Opacity of the selected layer. Fading changes only how the layer is drawn, never the result itself.</string>
+        </property>
+        <property name="minimum">
+         <number>0</number>
+        </property>
+        <property name="maximum">
+         <number>100</number>
+        </property>
+        <property name="value">
+         <number>100</number>
+        </property>
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+       </widget>
+      </item>
+      <item row="12" column="0">
+       <widget class="QLabel" name="bandLabel">
+        <property name="text">
+         <string>HS cube band:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="12" column="1">
+       <widget class="QSlider" name="bandSlider">
         <property name="enabled">
          <bool>false</bool>
         </property>
         <property name="toolTip">
-         <string>Find the marked external result and validate it before display. A genuine result is always preferred over a simulated one.</string>
+         <string>Browse the received hyperspectral cube one band at a time. The band's index and wavelength are shown below.</string>
         </property>
-        <property name="text">
-         <string>Refresh Result</string>
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
         </property>
        </widget>
       </item>
-      <item row="8" column="0">
+      <item row="13" column="0" colspan="2">
+       <widget class="QLabel" name="bandValueLabel">
+        <property name="text">
+         <string>No HS cube received.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="14" column="0">
        <widget class="QLabel" name="demoModeLabel">
         <property name="text">
          <string>Demo mode:</string>
         </property>
        </widget>
       </item>
-      <item row="8" column="1">
+      <item row="14" column="1">
        <widget class="QCheckBox" name="demoModeCheckBox">
         <property name="toolTip">
          <string>Allow an externally produced simulated result to be displayed, always under the SIMULATED banner. Never saved with the scene.</string>
@@ -233,123 +303,6 @@
         </property>
         <property name="checked">
          <bool>false</bool>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="connectionsGroupBox">
-     <property name="title">
-      <string>OpenIGTLink links</string>
-     </property>
-     <layout class="QFormLayout" name="connectionsFormLayout">
-      <item row="0" column="0">
-       <widget class="QLabel" name="acquisitionLinkLabel">
-        <property name="text">
-         <string>Acquisition link:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="1">
-       <layout class="QHBoxLayout" name="acquisitionLinkLayout">
-        <item>
-         <widget class="QPushButton" name="connectAcquisitionButton">
-          <property name="enabled">
-           <bool>false</bool>
-          </property>
-          <property name="toolTip">
-           <string>Connect as a client to the acquisition LiveView stream on 127.0.0.1:18944.</string>
-          </property>
-          <property name="text">
-           <string>Connect</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QPushButton" name="disconnectAcquisitionButton">
-          <property name="enabled">
-           <bool>false</bool>
-          </property>
-          <property name="toolTip">
-           <string>Stop and remove the module-owned acquisition connector.</string>
-          </property>
-          <property name="text">
-           <string>Disconnect</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-      <item row="1" column="0">
-       <widget class="QLabel" name="acquisitionStateLabel">
-        <property name="text">
-         <string>Acquisition state:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="1">
-       <widget class="QLabel" name="acquisitionStateValueLabel">
-        <property name="text">
-         <string>disconnected</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="0">
-       <widget class="QLabel" name="uc1LinkLabel">
-        <property name="text">
-         <string>UC1 link:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="2" column="1">
-       <layout class="QHBoxLayout" name="uc1LinkLayout">
-        <item>
-         <widget class="QPushButton" name="connectUc1Button">
-          <property name="enabled">
-           <bool>false</bool>
-          </property>
-          <property name="toolTip">
-           <string>Connect as a client to the UC1 map stream on 127.0.0.1:18945. The endpoint says nothing about provenance; the metadata does.</string>
-          </property>
-          <property name="text">
-           <string>Connect</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QPushButton" name="disconnectUc1Button">
-          <property name="enabled">
-           <bool>false</bool>
-          </property>
-          <property name="toolTip">
-           <string>Stop and remove the module-owned UC1 connector.</string>
-          </property>
-          <property name="text">
-           <string>Disconnect</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-      <item row="3" column="0">
-       <widget class="QLabel" name="uc1StateLabel">
-        <property name="text">
-         <string>UC1 state:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="3" column="1">
-       <widget class="QLabel" name="uc1StateValueLabel">
-        <property name="text">
-         <string>disconnected</string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
         </property>
        </widget>
       </item>
@@ -415,6 +368,153 @@
     </widget>
    </item>
    <item>
+    <widget class="ctkCollapsibleButton" name="developerCollapsibleButton">
+     <property name="text">
+      <string>Developer</string>
+     </property>
+     <property name="collapsed">
+      <bool>true</bool>
+     </property>
+     <layout class="QFormLayout" name="developerFormLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="cameraIndexLabel">
+        <property name="text">
+         <string>Camera index:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QSpinBox" name="cameraIndexSpinBox">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Windows camera device index. The built-in laptop camera is normally index 0.</string>
+        </property>
+        <property name="minimum">
+         <number>0</number>
+        </property>
+        <property name="maximum">
+         <number>99</number>
+        </property>
+        <property name="value">
+         <number>0</number>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>cameraIndex</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="cameraSupportLabel">
+        <property name="text">
+         <string>Camera support:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QPushButton" name="installCameraSupportButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Install the pinned OpenCV package into Slicer's Python environment. Slicer must be restarted afterward.</string>
+        </property>
+        <property name="text">
+         <string>Install Camera Support</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="resultMapLabel">
+        <property name="text">
+         <string>Delineation role:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QComboBox" name="resultMapSelector">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Select which of the five contract-defined UC1 result roles the Tumour Delineation panel shows.</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>resultMap</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="resultClassLabel">
+        <property name="text">
+         <string>Result class:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QSpinBox" name="resultClassSpinBox">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Select the SVM or KNN probability component to display.</string>
+        </property>
+        <property name="minimum">
+         <number>1</number>
+        </property>
+        <property name="maximum">
+         <number>4</number>
+        </property>
+        <property name="value">
+         <number>1</number>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>resultClass</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="resultSourceLabel">
+        <property name="text">
+         <string>Result source:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QLabel" name="resultSourceValueLabel">
+        <property name="text">
+         <string>None</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="resultActionLabel">
+        <property name="text">
+         <string>Result action:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QPushButton" name="refreshResultButton">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Find the marked external result and validate it before display. A genuine result is always preferred over a simulated one.</string>
+        </property>
+        <property name="text">
+         <string>Refresh Result</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Vertical</enum>
@@ -434,6 +534,12 @@
    <class>qMRMLWidget</class>
    <extends>QWidget</extends>
    <header>qMRMLWidget.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ctkCollapsibleButton</class>
+   <extends>QWidget</extends>
+   <header>ctkCollapsibleButton.h</header>
    <container>1</container>
   </customwidget>
  </customwidgets>

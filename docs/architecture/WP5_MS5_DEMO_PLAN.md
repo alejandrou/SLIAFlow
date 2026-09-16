@@ -75,6 +75,19 @@ Two things the audit found that the plan as first written did not account for:
 
 ## The target screen
 
+**Status, 2026-09-16:** implemented under `SLIA-022`. Manual runs found four
+defects - the LiveView panel black without its reason, the capture trigger
+refused for a non-IANA encoding number, connector events that could not be told
+apart because VTK delivers them to Python as a string, and a lost link that
+announces itself through an event the connector queues and then never pumps. The
+first two are fixed and verified by hand; the last two are fixed and covered by
+tests, and the link-loss step must pass a manual run before the card leaves
+manual verification. The layer list keeps each result in its own panel: `ADR-0001`, accepted
+on 2026-09-15, composites a result only over a background from its own
+producer, so `UC2_BV` is never drawn over `UC1_RGB`. The UC1 overlay itself is
+`SLIA-024`. The UC2 panel cannot be exercised by hand until `SLIA-021` delivers
+its producer.
+
 Six views, which is the union of the two reference images:
 
 ```
