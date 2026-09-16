@@ -340,6 +340,7 @@ class OwnedProcess:
 
     `onFinished` is called once, with a ProcessOutcome, when the process exits,
     fails to start or times out. `kill` ends it without calling `onFinished`.
+    `logLabel` names the process in the log lines its output is copied to.
     """
 
     FINISHED_SIGNAL = "finished(int,QProcess::ExitStatus)"
@@ -347,10 +348,12 @@ class OwnedProcess:
     STDOUT_SIGNAL = "readyReadStandardOutput()"
     STDERR_SIGNAL = "readyReadStandardError()"
 
-    def __init__(self, onFinished, *, processFactory=None, timeoutSec=RUN_TIMEOUT_SEC) -> None:
+    def __init__(self, onFinished, *, processFactory=None, timeoutSec=RUN_TIMEOUT_SEC,
+                 logLabel="uc1") -> None:
         self._onFinished = onFinished
         self._processFactory = processFactory
         self._timeoutSec = float(timeoutSec)
+        self._logLabel = logLabel
         self._process = None
         self._timer = None
         self._slots = {}
@@ -396,11 +399,13 @@ class OwnedProcess:
 
     def _readStdout(self) -> None:
         if self._process is not None:
-            self._stdout += self._logged(_toText(self._process.readAllStandardOutput()), "uc1")
+            self._stdout += self._logged(_toText(self._process.readAllStandardOutput()),
+                                         self._logLabel)
 
     def _readStderr(self) -> None:
         if self._process is not None:
-            self._stderr += self._logged(_toText(self._process.readAllStandardError()), "uc1!")
+            self._stderr += self._logged(_toText(self._process.readAllStandardError()),
+                                         f"{self._logLabel}!")
 
     @staticmethod
     def _logged(text: str, label: str) -> str:

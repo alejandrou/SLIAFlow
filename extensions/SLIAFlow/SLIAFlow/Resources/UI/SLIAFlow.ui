@@ -94,7 +94,7 @@
          <bool>false</bool>
         </property>
         <property name="toolTip">
-         <string>Freeze LiveView, save the frame, run UC1 in the background on a recorded HSI case, and show the calibrated cube in HS Cube. The acquisition is simulated. Available while the camera runs and no capture is in progress.</string>
+         <string>Freeze LiveView, save the frame, run UC1 and the blood-vessel enhancement (UC2) in the background on the recorded calibrated cube, and show the cube in HS Cube. The acquisition is simulated. Available while the camera runs and no capture is in progress.</string>
         </property>
         <property name="text">
          <string>Capture</string>
@@ -161,6 +161,16 @@
        <widget class="QLabel" name="resultStatusLabel">
         <property name="text">
          <string>No UC1 result yet. Press Capture.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="vascularStatusLabel">
+        <property name="text">
+         <string>No enhanced vascularization yet. Press Capture.</string>
         </property>
         <property name="wordWrap">
          <bool>true</bool>

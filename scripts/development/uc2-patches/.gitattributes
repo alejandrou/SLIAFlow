@@ -1,0 +1,5 @@
+# The patches are applied with `git apply` to UC2 sources that are CRLF in the
+# vendored working tree, so every context and added line in them ends in CRLF
+# while the diff headers end in LF. Any conversion would break one or the
+# other, so they are never converted.
+*.patch -text whitespace=-trailing-space,-blank-at-eof,cr-at-eol

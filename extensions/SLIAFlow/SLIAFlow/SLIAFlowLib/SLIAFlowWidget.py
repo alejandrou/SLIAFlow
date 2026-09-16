@@ -22,6 +22,7 @@ from .SLIAFlowParameterNode import (
     SLIAFlowParameterNode,
 )
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES, Uc1Run, Uc1RunError
+from .SLIAFlowUc2Run import Uc2RunError, uc2ParametersText
 
 
 def _sliceViewItem(viewName: str, viewLabel: str) -> str:
@@ -185,8 +186,30 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     RESULT_CAPTION = _("Result for recorded cube {case}")
     CUBE_UNREADABLE_MESSAGE = _("The hyperspectral cube could not be shown.\n{reason}")
     CAPTION_FONT_SIZE = 13
-    # Top of HS Cube; bottom of Tumour Delineation, whose top carries the stale line.
-    CAPTION_POSITIONS = {CUBE_VIEW_NAME: (0.5, 0.97), RESULT_VIEW_NAME: (0.5, 0.03)}
+    # Top of HS Cube; bottom of Tumour Delineation, whose top carries the stale
+    # line, and of Enhanced Vascularization, to match it.
+    CAPTION_POSITIONS = {CUBE_VIEW_NAME: (0.5, 0.97), RESULT_VIEW_NAME: (0.5, 0.03),
+                         VASCULAR_VIEW_NAME: (0.5, 0.03)}
+
+    # SLIA-021: the UC2 blood-vessel map in Enhanced Vascularization. The panel
+    # names the cube; the Status panel says how the map was made and why one
+    # is missing. The map is a display enhancement, rescaled per channel within
+    # each image, so it is never kept across captures.
+    VASCULAR_CAPTION = _("Enhanced vascularization for recorded cube {case}")
+    VASCULAR_FAILED_MESSAGE = _(
+        "The enhanced vascularization could not be computed.\nThe Status panel says why."
+    )
+    VASCULAR_NONE_STATUS = _("No enhanced vascularization yet. Press Capture.")
+    VASCULAR_RUNNING_STATUS = _(
+        "Computing the enhanced vascularization of recorded cube {case} (UC2)..."
+    )
+    VASCULAR_STATUS = _(
+        "Enhanced vascularization of recorded cube {case} - simulated acquisition. UC2 "
+        "blood-vessel enhancement with fixed {parameters}. A display enhancement, not a "
+        "measurement: colours are rescaled within each image and are not comparable between "
+        "captures. Not validated."
+    )
+    VASCULAR_FAILED_STATUS = _("Enhanced vascularization (UC2) failed: {message}")
     SPECTRUM_PROMPT = _("Click a pixel of HS Cube to plot its stored values.")
     SPECTRUM_LABEL = _(
         "Pixel column {column}, row {row} of recorded cube {cube}: stored values, "
@@ -255,6 +278,18 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._fittedCubeCaptureId: str | None = None
         # Why the last Capture's cube could not be shown, for the HS Cube panel.
         self._cubeError: str | None = None
+        # SLIA-021. A capture ends once both runs are done: UC1, whose side is
+        # pending from Capture until it succeeds, fails or is refused, and UC2,
+        # pending only while its process runs.
+        self._uc1Pending = False
+        self._uc2Pending = False
+        # The UC2 map on screen, the capture it belongs to and was last framed
+        # for, the cube a running UC2 works on, and why the last run gave none.
+        self._vascularCaseName: str | None = None
+        self._vascularCaptureId: str | None = None
+        self._fittedVascularCaptureId: str | None = None
+        self._vascularRunningCase: str | None = None
+        self._vascularError: str | None = None
         self._cubeDisplay = self.CUBE_DISPLAY_BANDS
         # Captions naming what a panel shows, one actor per view.
         self._panelCaptionActors: dict[str, Any] = {}
@@ -328,6 +363,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.initializeParameterNode()
         self._setCameraSupportState(self.logic.openCVAvailable())
         self._updateResultStatus()
+        self._updateVascularStatus()
         # Reload sets up a new widget but does not enter it, although the
         # module is still the selected one (slicer.util.reloadScriptedModule).
         if getattr(self.parent, "isEntered", False):
@@ -346,6 +382,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._deactivatePresentation(restore=True)
         self._forgetResult()
         self._forgetCube()
+        self._forgetVascularMap()
         self.setParameterNode(None)
         self.removeObservers()
 
@@ -363,6 +400,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._deactivatePresentation(restore=True)
         self._forgetResult()
         self._forgetCube()
+        self._forgetVascularMap()
         self.setParameterNode(None)
 
     def onSceneStartClose(self, caller=None, event=None) -> None:
@@ -373,6 +411,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._deactivatePresentation(restore=False)
         self._forgetResult()
         self._forgetCube()
+        self._forgetVascularMap()
         self.setParameterNode(None)
         # The panels are empty again, so the Status panel must not still read
         # the previous capture's result.
@@ -628,6 +667,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
 
         self._captureInProgress = True
+        self._uc1Pending = True
+        self._uc2Pending = False
         self._liveViewFrozen = True
         self._captureCaseName = None
         self._captureSnapshotName = None
@@ -637,6 +678,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._resultStale = True
             self._updateResultStatus()
             self._updateStaleLine()
+        # The previous map is not kept: it is rescaled within its own image and
+        # says nothing about this capture.
+        self._forgetVascularMap()
+        self._showVascularMap()
         self._setStatus(self.CAPTURE_CAPTURING_STATUS)
 
         try:
@@ -645,6 +690,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # Whatever went wrong, LiveView must not stay frozen.
             logging.exception("SLIAFlow: capture %s could not be started", self._captureId)
             self.logic.cancelRun()
+            self._uc2Pending = False
+            self._updateVascularStatus()
             self._failCapture(_("The capture could not be started: {error}").format(error=error))
 
     def _startCapture(self, liveNode) -> None:
@@ -655,6 +702,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._failCapture(_("The capture snapshot could not be saved: {error}").format(error=error))
             return
 
+        # UC2 starts first: it is independent of UC1, and a UC1 refusal ends
+        # UC1's side of the capture at once, which must not end it before UC2
+        # has been started.
+        self._startUc2()
         self._startUc1()
         # UC1 runs in its own process, so the cube is read while it runs. The
         # cube does not need UC1: it is shown whether or not the run started.
@@ -677,6 +728,56 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.logic.startUc1Run(case, self._onUc1Finished, onStage=self._onUc1Stage)
         except (Uc1RunError, OSError) as error:
             self._failCapture(str(error))
+
+    def _startUc2(self) -> None:
+        """Start UC2 on the configured cube, or say on its own panel and line why not.
+
+        UC2 is independent of UC1 (SLIA-021): its refusal or failure never ends
+        the capture early, fails UC1 or touches the Tumour Delineation panel.
+        """
+        try:
+            cube = self.logic.loadConfiguredCalibratedCube()
+            self.logic.startUc2Run(cube, self._onUc2Finished)
+        except (CalibratedCubeError, Uc2RunError, OSError) as error:
+            self._failVascular(str(error))
+            return
+        except Exception as error:
+            logging.exception("SLIAFlow: UC2 could not be started for capture %s", self._captureId)
+            self._failVascular(_("It could not be started: {error}").format(error=error))
+            return
+        self._uc2Pending = True
+        self._vascularRunningCase = cube.name
+        self._updateVascularStatus()
+
+    def _onUc2Finished(self, result) -> None:
+        if not self._uc2Pending:
+            return
+        self._uc2Pending = False
+        self._vascularRunningCase = None
+        if not result.success:
+            logging.warning("SLIAFlow: %s", result.message)
+            self._failVascular(result.message)
+        else:
+            try:
+                self.logic.acceptVascularMap(result.cube, self._captureId, result.image)
+            except Exception as error:
+                logging.exception("SLIAFlow: the UC2 map of cube %s could not be shown",
+                                  result.cube.name)
+                self._failVascular(_("The map could not be shown: {error}").format(error=error))
+            else:
+                logging.info("SLIAFlow: %s", result.message)
+                self._vascularCaseName = result.cube.name
+                self._vascularCaptureId = self._captureId
+                self._vascularError = None
+                self._updateVascularStatus()
+                self._showVascularMap()
+        self._finishCaptureIfIdle()
+
+    def _failVascular(self, message: str) -> None:
+        self._vascularError = message
+        self._vascularRunningCase = None
+        self._updateVascularStatus()
+        self._showVascularMap()
 
     def _showCapturedCube(self) -> None:
         """Show the calibrated cube this capture stands for (SLIA-032).
@@ -982,7 +1083,17 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._endCapture()
 
     def _endCapture(self) -> None:
-        """Unfreeze LiveView and allow the next Capture. The stale mark stays."""
+        """UC1's side of the capture is over; end the capture unless UC2 still runs."""
+        self._uc1Pending = False
+        self._finishCaptureIfIdle()
+
+    def _finishCaptureIfIdle(self) -> None:
+        """Unfreeze LiveView and allow the next Capture once UC1 and UC2 are both done.
+
+        The stale mark stays.
+        """
+        if not self._captureInProgress or self._uc1Pending or self._uc2Pending:
+            return
         self._captureInProgress = False
         self._liveViewFrozen = False
         self._captureCaseName = None
@@ -991,9 +1102,13 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._updateStaleLine()
 
     def _cancelCapture(self) -> None:
-        """Kill an owned UC1 run and release the lock, without reporting it."""
+        """Kill the owned UC1 and UC2 runs and release their locks, without reporting them."""
         if self.logic is not None:
             self.logic.cancelRun()
+        if self._uc2Pending:
+            self._uc2Pending = False
+            self._vascularRunningCase = None
+            self._updateVascularStatus()
         if self._captureInProgress:
             self._endCapture()
 
@@ -1211,6 +1326,91 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             statusLabel.setText(message)
 
     # ------------------------------------------------------------------
+    # Enhanced Vascularization: the UC2 map of this capture (SLIA-021)
+    # ------------------------------------------------------------------
+
+    def _vascularMapNode(self):
+        """The UC2 map of the capture it was accepted for, or None.
+
+        A map from any other capture is never returned, so the panel cannot
+        show a previous capture's map as this one's.
+        """
+        if self.logic is None or self._vascularCaptureId is None:
+            return None
+        node = self.logic.vascularMapNode()
+        if node is None or node.GetAttribute(CAPTURE_ID_ATTRIBUTE) != self._vascularCaptureId:
+            return None
+        return node
+
+    def _showVascularMap(self, layoutManager=None) -> None:
+        """Bind the map to Enhanced Vascularization, or say what the panel waits for."""
+        if not self._presentationActive:
+            return
+        vascularWidget = self._sliceWidgetOrNone(self.VASCULAR_VIEW_NAME, layoutManager)
+        if vascularWidget is None:
+            return
+        node = self._vascularMapNode()
+        try:
+            sliceLogic = vascularWidget.sliceLogic()
+            composite = sliceLogic.GetSliceCompositeNode()
+            if node is None:
+                self._clearSliceLayers(vascularWidget)
+                self._removePanelCaption(self.VASCULAR_VIEW_NAME)
+                self._showPanelMessage(
+                    self.VASCULAR_VIEW_NAME,
+                    self.VASCULAR_FAILED_MESSAGE if self._vascularError
+                    else self.RESERVED_PANEL_REASONS[self.VASCULAR_VIEW_NAME],
+                    layoutManager,
+                )
+            else:
+                self._removePanelMessage(self.VASCULAR_VIEW_NAME)
+                # Every new map is framed for its own; a redraw of the same map
+                # keeps the operator's pan and zoom.
+                if (composite.GetBackgroundVolumeID() != node.GetID()
+                        or self._fittedVascularCaptureId != self._vascularCaptureId):
+                    composite.SetBackgroundVolumeID(node.GetID())
+                    sliceLogic.FitSliceToBackground()
+                    self._fittedVascularCaptureId = self._vascularCaptureId
+                composite.SetForegroundVolumeID(None)
+                composite.SetLabelVolumeID(None)
+                self._showPanelCaption(
+                    self.VASCULAR_VIEW_NAME,
+                    self.VASCULAR_CAPTION.format(case=self._vascularCaseName),
+                    layoutManager,
+                )
+            vascularView = vascularWidget.sliceView()
+            if vascularView is not None:
+                vascularView.forceRender()
+        except RuntimeError:
+            return
+
+    def _updateVascularStatus(self) -> None:
+        label = getattr(getattr(self, "ui", None), "vascularStatusLabel", None)
+        if label is None:
+            return
+        if self._uc2Pending:
+            text = self.VASCULAR_RUNNING_STATUS.format(case=self._vascularRunningCase)
+        elif self._vascularError:
+            text = self.VASCULAR_FAILED_STATUS.format(message=self._vascularError)
+        elif self._vascularCaseName is not None:
+            text = self.VASCULAR_STATUS.format(case=self._vascularCaseName,
+                                               parameters=uc2ParametersText())
+        else:
+            text = self.VASCULAR_NONE_STATUS
+        label.setText(text)
+
+    def _forgetVascularMap(self) -> None:
+        """Remove the map and everything that describes it."""
+        if self.logic is not None:
+            self.logic.removeVascularMapNode()
+        self._vascularCaseName = None
+        self._vascularCaptureId = None
+        self._fittedVascularCaptureId = None
+        self._vascularError = None
+        self._removePanelCaption(self.VASCULAR_VIEW_NAME)
+        self._updateVascularStatus()
+
+    # ------------------------------------------------------------------
     # Connections (SLIA-035, ADR-0004 decision 2)
     #
     # One row per configured port of IUMA's acquisition app. The rows are built
@@ -1404,6 +1604,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._updateResultStatus()
         self._showResult(layoutManager)
         self._showCube(layoutManager)
+        self._showVascularMap(layoutManager)
         self._observeCubeView(layoutManager)
         return True
 

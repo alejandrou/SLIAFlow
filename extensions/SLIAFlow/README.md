@@ -1,8 +1,9 @@
 # SLIAFlow
 
 SLIAFlow is the 3D Slicer visualization component of the STRATUM demonstrator.
-It runs the prebuilt UC1 pipeline, with documented patches, on IUMA's LCTF cube,
-shows the images UC1 writes, and shows IUMA's calibrated LCTF cube band by band.
+It runs the prebuilt UC1 pipeline and the UC2 blood-vessel enhancement, each with
+documented patches, on IUMA's LCTF cube, shows the images they write, and shows
+IUMA's calibrated LCTF cube band by band.
 It provides no diagnostic interpretation or clinical decision support.
 
 SLIAFlow is prototype software. It is not clinically validated and must not be
@@ -63,7 +64,41 @@ Every output is marked `SLIAFlow.DataOrigin = simulated`, names its cube in
 `SLIAFlow.RecordedCase`, and carries the detail `real UC1 pipeline, recorded
 IUMA LCTF capture 002-04, calibrated by IUMA (simulated acquisition)`: the
 pipeline and the cube are real, the acquisition is simulated, and nothing shown
-is a clinical result. The Enhanced Vascularization panel is black and says why.
+is a clinical result.
+
+## The Enhanced Vascularization panel: UC2 (SLIA-021)
+
+Every Capture also runs the vendored UC2 blood-vessel enhancement on the same
+cube, in the background beside UC1, and shows its map in Enhanced
+Vascularization.
+
+1. Build UC2 once: `scripts\development\build-uc2.ps1`. It applies the
+   versioned UC2 patches recorded in `docs\development\uc2_changes.md` and
+   builds `build\uc2\source\uc2_bvmap.exe` with the MSYS2 GCC
+   (`docs\development\uc2_local_build.md`).
+2. Capture gives UC2 the cube's folder, `input\002-04`. UC2 reads only the three
+   bands at 480, 540 and 710 nm from `LCTF_Calibrated_Cube_Single.dat`, applies
+   its own fixed parameters (`high_in 0.15`, `high_out 0.8`, `gamma 1`,
+   `bValue 3`) and writes `build\uc2\run\002-04-BVMap.png`. Nothing is written
+   into `input\`. A cube with other file names, or whose bands 4, 16 and 50 are
+   not 480, 540 and 710 nm, is refused before UC2 starts.
+3. The map is shown alone, named `002-04-BVMap.png`, with the caption
+   `Enhanced vascularization for recorded cube 002-04`. The last line of the
+   Status section says how it was made: the fixed bands and parameters, that it
+   is a display enhancement whose colours are rescaled within each image and are
+   not comparable between captures, and that it is not validated.
+4. UC2 and UC1 are independent. One failing, being refused or not being built
+   does not stop the other or change its panel. The panel then says
+   `The enhanced vascularization could not be computed.` and the Status line
+   gives the reason. LiveView resumes once both have finished.
+5. A new Capture takes the previous map down until its own arrives; a map is
+   never kept from an earlier capture.
+
+The map node carries `SLIAFlow.DataOrigin = simulated`,
+`SLIAFlow.RecordedCase = 002-04`, the detail `real UC2 blood-vessel
+enhancement, recorded IUMA LCTF capture 002-04, calibrated by IUMA (simulated
+acquisition)` and `SLIAFlow.Uc2Parameters` with the fixed bands and
+parameters. `build\uc2\.uc2-runner.lock` keeps one UC2 run at a time.
 
 ## The HS Cube panel: IUMA's calibrated cube (SLIA-032)
 

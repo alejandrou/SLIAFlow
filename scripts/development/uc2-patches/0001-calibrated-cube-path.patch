@@ -1,0 +1,20 @@
+diff --git a/params.c b/params.c
+--- a/params.c
++++ b/params.c
+@@ -65,6 +65,16 @@ void initHSImagePaths(HSImagePaths* paths, const char* directory) {
+     snprintf(paths->hdrPath, MAX_PATH_LENGTH, "%sraw.hdr", paths->basePath);
+     snprintf(paths->whitePath, MAX_PATH_LENGTH, "%swhiteReference.dat", paths->basePath);
+     snprintf(paths->darkPath, MAX_PATH_LENGTH, "%sdarkReference.dat", paths->basePath);
++
++    // Calibrated cube (Stratum HS prototype): if present, it is used instead of raw.dat/raw.hdr
++    char calibratedHdr[MAX_PATH_LENGTH];
++    snprintf(calibratedHdr, MAX_PATH_LENGTH, "%sLCTF_Calibrated_Cube_Single.hdr", paths->basePath);
++    FILE *calibratedFile = fopen(calibratedHdr, "r");
++    if (calibratedFile != NULL) {
++        fclose(calibratedFile);
++        snprintf(paths->rawPath, MAX_PATH_LENGTH, "%sLCTF_Calibrated_Cube_Single.dat", paths->basePath);
++        snprintf(paths->hdrPath, MAX_PATH_LENGTH, "%sLCTF_Calibrated_Cube_Single.hdr", paths->basePath);
++    }
+     extractDatasetName(directory, paths);
+ }
+ 

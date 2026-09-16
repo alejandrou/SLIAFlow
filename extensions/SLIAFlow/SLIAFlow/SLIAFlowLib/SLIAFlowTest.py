@@ -2074,17 +2074,22 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         return frame
 
     @contextlib.contextmanager
-    def _captureSession(self, *, cube=True, groundTruth=False):
+    def _captureSession(self, *, cube=True, groundTruth=False, uc2=False):
         """The module widget wired to a fixture repository, a fake camera and fake UC1.
 
         The configured cube is the fixture calibrated cube at its default place,
         input/002-04. With `cube=False` it is not written, so the configured
-        header does not exist; with `groundTruth` a gtMap lies beside it.
+        header does not exist; with `groundTruth` a gtMap lies beside it. With
+        `uc2` a placeholder UC2 build is staged too, so Capture starts a fake
+        UC2 process before the fake UC1 one; without it UC2 is refused before
+        any process is created, and `processes` holds UC1's alone.
         """
         _, widget = self._moduleRepresentationAndWidget()
         widget.initializeParameterNode()
         with self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root, cube=cube, groundTruth=groundTruth)
+            if uc2:
+                fixture.update(self._makeFixtureUc2Build(root))
             factory, processes = self._fakeProcessFactory()
             widget.logic.setRunEnvironment(repositoryRoot=root, processFactory=factory)
             capture = self._FakeCameraCapture()
@@ -2098,6 +2103,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 widget._stopCamera(clearLiveView=True)
                 widget._forgetResult()
                 widget._forgetCube()
+                widget._forgetVascularMap()
                 widget.logic.calibratedCubeHeader = None
                 widget.logic.setRunEnvironment(repositoryRoot=None, processFactory=None)
 
@@ -4261,3 +4267,419 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertNotIn(camera.GetID(), self._incomingNodeIds(self._moduleConnectors()),
                              "The connector took the camera volume")
             np.testing.assert_array_equal(slicer.util.arrayFromVolume(camera), cameraFrame)
+
+    # ----------------------------------------------------------------------
+    # SLIA-021: the UC2 blood-vessel map in Enhanced Vascularization
+    #
+    # As for UC1, every cube, build and PNG below is a placeholder fixture in a
+    # temporary directory. No test reads input/ or runs the staged UC2 build;
+    # scripts/development/check-uc2.py runs the real build on 002-04.
+    # ----------------------------------------------------------------------
+
+    # Patch 0002's fixed band indices and the wavelengths they must be on the
+    # cube, from docs/development/uc2_changes.md.
+    UC2_BANDS = ((4, 480.0), (16, 540.0), (50, 710.0))
+    UC2_RUN_TIMEOUT_SEC = 30
+    UC2_EXECUTABLE_NAME = "uc2_bvmap.exe"
+    UC2_MAP_NAME = "002-04-BVMap.png"
+    UC2_DETAIL = (
+        "real UC2 blood-vessel enhancement, recorded IUMA LCTF capture 002-04, calibrated by "
+        "IUMA (simulated acquisition)"
+    )
+
+    def _makeFixtureUc2Build(self, root: Path) -> dict:
+        """A placeholder staged UC2 build: the binary and its runtime, never run."""
+        buildRoot = root / "build" / "uc2"
+        source = buildRoot / "source"
+        source.mkdir(parents=True)
+        (source / self.UC2_EXECUTABLE_NAME).write_bytes(b"test fixture, never run")
+        (source / "msys-2.0.dll").write_bytes(b"test fixture, never loaded")
+        return {
+            "uc2BuildRoot": buildRoot,
+            "uc2Executable": source / self.UC2_EXECUTABLE_NAME,
+            "uc2Runtime": source / "msys-2.0.dll",
+            "uc2RunDirectory": buildRoot / "run",
+            "uc2Lock": buildRoot / ".uc2-runner.lock",
+        }
+
+    @staticmethod
+    def _uc2PngBytes(rgbTopFirst) -> bytes:
+        """An 8-bit RGB PNG, top row first, as stb_image_write lays one out.
+
+        Written here with zlib alone, so the reader is checked against neither
+        VTK's nor Qt's own writer.
+        """
+        import struct
+        import zlib
+
+        rgb = np.asarray(rgbTopFirst, dtype=np.uint8)
+        lines, samples = rgb.shape[:2]
+
+        def chunk(kind: bytes, body: bytes) -> bytes:
+            return (struct.pack(">I", len(body)) + kind + body
+                    + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+        rows = b"".join(b"\0" + rgb[line].tobytes() for line in range(lines))
+        return (b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", samples, lines, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(rows))
+                + chunk(b"IEND", b""))
+
+    def _uc2Fixture(self, root: Path) -> dict:
+        fixture = self._makeFixtureRepository(root)
+        fixture.update(self._makeFixtureUc2Build(root))
+        return fixture
+
+    def _startUc2Run(self, fixture, header=None, **runOptions):
+        """Prepare a Uc2Run on the fixture cube (or `header`) with a fake process."""
+        uc2Run = self._helperModule("SLIAFlowUc2Run")
+        cube = self._helperModule("SLIAFlowCalibratedCube").loadCalibratedCube(
+            header or fixture["calibratedHeader"])
+        build = uc2Run.Uc2Build(fixture["uc2BuildRoot"])
+        factory, processes = self._fakeProcessFactory()
+        results = []
+        run = uc2Run.Uc2Run(build, cube, results.append, processFactory=factory, **runOptions)
+        return run, cube, build, processes, results
+
+    def _uc2Process(self, session):
+        """The fake UC2 process of the latest capture."""
+        processes = [process for process in session["processes"]
+                     if Path(process.program).name == self.UC2_EXECUTABLE_NAME]
+        self.assertTrue(processes, "Capture did not start a UC2 process")
+        return processes[-1]
+
+    def _finishUc2(self, session, *, seed=0, exitCode=0, stdout=b"", writeMap=True):
+        """Write the map the fake UC2 process stands for, then end that process."""
+        run = session["widget"].logic.currentUc2Run
+        self.assertIsNotNone(run, "Capture did not start a UC2 run")
+        image = self._fixtureImage(lines=run.cube.lines, samples=run.cube.samples, seed=seed)
+        if writeMap:
+            run.build.outputPath(run.cube).write_bytes(self._uc2PngBytes(image))
+        process = self._uc2Process(session)
+        if stdout:
+            process.emitOutput(stdout=stdout)
+        process.emitFinished(exitCode)
+        return image
+
+    def test_uc2RunsTheStagedBuildOnTheCubeFolder(self) -> None:
+        uc2Run = self._helperModule("SLIAFlowUc2Run")
+        self.assertEqual(uc2Run.RUN_TIMEOUT_SEC, self.UC2_RUN_TIMEOUT_SEC)
+        self.assertEqual(tuple(uc2Run.UC2_BANDS), self.UC2_BANDS)
+        with self._fixtureDirectory() as root:
+            fixture = self._uc2Fixture(root)
+            fixture["uc2RunDirectory"].mkdir(parents=True)
+            leftover = fixture["uc2RunDirectory"] / self.UC2_MAP_NAME
+            leftover.write_bytes(b"left by an earlier run")
+            cubeFiles = sorted(path.name for path in fixture["cubeFolder"].iterdir())
+
+            run, cube, build, processes, results = self._startUc2Run(fixture)
+            run.start()
+            try:
+                self.assertEqual(len(processes), 1)
+                process = processes[0]
+                self.assertTrue(process.started)
+                self.assertEqual(Path(process.program), fixture["uc2Executable"])
+                # The folder, not a file: patch 0001 finds the cube in it.
+                self.assertEqual(process.arguments, [fixture["cubeFolder"].resolve().as_posix()])
+                self.assertEqual(Path(process.workingDirectory), fixture["uc2RunDirectory"])
+                for shell in ("cmd", "powershell", "pwsh", "bash", "/c"):
+                    self.assertNotIn(shell, str(process.program).lower())
+                self.assertTrue(fixture["uc2Lock"].is_file(), "The lock is not held during the run")
+                self.assertFalse(leftover.exists(), "A previous run's map was not cleared")
+                self.assertTrue(run.running)
+            finally:
+                run.cancel()
+            self.assertFalse(fixture["uc2Lock"].exists())
+            self.assertTrue(process.killed)
+            self.assertEqual(results, [], "A cancelled run was reported")
+            self.assertEqual(sorted(path.name for path in fixture["cubeFolder"].iterdir()),
+                             cubeFiles, "UC2's run wrote into the cube's folder")
+
+    def test_uc2PreRunChecksRefuseBeforeStarting(self) -> None:
+        uc2Run = self._helperModule("SLIAFlowUc2Run")
+        with self._fixtureDirectory() as root:
+            fixture = self._uc2Fixture(root)
+
+            def refused(expectedFragment, header=None, prepare=None):
+                run, _cube, _build, processes, _results = self._startUc2Run(fixture, header)
+                if prepare is not None:
+                    prepare()
+                with self.assertRaises(uc2Run.Uc2RunError) as raised:
+                    run.start()
+                self.assertIn(expectedFragment, str(raised.exception))
+                self.assertEqual(processes, [], "A process was created for a refused run")
+                return raised.exception
+
+            with self.subTest(defect="missing executable"):
+                fixture["uc2Executable"].rename(fixture["uc2Executable"].with_suffix(".off"))
+                refused("build-uc2.ps1")
+                fixture["uc2Executable"].with_suffix(".off").rename(fixture["uc2Executable"])
+                self.assertFalse(fixture["uc2Lock"].exists(), "A refused run left the lock behind")
+
+            with self.subTest(defect="missing runtime"):
+                fixture["uc2Runtime"].rename(fixture["uc2Runtime"].with_suffix(".off"))
+                refused("msys-2.0.dll")
+                fixture["uc2Runtime"].with_suffix(".off").rename(fixture["uc2Runtime"])
+
+            with self.subTest(defect="cube not on the LCTF grid"):
+                # 440 nm first, as the HSI Human Brain Database grid: index 4 is
+                # 460 nm, so UC2 would read the wrong bands.
+                header, _values = self._writeFixtureCalibratedCube(
+                    root / "input" / "off-grid", wavelengths=tuple(range(440, 440 + 5 * 109, 5)))
+                refused("480", header=header)
+
+            with self.subTest(defect="data file UC2 does not open"):
+                header, _values = self._writeFixtureCalibratedCube(
+                    root / "input" / "raw-suffix", dataSuffix=".raw")
+                refused("LCTF_Calibrated_Cube_Single.dat", header=header)
+
+            with self.subTest(defect="cube changed after Capture"):
+                data = fixture["calibratedHeader"].with_suffix(".dat")
+                original = data.read_bytes()
+                try:
+                    refused("bytes", prepare=lambda: data.write_bytes(original[:-4]))
+                finally:
+                    data.write_bytes(original)
+
+            with self.subTest(defect="lock held"):
+                fixture["uc2Lock"].write_text("12345\n", encoding="ascii")
+                try:
+                    refused(uc2Run.LOCK_FILE_NAME)
+                    self.assertTrue(fixture["uc2Lock"].is_file(),
+                                    "SLIAFlow deleted a lock it does not hold")
+                finally:
+                    fixture["uc2Lock"].unlink()
+
+    def test_uc2MapIsReadTopRowFirstAndChecked(self) -> None:
+        uc2Run = self._helperModule("SLIAFlowUc2Run")
+        with self._fixtureDirectory() as root:
+            image = self._fixtureImage(lines=3, samples=4, seed=5)
+            path = root / self.UC2_MAP_NAME
+            path.write_bytes(self._uc2PngBytes(image))
+            np.testing.assert_array_equal(uc2Run.readBvMapPng(path, 3, 4), image,
+                                          "The map is flipped, mirrored or channel-swapped")
+            with self.subTest(defect="other size"):
+                with self.assertRaises(uc2Run.Uc2RunError):
+                    uc2Run.readBvMapPng(path, 4, 3)
+            with self.subTest(defect="not a PNG"):
+                other = root / "other.png"
+                other.write_bytes(b"not a PNG")
+                with self.assertRaises(uc2Run.Uc2RunError):
+                    uc2Run.readBvMapPng(other, 3, 4)
+
+    def test_uc2RunFailsOnExitCodeErrorLineOrMissingMap(self) -> None:
+        """UC2 exits 0 after several failures, so its error lines are read too."""
+        with self._fixtureDirectory() as root:
+            fixture = self._uc2Fixture(root)
+            for label, exitCode, stdout, writeMap, fragment in (
+                ("error line, exit 0", 0, b"Error reading band 16 from 'x'\n", True,
+                 "Error reading band"),
+                ("exit code", 1, b"", True, "code 1"),
+                ("no map", 0, b"Image successfully saved\n", False, "did not write"),
+            ):
+                with self.subTest(failure=label):
+                    run, cube, build, processes, results = self._startUc2Run(fixture)
+                    run.start()
+                    if writeMap:
+                        build.outputPath(cube).write_bytes(
+                            self._uc2PngBytes(self._fixtureImage(lines=cube.lines,
+                                                                 samples=cube.samples)))
+                    processes[0].emitOutput(stdout=stdout)
+                    processes[0].emitFinished(exitCode)
+                    self.assertEqual(len(results), 1)
+                    self.assertFalse(results[0].success)
+                    self.assertIsNone(results[0].image)
+                    self.assertIn(fragment, results[0].message)
+                    self.assertFalse(fixture["uc2Lock"].exists())
+
+            with self.subTest(outcome="success"):
+                run, cube, build, processes, results = self._startUc2Run(fixture)
+                run.start()
+                image = self._fixtureImage(lines=cube.lines, samples=cube.samples, seed=2)
+                build.outputPath(cube).write_bytes(self._uc2PngBytes(image))
+                processes[0].emitFinished(0)
+                self.assertTrue(results[0].success, results[0].message)
+                np.testing.assert_array_equal(results[0].image, image)
+                self.assertFalse(fixture["uc2Lock"].exists())
+
+            with self.subTest(failure="stale map"):
+                run, cube, build, processes, results = self._startUc2Run(fixture)
+                run.start()
+                path = build.outputPath(cube)
+                path.write_bytes(self._uc2PngBytes(self._fixtureImage(lines=cube.lines,
+                                                                      samples=cube.samples)))
+                earlier = time.time() - 120.0
+                os.utime(path, (earlier, earlier))
+                processes[0].emitFinished(0)
+                self.assertFalse(results[0].success)
+                self.assertIn("earlier run", results[0].message)
+
+    def test_captureShowsTheVascularMapAlongsideUc1(self) -> None:
+        with self._captureSession(uc2=True) as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            # UC2 starts first, and UC1 still runs as before.
+            self.assertEqual([Path(process.program).name for process in session["processes"]],
+                             [self.UC2_EXECUTABLE_NAME, "stratum.opt.intermediate.exe"])
+            self.assertIn("002-04", widget.ui.vascularStatusLabel.text)
+            captureId = widget._captureId
+
+            image = self._finishUc2(session, seed=3)
+            self.assertTrue(widget.captureInProgress, "The capture ended before UC1 finished")
+            self.assertTrue(widget.liveViewFrozen)
+            node = widget.logic.vascularMapNode()
+            self.assertIsNotNone(node, "The UC2 map was not accepted")
+            np.testing.assert_array_equal(np.array(slicer.util.arrayFromVolume(node))[0], image)
+            self.assertEqual(self._ijkToRasDirections(node), self.UPRIGHT_LIVE_DIRECTIONS)
+            self.assertEqual(node.GetName(), self.UC2_MAP_NAME)
+            for attribute, expected in (
+                ("SLIAFlow.DataOrigin", "simulated"),
+                ("SLIAFlow.RecordedCase", self.CALIBRATED_CUBE_NAME),
+                ("SLIAFlow.SimulationDetail", self.UC2_DETAIL),
+                ("SLIAFlow.CaptureId", captureId),
+            ):
+                with self.subTest(attribute=attribute):
+                    self.assertEqual(node.GetAttribute(attribute), expected)
+            parameters = node.GetAttribute("SLIAFlow.Uc2Parameters")
+            for fragment in ("480, 540, 710 nm", "high_in 0.15", "high_out 0.8", "gamma 1",
+                             "bValue 3"):
+                self.assertIn(fragment, parameters)
+            status = widget.ui.vascularStatusLabel.text.lower()
+            for fragment in ("002-04", "simulated acquisition", "high_in 0.15",
+                             "not comparable between captures", self.NOT_VALIDATED_FRAGMENT):
+                self.assertIn(fragment, status)
+
+            self._finishCapture(session, seed=4)
+            self.assertFalse(widget.captureInProgress)
+            self.assertIsNotNone(widget.logic.outputNode("imageRGB.bmp"))
+            self.assertEqual(widget.logic.vascularMapNode().GetID(), node.GetID(),
+                             "UC1 replaced the UC2 map")
+
+            with self.subTest(order="UC1 first"):
+                self._showFrame(session, 31)
+                widget._onCaptureClicked()
+                self.assertIsNone(widget.logic.vascularMapNode(),
+                                  "The previous capture's map stayed during the new one")
+                self._finishCapture(session, seed=5)
+                self.assertTrue(widget.captureInProgress, "The capture ended before UC2 finished")
+                self.assertTrue(widget.liveViewFrozen)
+                self._finishUc2(session, seed=6)
+                self.assertFalse(widget.captureInProgress)
+                self.assertFalse(widget.liveViewFrozen)
+                self.assertEqual(widget.logic.vascularMapNode().GetAttribute("SLIAFlow.CaptureId"),
+                                 widget._captureId)
+
+    def test_uc2FailureOrRefusalLeavesUc1Alone(self) -> None:
+        widget = self._moduleRepresentationAndWidget()[1]
+        # The panel names what failed and where to read why, nothing else.
+        for word in self.PANEL_TEXT_FORBIDDEN_WORDS:
+            self.assertNotIn(word, widget.VASCULAR_FAILED_MESSAGE.lower())
+
+        with self.subTest(case="UC2 fails"), self._captureSession(uc2=True) as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            self._finishUc2(session, stdout=b"Error reading band 16 from 'x'\n")
+            self.assertIsNone(widget.logic.vascularMapNode())
+            self.assertIn("Error reading band", widget.ui.vascularStatusLabel.text)
+            if widget._presentationActive:
+                self.assertEqual(widget.panelMessage(widget.VASCULAR_VIEW_NAME),
+                                 widget.VASCULAR_FAILED_MESSAGE)
+            self.assertTrue(widget.captureInProgress)
+            self._finishCapture(session, seed=1)
+            self.assertFalse(widget.captureInProgress)
+            self.assertIsNotNone(widget.logic.outputNode("imageRGB.bmp"),
+                                 "A UC2 failure failed UC1")
+            self.assertIn("Done", widget.ui.statusLabel.text)
+
+        with self.subTest(case="UC2 not built"), self._captureSession() as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            self.assertEqual(len(session["processes"]), 1, "A process was created for UC2")
+            self.assertIn("build-uc2.ps1", widget.ui.vascularStatusLabel.text)
+            self._finishCapture(session, seed=1)
+            self.assertFalse(widget.captureInProgress)
+            self.assertIsNotNone(widget.logic.outputNode("imageRGB.bmp"))
+
+        with self.subTest(case="UC1 fails"), self._captureSession(uc2=True) as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            self._finishCapture(session, exitCode=1)
+            self.assertIn("Failed", widget.ui.statusLabel.text)
+            self.assertTrue(widget.captureInProgress, "A UC1 failure ended UC2's run")
+            image = self._finishUc2(session, seed=2)
+            self.assertFalse(widget.captureInProgress)
+            np.testing.assert_array_equal(
+                np.array(slicer.util.arrayFromVolume(widget.logic.vascularMapNode()))[0], image)
+
+    def test_cancellingTheCaptureKillsUc2AndReleasesItsLock(self) -> None:
+        with self._captureSession(uc2=True) as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            process = self._uc2Process(session)
+            self.assertTrue(session["uc2Lock"].is_file())
+            widget._cancelCapture()
+            self.assertTrue(process.killed)
+            self.assertFalse(session["uc2Lock"].exists(), "The UC2 lock outlived the cancel")
+            self.assertIsNone(widget.logic.currentUc2Run)
+            self.assertFalse(widget.captureInProgress)
+            self.assertFalse(widget.liveViewFrozen)
+            self.assertNotIn("Computing", widget.ui.vascularStatusLabel.text)
+
+    def test_vascularMapReachesItsPanelAndNowhereElse(self) -> None:
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            self.skipTest("Requires the maintained headful Slicer test target")
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        previousLayout = int(layoutNode.GetViewArrangement())
+        with self._captureSession(uc2=True) as session:
+            widget = session["widget"]
+            try:
+                self.assertTrue(widget._activatePresentation())
+                vascularWidget = layoutManager.sliceWidget(widget.VASCULAR_VIEW_NAME)
+                composite = vascularWidget.sliceLogic().GetSliceCompositeNode()
+                self.assertIsNone(composite.GetBackgroundVolumeID())
+
+                self._startFakeCamera(session)
+                self._showFrame(session, 30)
+                widget._onCaptureClicked()
+                self._finishUc2(session, seed=7)
+                self._finishCapture(session, seed=8)
+
+                node = widget.logic.vascularMapNode()
+                self.assertEqual(composite.GetBackgroundVolumeID(), node.GetID())
+                self.assertIsNone(composite.GetForegroundVolumeID())
+                self.assertIsNone(composite.GetLabelVolumeID())
+                self.assertEqual(widget.panelMessage(widget.VASCULAR_VIEW_NAME), "",
+                                 "The waiting text stayed over the map")
+                self.assertEqual(widget.panelCaption(widget.VASCULAR_VIEW_NAME),
+                                 widget.VASCULAR_CAPTION.format(case=self.CALIBRATED_CUBE_NAME))
+                for viewName in widget.VIEW_NAMES:
+                    if viewName == widget.VASCULAR_VIEW_NAME:
+                        continue
+                    otherComposite = (
+                        layoutManager.sliceWidget(viewName).sliceLogic().GetSliceCompositeNode()
+                    )
+                    self.assertNotIn(node.GetID(), (otherComposite.GetBackgroundVolumeID(),
+                                                    otherComposite.GetForegroundVolumeID()),
+                                     f"The map reached {viewName}")
+
+                # A new capture takes the map down until its own arrives.
+                self._showFrame(session, 31)
+                widget._onCaptureClicked()
+                self.assertIsNone(composite.GetBackgroundVolumeID())
+                self.assertIn("waiting", widget.panelMessage(widget.VASCULAR_VIEW_NAME).lower())
+            finally:
+                widget._forgetVascularMap()
+                widget._deactivatePresentation(restore=True)
+                if int(layoutNode.GetViewArrangement()) != previousLayout:
+                    layoutManager.setLayout(previousLayout)

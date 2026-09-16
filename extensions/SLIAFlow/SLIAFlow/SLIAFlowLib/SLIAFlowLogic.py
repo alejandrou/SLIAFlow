@@ -34,17 +34,21 @@ from .SLIAFlowParameterNode import (
     RECORDED_CASE_ATTRIBUTE,
     SIMULATED_ORIGIN,
     SIMULATION_DETAIL_ATTRIBUTE,
+    UC2_PARAMETERS_ATTRIBUTE,
     WAVELENGTHS_ATTRIBUTE,
     SLIAFlowParameterNode,
     calibratedCubeDetail,
     uc1ResultDetail,
+    uc2ResultDetail,
 )
 from .SLIAFlowUc1Input import Uc1Input, describeUc1Input
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES, Uc1Build, Uc1Run, findRepositoryRoot
+from .SLIAFlowUc2Run import OUTPUT_FILE_SUFFIX, Uc2Build, Uc2Run, uc2ParametersText
 
 
 class SLIAFlowLogic(ScriptedLoadableModuleLogic):
-    """Own the camera, the capture snapshot, the UC1 run, its output nodes and the connections."""
+    """Own the camera, the capture snapshot, the UC1 and UC2 runs, their output nodes and the
+    connections."""
 
     OPENCV_REQUIREMENT = "opencv-python-headless==5.0.0.93"
     CAMERA_WIDTH_PX = 640
@@ -74,6 +78,9 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     OUTPUT_COMPONENTS = 3
 
     CUBE_OWNER = "RecordedCube"
+
+    # SLIA-021: the one map UC2 writes per capture, named as its file.
+    VASCULAR_OWNER = "Uc2Output"
 
     # The colour preview: the bands nearest these wavelengths as R, G and B,
     # on one fixed scale where this reflectance is full brightness. A display
@@ -127,6 +134,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         self.connections = SLIAFlowConnections()
         self._calibratedCubeHeaderOverride = None
         self.currentRun: Uc1Run | None = None
+        self.currentUc2Run: Uc2Run | None = None
 
     @staticmethod
     def openCVAvailable(importer=importlib.import_module) -> bool:
@@ -412,6 +420,10 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     def uc1Build(self) -> Uc1Build:
         return Uc1Build.forRepository(self.repositoryRoot)
 
+    @property
+    def uc2Build(self) -> Uc2Build:
+        return Uc2Build.forRepository(self.repositoryRoot)
+
     @staticmethod
     def newCaptureId() -> str:
         """One opaque ID per capture, in the form contract.newCaptureId makes."""
@@ -491,11 +503,36 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             raise
         return run
 
+    def startUc2Run(self, cube, onFinished) -> Uc2Run:
+        """Start UC2 on the configured cube (a CalibratedCube). Raises Uc2RunError if refused.
+
+        Independent of the UC1 run: its own build, lock and process.
+        `onFinished` receives the Uc2RunResult after `currentUc2Run` is cleared.
+        """
+        if self.currentUc2Run is not None:
+            raise RuntimeError(_("A UC2 run is already in progress."))
+
+        def finished(result) -> None:
+            self.currentUc2Run = None
+            onFinished(result)
+
+        run = Uc2Run(self.uc2Build, cube, finished, processFactory=self._processFactory)
+        self.currentUc2Run = run
+        try:
+            run.start()
+        except Exception:
+            self.currentUc2Run = None
+            raise
+        return run
+
     def cancelRun(self) -> None:
-        """Kill and wait for an owned UC1 process, and release the build lock."""
+        """Kill and wait for the owned UC1 and UC2 processes, and release their build locks."""
         run, self.currentRun = self.currentRun, None
         if run is not None:
             run.cancel()
+        uc2Run, self.currentUc2Run = self.currentUc2Run, None
+        if uc2Run is not None:
+            uc2Run.cancel()
 
     # ------------------------------------------------------------------
     # Output nodes
@@ -900,6 +937,69 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     @classmethod
     def removeGroundTruthNode(cls) -> None:
         node = cls.groundTruthNode()
+        if node is not None:
+            cls._removeVolumeNode(node)
+
+    # ------------------------------------------------------------------
+    # The UC2 blood-vessel map (SLIA-021)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def vascularMapNode(cls):
+        """The module-owned volume holding the displayed UC2 map, or None."""
+        for node in slicer.util.getNodesByClass("vtkMRMLVectorVolumeNode"):
+            if node.GetAttribute(OWNER_ATTRIBUTE) == cls.VASCULAR_OWNER:
+                return node
+        return None
+
+    @classmethod
+    def acceptVascularMap(cls, cube, captureId: str, image):
+        """Put one validated UC2 map into the module-owned volume, pixels as UC2 wrote them.
+
+        `cube` is the CalibratedCube UC2 ran on. The map is a display
+        enhancement, normalised per channel within this one image, so it is
+        never compared with another capture's. Its node names the component,
+        the cube and the fixed parameters, and that the acquisition is
+        simulated (ADR-0004 decision 7). The previous map is replaced only
+        once the new node is complete.
+        """
+        if not captureId:
+            raise ValueError(_("A blood-vessel map needs a capture ID."))
+        image = np.asarray(image)
+        expectedShape = (cube.lines, cube.samples, cls.OUTPUT_COMPONENTS)
+        if image.dtype != np.uint8 or image.shape != expectedShape:
+            raise ValueError(_("The blood-vessel map is {shape} {dtype}, not {expected} uint8.").format(
+                shape=image.shape, dtype=image.dtype, expected=expectedShape))
+        fileName = f"{cube.name}{OUTPUT_FILE_SUFFIX}"
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode")
+        try:
+            node.SetSaveWithScene(False)
+            slicer.util.updateVolumeFromArray(node, np.ascontiguousarray(image[np.newaxis, ...]))
+            cls._applyLiveVolumeGeometry(node)
+            node.SetAttribute(OUTPUT_FILE_ATTRIBUTE, fileName)
+            node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, SIMULATED_ORIGIN)
+            node.SetAttribute(RECORDED_CASE_ATTRIBUTE, cube.name)
+            node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, uc2ResultDetail(cube.name))
+            node.SetAttribute(UC2_PARAMETERS_ATTRIBUTE, uc2ParametersText())
+            node.SetAttribute(CAPTURE_ID_ATTRIBUTE, captureId)
+            if node.GetDisplayNode() is None:
+                node.CreateDefaultDisplayNodes()
+            displayNode = node.GetDisplayNode()
+            if displayNode is not None:
+                displayNode.SetSaveWithScene(False)
+        except Exception:
+            cls._removeVolumeNode(node)
+            raise
+
+        cls.removeVascularMapNode()
+        # The previous node is gone, so the plain name is free again.
+        node.SetName(fileName)
+        node.SetAttribute(OWNER_ATTRIBUTE, cls.VASCULAR_OWNER)
+        return node
+
+    @classmethod
+    def removeVascularMapNode(cls) -> None:
+        node = cls.vascularMapNode()
         if node is not None:
             cls._removeVolumeNode(node)
 
