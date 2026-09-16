@@ -84,3 +84,64 @@ class ClassifierProtocolTest(unittest.TestCase):
                 return contract.Uc1Maps()
 
         self.assertNotIsInstance(CubeOnlyClassifier(), contract.Classifier)
+
+
+class Uc1RgbMetadataTest(unittest.TestCase):
+
+    def test_uc1RgbMetadataCarriesNoResultRole(self):
+        # A result role would make the background discoverable as a result.
+        # The expected keys are the wire names in
+        # docs/architecture/SLIAFLOW_UC1_IMAGE_CONTRACT.md, restated here.
+        metadata = contract.uc1RgbMetadata(
+            contract.DATA_ORIGIN_SIMULATED, simulationDetail="real UC1 pipeline",
+            captureId="3f2a",
+        )
+
+        self.assertEqual(
+            metadata,
+            {
+                "SLIAFlow.DeviceName": "UC1_RGB",
+                "SLIAFlow.DataOrigin": "simulated",
+                "SLIAFlow.SimulationDetail": "real UC1 pipeline",
+                "SLIAFlow.CaptureId": "3f2a",
+            },
+        )
+        self.assertNotIn(contract.METADATA_RESULT_MAP_KEY, metadata)
+        with self.assertRaises(ValueError):
+            contract.uc1RgbMetadata("camera", captureId="3f2a")
+
+    def test_captureIdIsRequiredOnMapAndBackground(self):
+        # ADR-0002: every map carries a capture ID, background or not. The
+        # connector never removes an attribute a later message omits, so a map
+        # sent without one would keep the previous run's and match that run's
+        # retained background.
+        rgbMetadata = contract.uc1RgbMetadata(
+            contract.DATA_ORIGIN_SIMULATED, "real UC1 pipeline", captureId="3f2a"
+        )
+        mapMetadata = contract.resultMapMetadata(
+            "majorityVotingMap", contract.DATA_ORIGIN_SIMULATED, "real UC1 pipeline",
+            captureId="3f2a",
+        )
+        self.assertEqual(rgbMetadata["SLIAFlow.CaptureId"], "3f2a")
+        self.assertEqual(mapMetadata["SLIAFlow.CaptureId"], "3f2a")
+
+        builders = {
+            "UC1_RGB": lambda **keywords: contract.uc1RgbMetadata(
+                contract.DATA_ORIGIN_SIMULATED, **keywords
+            ),
+            "map": lambda **keywords: contract.resultMapMetadata(
+                "majorityVotingMap", contract.DATA_ORIGIN_SIMULATED, **keywords
+            ),
+        }
+        for name, build in builders.items():
+            with self.subTest(name, captureId="absent"), self.assertRaises(TypeError):
+                build()
+            for captureId in ("", "   ", None):
+                with self.subTest(name, captureId=captureId), self.assertRaises(ValueError):
+                    build(captureId=captureId)
+
+    def test_newCaptureIdIsNonEmptyAndNeverRepeats(self):
+        captureIds = [contract.newCaptureId() for _ in range(100)]
+
+        self.assertTrue(all(captureId.strip() for captureId in captureIds))
+        self.assertEqual(len(set(captureIds)), len(captureIds))

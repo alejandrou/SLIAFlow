@@ -37,6 +37,7 @@ from .SLIAFlowParameterNode import (
     RESULT_MAP_SVM_PROB,
     RESULT_MAP_TMD,
     RESULT_SOURCE_ATTRIBUTES,
+    RESULT_SOURCE_CAPTURE_ATTRIBUTE,
     RESULT_SOURCE_DETAIL_ATTRIBUTE,
     RESULT_SOURCE_DEVICE_ATTRIBUTE,
     RESULT_SOURCE_GENUINE_ORIGIN,
@@ -44,6 +45,7 @@ from .SLIAFlowParameterNode import (
     RESULT_SOURCE_ROLE_ATTRIBUTE,
     RESULT_SOURCE_SIMULATED_ORIGIN,
     UC1_PORT,
+    UC1_RGB_DEVICE_NAME,
     UC2_DEVICE_NAME,
     UC2_PORT,
     UC2_ROLE,
@@ -92,6 +94,17 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         CONNECTOR_HS_CUBE: (IGTL_HOST, HS_CUBE_PORT),
         CONNECTOR_CONTROL: (IGTL_HOST, CONTROL_PORT),
     }
+    RESULT_BACKGROUND_OWNER = "ResultBackground"
+    RESULT_BACKGROUND_VOLUME_NAME = "SLIAFlow UC1 Background"
+    RESULT_BACKGROUND_COMPONENTS = 3
+    # What became of the background for the map on screen. Only the first puts
+    # anything under the map; every other outcome shows the map alone.
+    BACKGROUND_COMPOSITED = "composited"
+    BACKGROUND_ABSENT = "absent"
+    BACKGROUND_INVALID = "invalid"
+    BACKGROUND_CAPTURE_MISMATCH = "captureMismatch"
+    BACKGROUND_PROVENANCE_MISMATCH = "provenanceMismatch"
+    BACKGROUND_SIZE_MISMATCH = "sizeMismatch"
     UC2_RESULT_OWNER = "Uc2Presentation"
     UC2_RESULT_VOLUME_NAME = "SLIAFlow UC2 Result"
     SIMULATED_UC2_RESULT_VOLUME_NAME = "SLIAFlow UC2 Result (SIMULATED)"
@@ -1168,6 +1181,228 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
                 descriptor=descriptor,
             )
         return self.presentResult(resultMap, sourceNode, resultClass, parameterNode)
+
+    # ------------------------------------------------------------------
+    # UC1 background: the colour image of the classified cube (SLIA-024)
+    #
+    # ADR-0001 permits an overlay only on a background from the same producer,
+    # the same cube and the same connection as the map. ADR-0002 makes "same
+    # capture" checkable in the scene, where a node retained from an earlier run
+    # looks like any other: both images carry one capture ID. The geometric
+    # check is a size comparison and nothing more: SLIAFlow never registers,
+    # resamples or aligns, and a background that does not fit is refused, not
+    # repaired.
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def isResultBackgroundCandidate(cls, volumeNode) -> bool:
+        """Whether a node may be considered as a background at all.
+
+        Matched by exact device name and nothing else, never by being an RGB
+        volume. The laptop camera volume is owned by this module and a LiveView
+        stream declares its own device, so neither can qualify under any name.
+        """
+        if volumeNode is None or not volumeNode.IsA("vtkMRMLVolumeNode"):
+            return False
+        if volumeNode.GetAttribute("SLIAFlow.Owner") is not None:
+            return False
+        if volumeNode.GetAttribute(RESULT_SOURCE_ROLE_ATTRIBUTE) is not None:
+            return False
+        deviceName = volumeNode.GetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE)
+        if deviceName is not None:
+            return deviceName == UC1_RGB_DEVICE_NAME
+        return volumeNode.GetName() == UC1_RGB_DEVICE_NAME
+
+    @classmethod
+    def findResultBackgroundSources(cls) -> list:
+        """Every node that may be considered as a background, in scene order."""
+        sources = []
+        for volumeNode in slicer.util.getNodesByClass("vtkMRMLVolumeNode"):
+            if volumeNode.GetAttribute("SLIAFlow.Owner") is not None:
+                continue
+            cls.normalizeReceivedProvenance(volumeNode)
+            if cls.isResultBackgroundCandidate(volumeNode):
+                sources.append(volumeNode)
+        return sources
+
+    @classmethod
+    def findResultBackgroundSource(cls, captureId):
+        """The background from the map's own capture, or None.
+
+        Chosen by capture ID, never by position: a node retained from another
+        run can be found first and be valid in every other respect. No capture
+        ID matches nothing.
+        """
+        if not captureId:
+            return None
+        for volumeNode in cls.findResultBackgroundSources():
+            if volumeNode.GetAttribute(RESULT_SOURCE_CAPTURE_ATTRIBUTE) == captureId:
+                return volumeNode
+        return None
+
+    @classmethod
+    def clearResultBackgroundReferences(cls, parameterNode) -> None:
+        parameterNode.parameterNode.SetNodeReferenceID("resultBackgroundSourceVolume", None)
+        parameterNode.parameterNode.SetNodeReferenceID("resultBackgroundVolume", None)
+
+    @classmethod
+    def getOrCreateResultBackgroundVolume(cls, parameterNode):
+        try:
+            backgroundNode = parameterNode.resultBackgroundVolume
+        except (KeyError, TypeError):
+            backgroundNode = None
+        if (
+            backgroundNode is None
+            or backgroundNode.GetAttribute("SLIAFlow.Owner") != cls.RESULT_BACKGROUND_OWNER
+        ):
+            backgroundNode = cls._ownedNode(
+                "vtkMRMLVectorVolumeNode",
+                cls.RESULT_BACKGROUND_OWNER,
+                cls.RESULT_BACKGROUND_VOLUME_NAME,
+            )
+            backgroundNode.SetAttribute("SLIAFlow.Owner", cls.RESULT_BACKGROUND_OWNER)
+            backgroundNode.SetSaveWithScene(False)
+            parameterNode.resultBackgroundVolume = backgroundNode
+        return backgroundNode
+
+    @staticmethod
+    def _imageDimensions(volumeNode):
+        imageData = None if volumeNode is None else volumeNode.GetImageData()
+        if imageData is None or imageData.GetPointData().GetScalars() is None:
+            return None
+        return tuple(int(value) for value in imageData.GetDimensions())
+
+    @classmethod
+    def _backgroundReport(cls, outcome: str, message: str, sourceNode=None, **details):
+        report = {
+            "backgroundStatus": outcome,
+            "summaryMessage": message,
+            "sourceNodeID": None if sourceNode is None else sourceNode.GetID(),
+        }
+        report.update(details)
+        return report
+
+    def presentResultBackground(self, parameterNode=None) -> dict[str, Any]:
+        """Put the map's own cube image under it, or say why the map stands alone.
+
+        Called after the map has been presented. It never decides whether the
+        map is shown: every outcome other than `composited` leaves the map
+        exactly as it would be without a background.
+        """
+        if parameterNode is None:
+            parameterNode = self.getParameterNode()
+        resultSource = parameterNode.resultSourceVolume
+        resultNode = parameterNode.resultVolume
+        if (
+            resultSource is None
+            or resultNode is None
+            or resultNode.GetAttribute(RESULT_SOURCE_ROLE_ATTRIBUTE) != RESULT_MAP_MV_CLASS
+        ):
+            # UC1_RGB accompanies the class map, the one map the genuine
+            # producer sends. It is never put under a map it did not arrive with.
+            self.clearResultBackgroundReferences(parameterNode)
+            return self._backgroundReport(
+                self.BACKGROUND_ABSENT,
+                "No cube-derived background applies to this map.",
+            )
+
+        if not self.findResultBackgroundSources():
+            self.clearResultBackgroundReferences(parameterNode)
+            return self._backgroundReport(
+                self.BACKGROUND_ABSENT,
+                f"No {UC1_RGB_DEVICE_NAME} background has arrived; the map is shown alone.",
+            )
+
+        captureId = resultSource.GetAttribute(RESULT_SOURCE_CAPTURE_ATTRIBUTE)
+        if not captureId:
+            self.clearResultBackgroundReferences(parameterNode)
+            return self._backgroundReport(
+                self.BACKGROUND_CAPTURE_MISMATCH,
+                f"The map carries no capture ID, so no {UC1_RGB_DEVICE_NAME} can be shown to "
+                "be from its capture; the map is shown alone.",
+            )
+        sourceNode = self.findResultBackgroundSource(captureId)
+        if sourceNode is None:
+            self.clearResultBackgroundReferences(parameterNode)
+            return self._backgroundReport(
+                self.BACKGROUND_CAPTURE_MISMATCH,
+                f"No {UC1_RGB_DEVICE_NAME} from the map's capture has arrived. A background "
+                "from another capture is never used; the map is shown alone.",
+            )
+
+        dimensions = self._imageDimensions(sourceNode)
+        if (
+            dimensions is None
+            or not sourceNode.IsA("vtkMRMLVectorVolumeNode")
+            or int(sourceNode.GetImageData().GetNumberOfScalarComponents())
+            != self.RESULT_BACKGROUND_COMPONENTS
+            or int(sourceNode.GetImageData().GetScalarType()) != vtk.VTK_UNSIGNED_CHAR
+        ):
+            self.clearResultBackgroundReferences(parameterNode)
+            return self._backgroundReport(
+                self.BACKGROUND_INVALID,
+                f"{UC1_RGB_DEVICE_NAME} is not a three-component uint8 image; "
+                "the map is shown alone.",
+                sourceNode,
+            )
+
+        # Compared on the raw attributes, not the display-truncated detail: two
+        # details that differ only past the truncation are still two captures.
+        for attribute in (RESULT_SOURCE_ORIGIN_ATTRIBUTE, RESULT_SOURCE_DETAIL_ATTRIBUTE):
+            if sourceNode.GetAttribute(attribute) != resultSource.GetAttribute(attribute):
+                self.clearResultBackgroundReferences(parameterNode)
+                return self._backgroundReport(
+                    self.BACKGROUND_PROVENANCE_MISMATCH,
+                    f"{UC1_RGB_DEVICE_NAME} does not carry the map's provenance, so it may "
+                    "not be from the same capture; the map is shown alone.",
+                    sourceNode,
+                )
+
+        resultDimensions = self._imageDimensions(resultSource)
+        if dimensions != resultDimensions:
+            self.clearResultBackgroundReferences(parameterNode)
+            return self._backgroundReport(
+                self.BACKGROUND_SIZE_MISMATCH,
+                f"{UC1_RGB_DEVICE_NAME} is {dimensions[0]} x {dimensions[1]} but the map is "
+                f"{resultDimensions[0]} x {resultDimensions[1]}; they are not composited "
+                "and the map is shown alone.",
+                sourceNode,
+                dimensions=dimensions,
+                resultDimensions=resultDimensions,
+            )
+
+        try:
+            values = np.array(slicer.util.arrayFromVolume(sourceNode), copy=True)
+            backgroundNode = self.getOrCreateResultBackgroundVolume(parameterNode)
+            slicer.util.updateVolumeFromArray(backgroundNode, values)
+            backgroundNode.CopyOrientation(sourceNode)
+            backgroundNode.SetAttribute(RESULT_SOURCE_DEVICE_ATTRIBUTE, UC1_RGB_DEVICE_NAME)
+            backgroundNode.SetAttribute(
+                RESULT_SOURCE_ORIGIN_ATTRIBUTE,
+                sourceNode.GetAttribute(RESULT_SOURCE_ORIGIN_ATTRIBUTE),
+            )
+            if backgroundNode.GetDisplayNode() is None:
+                backgroundNode.CreateDefaultDisplayNodes()
+            displayNode = backgroundNode.GetDisplayNode()
+            if displayNode is not None:
+                displayNode.SetSaveWithScene(False)
+        except Exception as exc:
+            self.clearResultBackgroundReferences(parameterNode)
+            return self._backgroundReport(
+                self.BACKGROUND_INVALID,
+                f"{UC1_RGB_DEVICE_NAME} could not be prepared: {exc}; the map is shown alone.",
+                sourceNode,
+            )
+
+        parameterNode.resultBackgroundSourceVolume = sourceNode
+        parameterNode.resultBackgroundVolume = backgroundNode
+        return self._backgroundReport(
+            self.BACKGROUND_COMPOSITED,
+            f"The map is composited over {UC1_RGB_DEVICE_NAME}, three bands of its own cube.",
+            sourceNode,
+            backgroundNodeID=backgroundNode.GetID(),
+            dimensions=dimensions,
+        )
 
     # ------------------------------------------------------------------
     # UC2 blood-vessel map (SLIA-022)

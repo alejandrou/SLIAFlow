@@ -16,6 +16,7 @@ import socket
 import tempfile
 import unittest
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -374,6 +375,10 @@ class WireMetadataTest(Uc1RunnerTestCase):
         image, deviceName, metadata = messages[0]
         self.assertEqual(deviceName, "UC1_MV_CLASS")
         self.assertTrue(numpy.array_equal(image, maps.majorityVotingMap))
+        # ADR-0002 made a capture ID part of complete provenance. Its value is
+        # random, so it is checked for presence and the rest compared exactly.
+        metadata = dict(metadata)
+        self.assertTrue(metadata.pop(contract.METADATA_CAPTURE_ID_KEY, "").strip())
         self.assertEqual(
             metadata,
             {
@@ -601,7 +606,7 @@ class SceneProvenanceTest(Uc1RunnerTestCase):
                         mock.patch.object(
                             uc1_runner,
                             "sendMaps",
-                            side_effect=lambda _server, _maps, detail, observed=observedDetails: (
+                            side_effect=lambda _server, _maps, detail, *_background, observed=observedDetails: (
                                 observed.append(detail) or True
                             ),
                         ),
@@ -615,6 +620,266 @@ class SceneProvenanceTest(Uc1RunnerTestCase):
 
                 self.assertEqual(completed, 1)
                 self.assertEqual(observedDetails, [expectedDetail])
+
+
+# The recorded database grid: 440 to 900 nm in 5 nm steps, 93 bands. Read from
+# every `raw.hdr` under `input/bin/bin/` on 2026-09-11; restated here as the
+# independent authority for the band indices the runner must resolve.
+RECORDED_GRID_NM = numpy.arange(440.0, 901.0, 5.0)
+RECORDED_RGB_INDICES = (54, 20, 8)
+
+
+class RgbBackgroundTest(Uc1RunnerTestCase):
+    """`UC1_RGB`: three bands of the classified cube, sent beside the map."""
+
+    def writeGridDataset(
+        self, wavelengthsNm: numpy.ndarray, raw: numpy.ndarray | None = None
+    ) -> contract.DatasetRef:
+        lines, samples = FIXTURE_CLASS_MAP.shape
+        shape = (wavelengthsNm.size, lines, samples)
+        folder = Path(self._temporaryDirectory.name) / "sim-20260916-000000"
+        envi.writeDataset(
+            folder,
+            numpy.full(shape, 2500, dtype=numpy.uint16) if raw is None else raw,
+            numpy.full(shape, 5000, dtype=numpy.uint16),
+            numpy.full(shape, 1000, dtype=numpy.uint16),
+            wavelengthsNm,
+        )
+        return contract.loadDataset(folder)
+
+    def test_resolvesRgbBandsByWavelength(self) -> None:
+        dataset = self.writeGridDataset(RECORDED_GRID_NM)
+
+        bands = uc1_runner.resolveRgbBands(dataset)
+
+        self.assertEqual(tuple(band.index for band in bands), RECORDED_RGB_INDICES)
+        self.assertEqual(tuple(band.targetNm for band in bands), (710.0, 540.0, 480.0))
+        for band in bands:
+            self.assertEqual(band.missNm, 0.0)
+        report = uc1_runner.describeRgbBands(bands)
+        for text in ("710", "540", "480", "index 54", "index 20", "index 8"):
+            self.assertIn(text, report)
+
+    def test_refusesRgbWithoutWavelengths(self) -> None:
+        dataset = replace(self.writeGridDataset(RECORDED_GRID_NM), wavelengthsNm=())
+
+        with self.assertRaises(uc1_runner.Uc1RgbBandError) as raised:
+            uc1_runner.resolveRgbBands(dataset)
+        self.assertIn("wavelength", str(raised.exception).lower())
+
+    def test_refusesNonFiniteWavelengths(self) -> None:
+        # argmin picks a NaN entry and NaN > tolerance is false, so without this
+        # refusal all three channels resolve to the same invalid band.
+        dataset = self.writeGridDataset(RECORDED_GRID_NM)
+        for invalid in (numpy.nan, numpy.inf):
+            with self.subTest(invalid=invalid):
+                wavelengths = RECORDED_GRID_NM.copy()
+                wavelengths[0] = invalid
+
+                with self.assertRaises(uc1_runner.Uc1RgbBandError) as raised:
+                    uc1_runner.resolveRgbBands(
+                        replace(dataset, wavelengthsNm=tuple(wavelengths))
+                    )
+                self.assertIn("finite", str(raised.exception).lower())
+
+    def test_refusesWhenNearestRgbBandExceedsTolerance(self) -> None:
+        # On any 5 nm grid the nearest band is never more than 2.5 nm away, so the
+        # refusal needs a coarser grid. 443 nm in 10 nm steps puts 710 nm between
+        # 703 and 713, 3 nm from the nearer, beyond the 2.5 nm tolerance.
+        dataset = self.writeGridDataset(443.0 + 10.0 * numpy.arange(RECORDED_GRID_NM.size))
+
+        with self.assertRaises(uc1_runner.Uc1RgbBandError) as raised:
+            uc1_runner.resolveRgbBands(dataset)
+        message = str(raised.exception)
+        self.assertIn("710", message)
+        self.assertIn("2.5", message)
+
+    def test_rgbUsesFixedReflectanceScaling(self) -> None:
+        # dark 1000, white 5000: raw 2000 is reflectance 0.25, 5800 is 1.2 and
+        # 600 is -0.1. Fixed scaling maps them to round(0.25 * 255) = 64, 255
+        # (clipped) and 0 (clipped), whatever the rest of the image holds. The
+        # one dark pixel in the red band proves no per-image stretch: under a
+        # min-max stretch the 64s would become 255.
+        lines, samples = FIXTURE_CLASS_MAP.shape
+        raw = numpy.full((RECORDED_GRID_NM.size, lines, samples), 3000, dtype=numpy.uint16)
+        red, green, blue = RECORDED_RGB_INDICES
+        raw[red] = 2000
+        raw[green] = 5800
+        raw[blue] = 600
+        raw[red, 0, 0] = 1000
+        dataset = self.writeGridDataset(RECORDED_GRID_NM, raw)
+
+        rgb = uc1_runner.loadRgbBackground(dataset, uc1_runner.resolveRgbBands(dataset))
+
+        self.assertEqual(rgb.dtype, numpy.uint8)
+        self.assertEqual(rgb.shape, (1, lines, samples, 3))
+        expectedRed = numpy.full((lines, samples), 64, dtype=numpy.uint8)
+        expectedRed[0, 0] = 0
+        numpy.testing.assert_array_equal(rgb[0, ..., 0], expectedRed)
+        numpy.testing.assert_array_equal(rgb[0, ..., 1], 255)
+        numpy.testing.assert_array_equal(rgb[0, ..., 2], 0)
+
+    def test_rgbAccompaniesMapWithSameProvenance(self) -> None:
+        maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
+        lines, samples = FIXTURE_CLASS_MAP.shape
+        background = numpy.zeros((1, lines, samples, 3), dtype=numpy.uint8)
+        detail = "real UC1 pipeline, recorded HSI case 004-02 (simulated acquisition)"
+
+        class RecordingServer:
+            def __init__(self):
+                self.calls = []
+
+            def sendImage(self, image, deviceName, metadata):
+                self.calls.append((image, deviceName, metadata))
+                return True
+
+        server = RecordingServer()
+        self.assertTrue(uc1_runner.sendMaps(server, maps, detail, background))
+
+        sent = {deviceName: (image, metadata) for image, deviceName, metadata in server.calls}
+        self.assertEqual(set(sent), {"UC1_MV_CLASS", "UC1_RGB"})
+        mapImage, mapMetadata = sent["UC1_MV_CLASS"]
+        rgbImage, rgbMetadata = sent["UC1_RGB"]
+        self.assertIs(rgbImage, background)
+        self.assertEqual(rgbImage.shape[:3], mapImage.shape)
+        for key in (contract.METADATA_DATA_ORIGIN_KEY, contract.METADATA_SIMULATION_DETAIL_KEY):
+            self.assertEqual(rgbMetadata[key], mapMetadata[key])
+        self.assertEqual(rgbMetadata[contract.METADATA_DEVICE_NAME_KEY], "UC1_RGB")
+        self.assertNotIn(contract.METADATA_RESULT_MAP_KEY, rgbMetadata)
+
+    def test_refusedRgbStillSendsMap(self) -> None:
+        dataset = replace(self.dataset, wavelengthsNm=())
+        maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
+
+        class Classifier:
+            def classify(self, _dataset):
+                return maps
+
+        class Context:
+            def __init__(self, value):
+                self.value = value
+
+            def __enter__(self):
+                return self.value
+
+            def __exit__(self, *_args):
+                return False
+
+        class Server:
+            isConnected = True
+
+            def __init__(self):
+                self.devices = []
+
+            def sendImage(self, _image, deviceName, _metadata):
+                self.devices.append(deviceName)
+                return True
+
+        class Interrupt:
+            requested = False
+
+        server = Server()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                uc1_runner.igtl_transport, "ImageStreamServer", return_value=Context(server)
+            ),
+            mock.patch.object(
+                uc1_runner.igtl_transport, "InterruptFlag", return_value=Context(Interrupt())
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(stderr),
+        ):
+            completed = uc1_runner.streamMaps(dataset, Classifier(), cycles=1, intervalSec=0.0)
+
+        self.assertEqual(completed, 1)
+        self.assertEqual(server.devices, ["UC1_MV_CLASS"])
+        self.assertIn("UC1_RGB", stderr.getvalue())
+        self.assertIn("wavelength", stderr.getvalue().lower())
+
+    def serveRun(self, maps: contract.Uc1Maps, background: numpy.ndarray, cycles: int):
+        """Serve one run of `cycles` cycles to a recording server; return what it sent."""
+        sent = []
+
+        class Classifier:
+            def classify(self, _dataset):
+                return maps
+
+        class Context:
+            def __init__(self, value):
+                self.value = value
+
+            def __enter__(self):
+                return self.value
+
+            def __exit__(self, *_args):
+                return False
+
+        class Server:
+            isConnected = True
+
+            def sendImage(self, _image, deviceName, metadata):
+                sent.append((deviceName, metadata))
+                return True
+
+        class Interrupt:
+            requested = False
+
+        with (
+            mock.patch.object(uc1_runner, "prepareRgbBackground", return_value=background),
+            mock.patch.object(
+                uc1_runner.igtl_transport, "ImageStreamServer", return_value=Context(Server())
+            ),
+            mock.patch.object(
+                uc1_runner.igtl_transport, "InterruptFlag", return_value=Context(Interrupt())
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            uc1_runner.streamMaps(self.dataset, Classifier(), cycles=cycles, intervalSec=0.0)
+        return sent
+
+    def test_rgbAndMapShareOneCaptureIdPerRun(self) -> None:
+        # ADR-0002: one classification is one capture, so every message of a run
+        # carries one ID, and a later run can never reuse it.
+        maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
+        lines, samples = FIXTURE_CLASS_MAP.shape
+        background = numpy.zeros((1, lines, samples, 3), dtype=numpy.uint8)
+
+        runIds = []
+        for _run in range(2):
+            sent = self.serveRun(maps, background, cycles=2)
+
+            self.assertEqual(
+                [deviceName for deviceName, _metadata in sent],
+                ["UC1_RGB", "UC1_MV_CLASS", "UC1_RGB", "UC1_MV_CLASS"],
+            )
+            captureIds = {metadata.get("SLIAFlow.CaptureId") for _device, metadata in sent}
+            self.assertEqual(len(captureIds), 1)
+            (captureId,) = captureIds
+            self.assertTrue(captureId)
+            runIds.append(captureId)
+        self.assertNotEqual(runIds[0], runIds[1])
+
+    def test_mapSentAloneStillCarriesTheRunsCaptureId(self) -> None:
+        # ADR-0002: a run that refuses the bands still sends an ID on the map.
+        # Without one, the reused map node would keep an earlier run's ID, and
+        # that run's retained UC1_RGB would match it.
+        maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
+
+        runIds = []
+        for _run in range(2):
+            sent = self.serveRun(maps, None, cycles=2)
+
+            self.assertEqual(
+                [deviceName for deviceName, _metadata in sent], ["UC1_MV_CLASS"] * 2
+            )
+            captureIds = {metadata.get("SLIAFlow.CaptureId") for _device, metadata in sent}
+            self.assertEqual(len(captureIds), 1)
+            (captureId,) = captureIds
+            self.assertTrue(captureId)
+            runIds.append(captureId)
+        self.assertNotEqual(runIds[0], runIds[1])
 
 
 def freeLocalPort() -> int:

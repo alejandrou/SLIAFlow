@@ -158,10 +158,23 @@ supersedes that decision and narrows it: an algorithm result may be composited
 over a background **derived from the same hyperspectral cube it was computed
 from**, which is registered with it by construction, and may never be composited
 over the laptop camera, which is not. SLIAFlow performs no registration or
-resampling; its only run-time safeguard is a refusal to composite images of
+resampling; its only geometric safeguard is a refusal to composite images of
 different dimensions. Under rule 3 of that ADR a result is composited only over a
 background from its own producer on its own connection, so `UC2_BV` has its own
 panel and is never drawn over `UC1_RGB`.
+
+As implemented by `SLIA-024`, the delineation panel puts `UC1_MV_CLASS` over
+`UC1_RGB` only when the background carries the map's capture ID and has exactly
+the map's dimensions, origin and simulation detail. The capture ID and the
+map-alone presentation of a size mismatch are
+`docs/architecture/decisions/ADR-0002-uc1-background-capture-identity-and-mismatch.md`,
+accepted on 2026-09-16. In every other case - no background yet, another capture,
+different size, different provenance, or not a three-component `uint8` image - the map is shown
+alone, exactly as before, and the **Background** line under the result source
+says why. The background is found by its exact device name only, so the laptop
+camera volume and a `LiveView` stream are never candidates, whatever they are
+called. The layer opacity moves the map over the image: 0 shows the image alone
+and 1 the map alone.
 
 ## OpenIGTLink contract
 

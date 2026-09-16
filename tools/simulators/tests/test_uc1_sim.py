@@ -227,6 +227,30 @@ class StreamMapsTest(unittest.TestCase):
         self.assertEqual(len(classifier.datasets), 1)
         self.assertEqual(len(server.images), 13)
 
+    def test_everyMapCarriesOneCaptureIdPerRun(self):
+        # ADR-0002: the stand-in sends no background, but its maps still carry
+        # an ID, so a later stand-in run can never inherit a genuine run's ID
+        # on the reused map node and be composited over that run's UC1_RGB.
+        runIds = []
+        for _run in range(2):
+            server = FakeServer()
+            with contextlib.redirect_stdout(io.StringIO()):
+                completed, _classifier, _sleep = self.runStream(
+                    server, FakeInterrupt(), cycles=2
+                )
+
+            self.assertEqual(completed, 2)
+            self.assertEqual(len(server.images), 2 * len(contract.UC1_MAP_FIELD_NAMES))
+            captureIds = {
+                metadata.get(contract.METADATA_CAPTURE_ID_KEY)
+                for _image, _deviceName, metadata in server.images
+            }
+            self.assertEqual(len(captureIds), 1)
+            (captureId,) = captureIds
+            self.assertTrue(captureId)
+            runIds.append(captureId)
+        self.assertNotEqual(runIds[0], runIds[1])
+
     def test_zeroCyclesStreamsUntilInterrupted(self):
         server = FakeServer()
         completed, _classifier, sleep = self.runStream(

@@ -163,7 +163,7 @@ result.
 The provenance attributes above describe MRML node attributes. This section
 defines what goes on the OpenIGTLink wire, which is not the same thing.
 
-A producer sends exactly these four string keys:
+A producer sends exactly these five string keys:
 
 | Wire key | Value |
 | --- | --- |
@@ -171,6 +171,10 @@ A producer sends exactly these four string keys:
 | `SLIAFlow.DeviceName` | the exact producer device for that map |
 | `SLIAFlow.DataOrigin` | `external-genuine` or `simulated` |
 | `SLIAFlow.SimulationDetail` | free text, display-only, optional |
+| `SLIAFlow.CaptureId` | opaque, non-empty, one per classification; required on every map |
+
+`SLIAFlow.CaptureId` is required whether or not a `UC1_RGB` is sent, under
+`ADR-0002`; see the `SLIA-024` section below.
 
 `findResultSource` matches on role, device **and** origin together. A producer
 that sends origin alone is received and then never discovered, which looks
@@ -254,7 +258,7 @@ converter produced match the result-roles table exactly:
 
 `SLIAFlowLogic.normalizeReceivedProvenance` is the single place that reconciles
 the two spellings, and it runs before every discovery call. For each of the
-four keys it accepts the prefixed spelling and the bare one, and the prefixed
+five keys it accepts the prefixed spelling and the bare one, and the prefixed
 value wins when both are present, because a bare value can only be a copy an
 earlier message left behind.
 
@@ -271,7 +275,7 @@ One gap is upstream and cannot be closed here. The connector writes the keys a
 message carries and removes none, so if a producer sends provenance once and
 then stops sending it, the prefixed attributes from the earlier message remain
 on the node and SLIAFlow has no way to tell that the latest frame did not carry
-them. Producers must therefore send all four keys with every message. The
+them. Producers must therefore send all five keys with every message. The
 stand-ins do.
 
 Accepting the bare spelling costs one line and is not currently exercised by
@@ -280,7 +284,7 @@ build that behaves differently.
 
 Discovery, validation and the SLIA-010 origin gate read only the canonical
 `SLIAFlow.*` names and have no knowledge that a network exists. The received
-node is the one node SLIAFlow does write to, and only these four attributes:
+node is the one node SLIAFlow does write to, and only these five attributes:
 its image data, its name and its orientation are never touched.
 
 A received node whose provenance is absent or unrecognized after translation is
@@ -297,7 +301,7 @@ for it:
 | Link | Endpoint | Devices |
 | --- | --- | --- |
 | Acquisition | `127.0.0.1:18944` | `LiveView` |
-| UC1 | `127.0.0.1:18945` | the five map devices above |
+| UC1 | `127.0.0.1:18945` | the five map devices above, and `UC1_RGB` |
 
 Both connector nodes carry `SLIAFlow.Owner = Connectors` and
 `SaveWithScene = false`. Only a node carrying that ownership is ever stopped
@@ -425,12 +429,13 @@ are never run in the same session.
 | `SLIAFlow.DeviceName` | `UC1_MV_CLASS` |
 | `SLIAFlow.DataOrigin` | `simulated` |
 | `SLIAFlow.SimulationDetail` | `real UC1 pipeline, synthetic input`; `real UC1 pipeline, synthetic tissue phantom` for a phantom dataset; or `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` for a recorded database case |
+| `SLIAFlow.CaptureId` | the run's capture ID, also on `UC1_RGB` when it is sent |
 
 The origin is `simulated` even though the algorithm is genuine, and that is the
 point of `SimulationDetail` carrying the distinction. A genuine algorithm run
 over an invented scene is not a genuine clinical result, so the origin describes
 the data and the detail describes how it was produced. Header version 2 applies
-here for the same reason it applies everywhere else: at version 1 all four keys
+here for the same reason it applies everywhere else: at version 1 all five keys
 are silently dropped.
 
 ### Recovering the class map
@@ -489,6 +494,76 @@ A consumer must not branch on the detail. It is display-only, it is free text,
 and a new scene will add a new string: SLIAFlow reads it to write the second
 banner line and for nothing else.
 
+## SLIA-024 cube-derived background
+
+`UC1_RGB` is the background the class map is composited over, under
+`docs/architecture/decisions/ADR-0001-overlay-result-on-cube-derived-rgb.md` and
+`docs/architecture/decisions/ADR-0002-uc1-background-capture-identity-and-mismatch.md`.
+It is not a result and has no result role.
+
+| Device | MRML class | Components | Scalar type | Shape on the wire |
+| --- | --- | ---: | --- | --- |
+| `UC1_RGB` | `vtkMRMLVectorVolumeNode` | 3 | `unsigned char` | `(1, lines, samples, 3)`, the class map's `(k, j, i)` plus components |
+
+Wire metadata: `SLIAFlow.DeviceName = UC1_RGB`, and `SLIAFlow.DataOrigin`,
+`SLIAFlow.SimulationDetail` and `SLIAFlow.CaptureId` equal to those of the
+`UC1_MV_CLASS` it accompanies.
+
+`SLIAFlow.CaptureId` is an opaque value, one per classification of one cube. It is
+never reused for another cube or another classification, and a resend of a
+result already computed reuses it. Both producers, the genuine runner and the
+arithmetic stand-in, make one random value per run and send it in every cycle, on
+every map and on `UC1_RGB` when it is sent. It identifies nothing to a person. It
+exists so that a `UC1_RGB` retained in the scene from another run - same device,
+origin, detail and size - cannot be composited under a later map.
+
+It is required on maps sent without a background, too. The OpenIGTLink connector
+reuses one node per device name and sets each incoming key on it, but never
+removes a key a later message omits. A map sent without an ID would keep the
+previous run's ID, and match that run's retained `UC1_RGB`. SLIAFlow sees only
+the node, so it cannot detect the omission. The guarantee rests on producers
+sending the ID.
+There is no `SLIAFlow.ResultMap`, so no discovery path can mistake it for a
+result. The genuine runner sends it on the UC1 connection, before the map, in
+every cycle. How it is assembled is in `tools/simulators/README.md`.
+
+### The background layer
+
+After the class map has passed validation and been presented, SLIAFlow looks for
+a background. It is used only when all of these hold:
+
+1. the map on screen is `majorityVotingMap`;
+2. a received node declares device `UC1_RGB` exactly - or, declaring no device,
+   is named `UC1_RGB` - is not owned by SLIAFlow, and has no result role;
+3. the map's source node carries a non-empty `SLIAFlow.CaptureId`, and this node
+   carries the same one. Among several candidates, only the one with the map's
+   capture ID is considered, whatever order they arrived in;
+4. it is a three-component `uint8` vector volume;
+5. its `SLIAFlow.DataOrigin` and `SLIAFlow.SimulationDetail` are identical to the
+   map's source node, compared on the full untruncated values;
+6. its image dimensions are identical to the map's.
+
+The image is then copied into the module-owned `SLIAFlow UC1 Background` node
+(`SLIAFlow.Owner = ResultBackground`, not saved with the scene), which is bound to
+the delineation panel's background slot, with the map in the foreground at the
+layer's opacity.
+
+### What is not done
+
+- **No registration, resampling, reorientation or alignment.** A background that
+  fails check 6 is refused, never fitted. Check 6 is the only geometric check.
+- **No background is ever a precondition.** When any check fails, the map is
+  bound exactly as it is without a background, and the panel's **Background**
+  line states which check failed; for a size mismatch it names both sizes. A
+  size mismatch is not shown side by side: the background is not displayed
+  anywhere (`ADR-0002`, superseding that part of `ADR-0001` rule 4, once
+  accepted).
+- **No camera image, ever.** The laptop camera volume is owned by SLIAFlow and a
+  `LiveView` stream declares its own device, so both fail check 2 under any node
+  name. Discovery never considers a volume because it is an RGB image.
+- **No background without its map.** A `UC1_RGB` that arrives while no valid map
+  is displayed is not shown; the panel keeps its waiting state and banner rules.
+
 ## Validation and ownership
 
 Before any result is assigned to the result slice view, SLIAFlow checks the
@@ -502,7 +577,7 @@ identical checks and produces the identical messages, so a malformed simulated
 map is rejected exactly as a malformed genuine one is.
 
 The external source node is never deleted, and the only change SLIAFlow makes
-to it is writing the four canonical provenance attributes translated from the
+to it is writing the five canonical provenance attributes translated from the
 wire names it arrived with. Its image data, name and orientation are left
 exactly as received. SLIAFlow owns a transient scalar display volume for scalar maps and selected SVM/KNN channels,
 plus its display node and its probability and class colour nodes. These
