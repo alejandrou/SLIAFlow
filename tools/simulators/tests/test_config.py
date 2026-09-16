@@ -24,7 +24,6 @@ DOCUMENTED_FRAME_PRESETS = {
     "medium": (320, 240),
     "full": (640, 480),
 }
-DOCUMENTED_DEFAULT_BAND_COUNT = 93
 DOCUMENTED_LIVE_VIEW_PORT = 18944
 
 
@@ -63,13 +62,11 @@ class ConfigurationTest(unittest.TestCase):
         self.assertEqual(
             (loaded.samples, loaded.lines), DOCUMENTED_FRAME_PRESETS["demo"]
         )
-        self.assertEqual(loaded.bands, DOCUMENTED_DEFAULT_BAND_COUNT)
-        self.assertEqual(loaded.frameSource, "synthetic")
         self.assertEqual(loaded.liveViewPort, DOCUMENTED_LIVE_VIEW_PORT)
         self.assertEqual(loaded.liveViewDeviceName, "LiveView")
         self.assertTrue(loaded.rotate180)
-        self.assertEqual(loaded.noiseCounts, 0)
-        self.assertEqual(loaded.datasetRoot, self.repositoryRoot / "workspace" / "simulators" / "datasets")
+        self.assertIsNone(loaded.case)
+        self.assertEqual(loaded.recordedRoot, self.repositoryRoot / "input" / "bin" / "bin")
 
     def test_localJsonSimulatorsBlockOverridesDefaults(self):
         self.writeLocalConfig({"preset": "medium", "liveViewPort": 19944, "rotate180": False})
@@ -89,41 +86,30 @@ class ConfigurationTest(unittest.TestCase):
             config.loadSimulatorConfig(self.repositoryRoot)
         self.assertIn("enormous", str(rejected.exception))
 
-    def test_anUnknownFrameSourceIsRejectedByName(self):
-        self.writeLocalConfig({"frameSource": "telepathy"})
-
-        with self.assertRaises(config.ConfigurationError) as rejected:
-            config.loadSimulatorConfig(self.repositoryRoot)
-        self.assertIn("telepathy", str(rejected.exception))
-
-    def test_settingsThatCouldNotSatisfyTheContractAreRejected(self):
-        # A rank cannot exceed the band count, so this cube could never carry
-        # the rank the dataset contract requires however it were generated.
-        self.writeLocalConfig({"bands": 1})
-        with self.assertRaises(config.ConfigurationError) as tooFewBands:
-            config.loadSimulatorConfig(self.repositoryRoot)
-        self.assertIn(str(config.MINIMUM_BAND_COUNT), str(tooFewBands.exception))
-
-        # The channel basis alone is rank 3, so a cube with no texture features
-        # is degenerate: it would be written, load cleanly, and be unusable.
-        self.writeLocalConfig({"textureFeatureCount": 0})
-        with self.assertRaises(config.ConfigurationError) as tooFewFeatures:
-            config.loadSimulatorConfig(self.repositoryRoot)
-        self.assertIn(str(config.MINIMUM_TEXTURE_FEATURE_COUNT), str(tooFewFeatures.exception))
-
-        # The lowest settings that can still clear the floor are accepted.
-        self.writeLocalConfig(
-            {
-                "bands": config.MINIMUM_BAND_COUNT,
-                "textureFeatureCount": config.MINIMUM_TEXTURE_FEATURE_COUNT,
-            }
+    def test_retiredSettingsAreUnknown(self):
+        # SLIA-025 retired the generated scenes, so the settings that shaped them
+        # are refused by name rather than silently ignored: a local.json that
+        # still asks for a phantom must not start a session that looks like one.
+        retired = (
+            "bands",
+            "frameSource",
+            "sceneMode",
+            "seed",
+            "noiseCounts",
+            "textureFeatureCount",
+            "frameCount",
+            "datasetRoot",
         )
-        loaded = config.loadSimulatorConfig(self.repositoryRoot)
-        self.assertEqual(loaded.bands, config.MINIMUM_BAND_COUNT)
+        for setting in retired:
+            with self.subTest(setting=setting):
+                self.writeLocalConfig({setting: 1})
+                with self.assertRaises(config.ConfigurationError) as rejected:
+                    config.loadSimulatorConfig(self.repositoryRoot)
+                self.assertIn(f"Unknown simulators setting(s): {setting}.", str(rejected.exception))
 
 
-class RecordedModeConfigurationTest(unittest.TestCase):
-    """A recorded session names one case and nothing it cannot honour."""
+class RecordedCaseConfigurationTest(unittest.TestCase):
+    """A session names one recorded case by folder name."""
 
     def setUp(self):
         self._temporaryDirectory = tempfile.TemporaryDirectory()
@@ -135,19 +121,15 @@ class RecordedModeConfigurationTest(unittest.TestCase):
         return config.loadSimulatorConfig(self.repositoryRoot, overrides=overrides)
 
     def loadRecorded(self, **overrides) -> config.SimulatorConfig:
-        settings = {"sceneMode": "recorded", "case": "004-02", "frameSource": "webcam"}
+        settings = {"case": "004-02"}
         settings.update(overrides)
         return self.load(**settings)
 
-    def test_recordedModeRequiresAPlainCaseName(self):
+    def test_aCaseIsAPlainFolderName(self):
         loaded = self.loadRecorded()
         self.assertEqual(loaded.case, "004-02")
         # Where `.ai/policies/medical-data-policy.md` records the cases live.
         self.assertEqual(loaded.recordedRoot, self.repositoryRoot / "input" / "bin" / "bin")
-
-        with self.assertRaises(config.ConfigurationError) as missing:
-            self.loadRecorded(case=None)
-        self.assertIn("case", str(missing.exception))
 
         # A case is a folder name under the recorded root. A path would let a
         # session read from anywhere while the root claims otherwise.
@@ -155,23 +137,6 @@ class RecordedModeConfigurationTest(unittest.TestCase):
             with self.subTest(case=badCase):
                 with self.assertRaises(config.ConfigurationError):
                     self.loadRecorded(case=badCase)
-
-    def test_recordedLiveViewComesOnlyFromTheLaptopCamera(self):
-        # The project owner's decision of 2026-09-14: a recorded session shows
-        # recorded data and the laptop camera, and nothing made up. A generated
-        # LiveView scene beside a recorded cube is refused, not quietly allowed.
-        self.assertEqual(self.loadRecorded().frameSource, "webcam")
-
-        with self.assertRaises(config.ConfigurationError) as refused:
-            self.loadRecorded(frameSource="synthetic")
-        self.assertIn("webcam", str(refused.exception))
-
-    def test_recordedSettingsOutsideRecordedModeAreRejected(self):
-        # A case named in tissue mode would be ignored, and an operator would
-        # believe the phantom was the recorded case.
-        with self.assertRaises(config.ConfigurationError) as rejected:
-            self.load(case="004-02")
-        self.assertIn("recorded", str(rejected.exception))
 
     def test_captureDelayBoundsMustBeOrdered(self):
         loaded = self.loadRecorded()
@@ -201,7 +166,7 @@ class LiveViewStreamShapeTest(unittest.TestCase):
         message = igtl_transport.buildImageMessage(
             igtl_transport.prepareFrameForWire(frameBgr, rotate180=loaded.rotate180),
             deviceName=loaded.liveViewDeviceName,
-            metadata=contract.liveViewMetadata("acquisition stand-in, synthetic scene"),
+            metadata=contract.liveViewMetadata("acquisition stand-in, laptop camera"),
         )
 
         self.assertEqual(message.device_name, "LiveView")

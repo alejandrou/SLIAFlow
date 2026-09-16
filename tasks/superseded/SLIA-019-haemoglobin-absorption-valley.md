@@ -1,7 +1,7 @@
 ---
 id: SLIA-019
 title: Close the haemoglobin absorption valley in the tissue phantom
-status: backlog
+status: superseded
 branch:
 priority: medium
 depends_on: SLIA-011
@@ -11,6 +11,11 @@ related_adrs: []
 ---
 
 # SLIA-019 - Close the haemoglobin absorption valley in the tissue phantom
+
+> **Superseded on 2026-09-16 by `SLIA-025` (Retire the synthetic phantom path).**
+> The project owner decided on 2026-09-14 that the project uses recorded data
+> only, and `SLIA-025` deleted the tissue phantom this card was built on. The card
+> is kept as history and is never eligible for activation.
 
 ## Goal
 

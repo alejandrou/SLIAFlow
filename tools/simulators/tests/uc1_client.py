@@ -3,12 +3,10 @@
 This is not an automated test: it needs a running UC1 sender on the other end
 of the connection.
 
-Two modes, because there are two senders. By default it waits for each of the
-five device names in turn, which is what SLIA-012's arithmetic stand-in sends.
-`--session-seconds` instead records everything that arrives over a window and
-reports the distinct device names at the end, which is what SLIA-013's genuine
-runner needs: that producer sends exactly one map, so the question is not
-"did the five arrive" but "did anything other than UC1_MV_CLASS".
+It records everything that arrives over a window and reports the distinct device
+names at the end. The genuine runner sends exactly one map and its background,
+so the question is not "did the five maps arrive" but "did anything other than
+UC1_RGB and UC1_MV_CLASS".
 """
 
 from __future__ import annotations
@@ -27,7 +25,7 @@ import pyigtl  # noqa: E402
 
 from stratum_sim import contract  # noqa: E402
 
-DEFAULT_RECEIVE_TIMEOUT_SEC = 10.0
+DEFAULT_SESSION_SECONDS = 6.0
 
 
 def describeMessage(mapName: str, message) -> None:
@@ -49,8 +47,7 @@ def recordSession(client, seconds: float) -> int:
     """Record every message that arrives over a window and name every device.
 
     A producer that sends one map cannot be checked by waiting for five names.
-    What matters is the opposite: that nothing else was sent. Mixing a real map
-    with stand-in maps in one session would imply UC1 produced all five.
+    What matters is the opposite: that nothing else was sent.
     """
     deadline = time.monotonic() + seconds
     deviceCounts: Counter[str] = Counter()
@@ -82,35 +79,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect UC1 map messages.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=contract.UC1_MAP_PORT)
-    parser.add_argument("--timeout", type=float, default=DEFAULT_RECEIVE_TIMEOUT_SEC)
     parser.add_argument(
         "--session-seconds",
         dest="sessionSeconds",
         type=float,
-        default=0.0,
-        help="Record everything that arrives for this many seconds instead of "
-        "waiting for the five stand-in device names.",
+        default=DEFAULT_SESSION_SECONDS,
+        help="Record everything that arrives for this many seconds.",
     )
     arguments = parser.parse_args(argv)
 
     client = pyigtl.OpenIGTLinkClient(host=arguments.host, port=arguments.port)
     print(f"Connecting to {arguments.host}:{arguments.port} ...")
     try:
-        if arguments.sessionSeconds > 0.0:
-            return recordSession(client, arguments.sessionSeconds)
-        for mapName, deviceName in contract.UC1_MAP_DEVICE_NAMES.items():
-            message = client.wait_for_message(deviceName, timeout=arguments.timeout)
-            if message is None:
-                print(
-                    f"ERROR: no {mapName} message ({deviceName}) arrived before the timeout.",
-                    file=sys.stderr,
-                )
-                return 1
-            describeMessage(mapName, message)
+        return recordSession(client, arguments.sessionSeconds)
     finally:
         client.stop()
-
-    return 0
 
 
 if __name__ == "__main__":

@@ -90,8 +90,8 @@ SLIA-010 to SLIA-013 stand in for the unavailable hyperspectral camera. The
 stand-ins are separate processes outside `extensions/`, so the rule that SLIAFlow
 never generates a result is unchanged; SLIAFlow only gains the ability to display
 externally produced simulated data under an explicit, non-persisted opt-in and a
-permanent on-view banner. SLIA-013 runs the genuine UC1 CUDA pipeline on a
-synthetic cube, so only the scene is simulated. Swapping a stand-in for the real
+permanent on-view banner. SLIA-013 runs the genuine UC1 CUDA pipeline, and
+since SLIA-023 on recorded cases, so only the acquisition is simulated. Swapping a stand-in for the real
 application is a matter of stopping one process and starting another on the same
 port.
 

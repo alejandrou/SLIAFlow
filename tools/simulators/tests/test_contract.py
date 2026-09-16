@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import importlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,28 +22,22 @@ class DatasetRefTest(unittest.TestCase):
         self.workingRoot = Path(self._temporaryDirectory.name)
         self.addCleanup(self._temporaryDirectory.cleanup)
 
-    def test_datasetRefRoundTripsFromWrittenFolder(self):
-        datasetFolder = self.workingRoot / "sim-20260902-101112"
-        rawCube, whiteCube, darkCube, wavelengthsNm = support.buildTinyCubes()
+    def test_datasetRefIsReadFromARecordedCaseFolder(self):
+        caseFolder = support.writeRecordedCaseFixture(self.workingRoot / "004-02")
 
-        writtenRef = envi.writeDataset(datasetFolder, rawCube, whiteCube, darkCube, wavelengthsNm)
-        loadedRef = contract.loadDataset(datasetFolder)
+        loadedRef = contract.loadDataset(caseFolder)
 
-        self.assertEqual(writtenRef, loadedRef)
-        self.assertTrue(loadedRef.simulated)
-        self.assertEqual(loadedRef.folder, datasetFolder.resolve())
-
-        calibrated = loadedRef.loadCalibratedCube()
+        self.assertEqual(loadedRef, envi.loadDataset(caseFolder))
+        self.assertTrue(loadedRef.recorded)
+        self.assertEqual(loadedRef.folder, caseFolder)
         self.assertEqual(
-            calibrated.shape,
+            (loadedRef.bands, loadedRef.lines, loadedRef.samples),
             (
                 support.TINY_DATASET_BANDS,
                 support.TINY_DATASET_LINES,
                 support.TINY_DATASET_SAMPLES,
             ),
         )
-        self.assertEqual(calibrated.dtype, numpy.float32)
-        self.assertTrue(bool(numpy.all(numpy.isfinite(calibrated))))
 
 
 class Uc1MapsTest(unittest.TestCase):
@@ -145,3 +142,34 @@ class Uc1RgbMetadataTest(unittest.TestCase):
 
         self.assertTrue(all(captureId.strip() for captureId in captureIds))
         self.assertEqual(len(set(captureIds)), len(captureIds))
+
+
+class RetiredGeneratorsTest(unittest.TestCase):
+    """SLIA-025: nothing in the package makes up a scene, a cube or a map."""
+
+    RETIRED_MODULES = ("stratum_sim.tissue", "stratum_sim.uc1_sim")
+    RETIRED_NAMES = {
+        "frames": ("SyntheticFrameSource", "createFrameSource"),
+        "spectra": ("reflectanceCube", "referenceCubes", "rawFromReflectance"),
+        "envi": ("writeDataset", "writeSvmModel", "DATASET_MARKER"),
+        "uc1_maps": ("deriveMaps", "ArithmeticClassifier", "validateMaps"),
+    }
+
+    def test_noGeneratorRemainsInThePackage(self):
+        for moduleName in self.RETIRED_MODULES:
+            with self.subTest(module=moduleName), self.assertRaises(ModuleNotFoundError):
+                importlib.import_module(moduleName)
+
+        for moduleName, names in self.RETIRED_NAMES.items():
+            module = importlib.import_module(f"stratum_sim.{moduleName}")
+            for name in names:
+                with self.subTest(module=moduleName, name=name):
+                    self.assertFalse(hasattr(module, name))
+
+    def test_theArithmeticStandInIsNotASimulator(self):
+        from stratum_sim import __main__ as entryPoint
+
+        self.assertNotIn("uc1", entryPoint.SIMULATOR_NAMES)
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(entryPoint.main(["uc1"]), 1)
+        self.assertIn("Unknown simulator 'uc1'", stderr.getvalue())

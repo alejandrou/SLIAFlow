@@ -69,10 +69,9 @@ catch.
 6. **One behaviour per test.** Tests must be independent and must not depend on
    execution order. `setUp` clears the MRML scene.
 7. **Use approved data for the level being tested.** Automated unit tests may use
-   small synthetic fixtures for deterministic assertions. Manual and integration
-   image checks must use the real approved input named by the task; a simulator
-   phantom image is not evidence for a recorded-input check. See
-   `.ai/policies/medical-data-policy.md`.
+   small in-memory placeholder fixtures for deterministic assertions, labelled as
+   test fixtures. Manual and integration image checks must use the real approved
+   input named by the task. See `.ai/policies/medical-data-policy.md`.
 
 ## Traceability
 
@@ -236,6 +235,6 @@ the UI, which is currently the case.
 
 ## Test data
 
-Use synthetic data, public Slicer sample data, anonymised data, mock results, or
-explicitly approved public medical data. Basic tests must never require private
+Use in-memory placeholder fixtures, public Slicer sample data, anonymised data,
+mock results, or explicitly approved public medical data. Basic tests must never require private
 patient data. `.ai/policies/medical-data-policy.md` is authoritative.

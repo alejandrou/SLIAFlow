@@ -39,13 +39,13 @@ findings changed, and three of them shorten the work.
 
 The original card's central finding was that `main.c`'s hard-coded band indices
 54, 20 and 8 named 708.97, 539.44 and 479.06 nm but landed on 752.80, 530.97 and
-452.68 nm on the synthetic 93-band grid, putting the red enhancer band 43.8 nm
+452.68 nm on the simulator's generated 93-band grid, putting the red enhancer band 43.8 nm
 into the near infrared. It concluded that bands must be selected by wavelength.
 
 All 61 recorded cases share one grid: **440 to 900 nm in 5 nm steps**. Indices
 54, 20 and 8 resolve to exactly **710, 540 and 480 nm**. The mismatch was an
-artefact of the synthetic grid, not of the algorithm, and recorded data removes
-it. Verified across all 61 headers on 2026-09-11.
+artefact of that generated grid, which `SLIA-025` retired, not of the algorithm,
+and recorded data removes it. Verified across all 61 headers on 2026-09-11.
 
 The wavelength-selection requirement is therefore dropped, and it could not have
 been implemented anyway: see the next finding.
@@ -85,8 +85,8 @@ cannot carry a colour bar. It goes on the request list.
 
 ### The saturation question is answered, and the answer is not `high_in`
 
-The original card said `high_in = 0.15` saturates most of the frame, citing
-`SLIA-019`'s phantom measurement. The four recorded BVMaps answer it without
+The original card said `high_in = 0.15` saturates most of the frame, citing a
+measurement from `SLIA-019`, which `SLIA-025` superseded. The four recorded BVMaps answer it without
 running anything. Fraction of pixels at 255, measured 2026-09-11:
 
 | Case | Blue | Green | Red |
@@ -100,8 +100,7 @@ Real data still saturates heavily, but through a different mechanism. The blue
 output channel is `|I2 * bValue - calibrated[0]|` with `bValue = 3`, and
 `clip_array` clamps it at 1.0 before normalization, so nearly every pixel above
 the clip maps to 255. It is the `bValue` multiply clipping, not the `high_in`
-stretch. `SLIA-019`'s diagnosis stands as a phantom diagnosis and does not
-transfer. This is an observation about the algorithm on real data: recorded,
+stretch. This is an observation about the algorithm on real data: recorded,
 reported, not corrected and not compensated for.
 
 ### The enhancer channel is still the blue band

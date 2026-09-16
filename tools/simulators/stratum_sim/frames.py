@@ -1,9 +1,7 @@
-"""Frame sources for the acquisition stand-in.
+"""The LiveView frame source for the acquisition stand-in: the laptop camera.
 
-`synthetic` and `webcam` are interchangeable behind one protocol, so the rest of
-the simulator never learns which one it is driving. `synthetic` is the default:
 `SLIAFlowLogic.startCamera` also opens camera index 0, and Windows fails the
-second open, so a webcam source and the SLIAFlow live pane cannot both run.
+second open, so this source and the SLIAFlow live pane cannot both run.
 """
 
 from __future__ import annotations
@@ -26,52 +24,11 @@ class FrameSource(Protocol):
         ...
 
 
-class SyntheticFrameSource:
-    """An animated scene with no camera behind it.
-
-    Three drifting blobs, one per colour channel, over a slow gradient. The
-    scene has to be non-degenerate, not realistic, so nothing here tries to look
-    like tissue.
-    """
-
-    BLOB_RADIUS_FRACTION = 0.28
-    DRIFT_PERIOD_FRAMES = 90.0
-    BACKGROUND_LEVEL = 0.12
-
-    def __init__(self, samples: int, lines: int, seed: int = 0) -> None:
-        self.samples = samples
-        self.lines = lines
-        self.frameIndex = 0
-
-        self._x = numpy.linspace(0.0, 1.0, samples, dtype=numpy.float32)[None, :]
-        self._y = numpy.linspace(0.0, 1.0, lines, dtype=numpy.float32)[:, None]
-        # Fixed per-channel phase offsets, so the three blobs never coincide and
-        # the channel planes stay distinguishable.
-        self._phases = numpy.random.default_rng(seed).uniform(0.0, 2.0 * numpy.pi, size=3)
-
-    def read(self) -> numpy.ndarray:
-        progress = 2.0 * numpy.pi * (self.frameIndex / self.DRIFT_PERIOD_FRAMES)
-        radius = self.BLOB_RADIUS_FRACTION
-
-        planes = []
-        for channelIndex in range(3):
-            phase = float(self._phases[channelIndex]) + progress
-            centreX = 0.5 + 0.3 * numpy.cos(phase)
-            centreY = 0.5 + 0.3 * numpy.sin(phase * 1.3)
-            distanceSquared = (self._x - centreX) ** 2 + (self._y - centreY) ** 2
-            blob = numpy.exp(-distanceSquared / (2.0 * radius**2))
-            planes.append(self.BACKGROUND_LEVEL + (1.0 - self.BACKGROUND_LEVEL) * blob)
-
-        frame = numpy.stack(numpy.broadcast_arrays(*planes), axis=-1)
-        self.frameIndex += 1
-        return numpy.clip(frame * 255.0, 0.0, 255.0).astype(numpy.uint8)
-
-
 class WebcamFrameSource:
     """A real camera, resized to the configured frame size.
 
-    OpenCV is imported here rather than at module scope so the synthetic path
-    never needs it.
+    OpenCV is imported here rather than at module scope so the rest of the
+    package, and its tests, never need it.
     """
 
     def __init__(self, cameraIndex: int, samples: int, lines: int) -> None:
@@ -111,12 +68,3 @@ def resizeFrame(frameBgr: numpy.ndarray, samples: int, lines: int) -> numpy.ndar
         return frameBgr[rowIndices][:, columnIndices]
 
     return cv2.resize(frameBgr, (samples, lines), interpolation=cv2.INTER_AREA)
-
-
-def createFrameSource(frameSource: str, samples: int, lines: int, seed: int, webcamIndex: int):
-    """Build the configured frame source."""
-    if frameSource == "synthetic":
-        return SyntheticFrameSource(samples, lines, seed)
-    if frameSource == "webcam":
-        return WebcamFrameSource(webcamIndex, samples, lines)
-    raise ValueError(f"Unknown frame source {frameSource!r}.")

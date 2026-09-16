@@ -57,8 +57,9 @@ disagrees with its own header.
 All 61 share one wavelength grid: **440 to 900 nm in 5 nm steps, 93 bands**. So
 UC2's hard-coded band indices 54, 20 and 8 resolve to **710, 540 and 480 nm** -
 exactly the wavelengths its own comments claim. The band mismatch that
-`SLIA-021` documented was an artefact of the synthetic 400.482-1000.73 nm grid,
-not of the algorithm, and moving to recorded data removes it. This is the single
+`SLIA-021` documented was an artefact of the generated 400.482-1000.73 nm grid
+the simulator used before `SLIA-025` retired it, not of the algorithm, and
+recorded data removes it. This is the single
 largest simplification in the plan and it was verified, not assumed.
 
 Two things the audit found that the plan as first written did not account for:
@@ -132,16 +133,10 @@ change to SLIAFlow's gate. Everything on the wire stays `simulated`, which keeps
 the banner, the demo-mode interlock and the genuine-over-simulated precedence
 exactly as they are.
 
-What cannot be kept is the *detail string*. `uc1_runner.py` currently sends one
-of:
-
-- `real UC1 pipeline, synthetic input`
-- `real UC1 pipeline, synthetic tissue phantom`
-
-Both are false over a recorded human-brain cube, and they are false in the
-direction that understates what is on screen rather than overstating it. A
-viewer told "synthetic input" over a real cortical surface has been actively
-misled. So the detail becomes, for example:
+What could not be kept was the *detail string*. The strings `uc1_runner.py` sent
+before `SLIA-023` described a generated input, which is false over a recorded
+human-brain cube, and false in the direction that understates what is on screen
+rather than overstating it. So the detail became, for example:
 
 ```
 real UC1 pipeline, recorded HSI case 004-02 (simulated acquisition)
@@ -164,10 +159,12 @@ control.
 load through `envi.loadDataset`, each identified by its `gtMap.hdr` marker, with
 no change to the contract's origins.
 
-**Plainly:** today the system refuses a cube whose header does not carry the
-`STRATUM SIMULATED CUBE` marker. That guard exists so the tooling can never
-process data it has no business processing. Recorded cases do not carry it. They
-have to be let in without the guard being switched off.
+**Plainly:** the system refused a cube whose header did not carry the marker its
+own generated datasets were written with. That guard exists so the tooling can
+never process data it has no business processing. Recorded cases did not carry
+it, so they had to be let in without the guard being switched off. Since
+`SLIA-025` the recorded-case marker is the only one: the generated datasets and
+their marker are gone.
 
 **What is not done**, as overengineering: no third `external-recorded` origin, no
 provenance ADR, no change to the image contract, no change to SLIAFlow's display
@@ -226,7 +223,7 @@ data is real - it imitates *what the machine does*.
 
 `tools/simulators/stratum_sim/acquisition_sim.py`:
 
-- `--scene-mode recorded --case 004-02`, default root `input/bin/bin`. **Writes
+- `--case 004-02`, default root `input/bin/bin`. **Writes
   nothing**: the case folder already is the dataset and is opened read-only, so
   `input/` stays untouched.
 - The laptop camera goes out on `LiveView`, port 18944, which is the path
@@ -247,10 +244,10 @@ That property was already demonstrated by hot-swapping producers in `SLIA-014`.
 
 **Two constraints the first draft did not state:**
 
-- **A `recorded` source is a new scene mode, not a flag.** `config.py` forbids
-  `sceneMode = tissue` with `frameSource = webcam`, and `channel` mode derives
-  the cube *from* the camera frame. Streaming the webcam on LiveView while the
-  cube comes from disk is a third combination that does not exist yet.
+- **A recorded source was a new mode, not a flag.** Streaming the webcam on
+  LiveView while the cube comes from disk was a combination the generated scenes
+  did not have. `SLIA-025` then retired those scenes, so recorded is the
+  stand-in's only behaviour.
 - **Only one process can hold the laptop camera.** If the stand-in opens the
   webcam for LiveView, SLIAFlow's own `SLIA-005` camera path must not also open
   it. The six-panel LiveView is fed by one of the two, never both.
@@ -353,13 +350,12 @@ is, on its own port, and the screen grows from two panes to six.
    | 008-02 | 69.7% | 0.2% | 0.5% |
    | 010-03 | 89.2% | 0.0% | 0.1% |
 
-   Real data still saturates heavily, but through a different mechanism than the
-   one `SLIA-019` diagnosed on the phantom. The blue output channel is
+   Real data still saturates heavily, through a mechanism that is not the
+   `high_in` stretch `SLIA-019` suspected (that card is superseded by `SLIA-025`). The blue output channel is
    `|I2 * bValue - calibrated[0]|` with `bValue = 3`, and `clip_array` clamps it
    at 1.0 before normalization. It is the `bValue` multiply clipping, not the
-   `high_in` stretch. So `SLIA-019`'s phantom diagnosis stands as a phantom
-   diagnosis and does not transfer, and this is a separate observation about the
-   algorithm on real data - recorded, reported, not corrected.
+   `high_in` stretch. This is an observation about the algorithm on real data -
+   recorded, reported, not corrected.
 
 **Also confirmed, and still not ours to fix:** `computeBVmapLCTF` takes its
 enhancer channel from calibrated plane 0, which after

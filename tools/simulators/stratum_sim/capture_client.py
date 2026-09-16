@@ -73,8 +73,7 @@ def sendCaptureTrigger(
             if time.monotonic() > deadline:
                 output(
                     f"ERROR: nothing accepted a connection on {host}:{port} within "
-                    f"{timeoutSec:g} s. Is the acquisition stand-in running in scene mode "
-                    "'recorded'?"
+                    f"{timeoutSec:g} s. Is the acquisition stand-in running?"
                 )
                 return EXIT_FAILED
             time.sleep(POLL_INTERVAL_SEC)

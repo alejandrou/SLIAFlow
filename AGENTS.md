@@ -186,7 +186,7 @@ Private or sensitive medical data and unvalidated clinical use are prohibited.
 
 `.ai/policies/algorithm-boundary-policy.md` is the authoritative owner of algorithm-result validation boundaries.
 
-Use synthetic, public, anonymized, or otherwise explicitly approved test data.
+Use public, anonymized, or otherwise explicitly approved data. Automated tests may also use placeholder fixtures that represent no imagery, under the conditions in the medical-data policy.
 
 Do not make clinical claims or treat prototype behavior as clinically validated.
 

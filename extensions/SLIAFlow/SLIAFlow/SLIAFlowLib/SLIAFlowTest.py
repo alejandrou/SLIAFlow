@@ -1104,8 +1104,11 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 compositeNode = resultWidget.sliceLogic().GetSliceCompositeNode()
                 self.assertIsNone(compositeNode.GetBackgroundVolumeID())
 
-    SIMULATION_DETAIL = "arithmetic stand-in, not a classifier"
-    SIMULATION_DETAIL_REAL_PIPELINE = "real UC1 pipeline, synthetic tissue phantom"
+    # A detail that names no known producer, so it keeps the fallback banner.
+    SIMULATION_DETAIL = "unnamed test producer"
+    SIMULATION_DETAIL_REAL_PIPELINE = (
+        "real UC1 pipeline, recorded HSI case 004-02 (simulated acquisition)"
+    )
 
     def test_bannerWordingFollowsTheProducer(self) -> None:
         self.assertEqual(
@@ -1116,7 +1119,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             SIMULATED_BANNER_MESSAGE_REAL_PIPELINE,
         )
         self.assertEqual(
-            simulatedBannerMessage("real UC1 pipeline, synthetic input"),
+            simulatedBannerMessage("real UC1 pipeline"),
             SIMULATED_BANNER_MESSAGE_REAL_PIPELINE,
         )
         # Anything that does not say what produced it keeps the stronger
@@ -1294,12 +1297,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         verbose = self._createSimulatedResultVolume(
             RESULT_MAP_MV_CLASS,
             self._validResultValues(RESULT_MAP_MV_CLASS),
-            detail="real UC1 pipeline\n over a synthetic cube " + "x" * 120,
+            detail="real UC1 pipeline\n over a recorded cube " + "x" * 120,
         )
         detail = logic._simulationDetail(verbose)
         self.assertNotIn("\n", detail)
         self.assertLessEqual(len(detail), logic.SIMULATION_DETAIL_MAX_CHARS)
-        self.assertTrue(detail.startswith("real UC1 pipeline over a synthetic cube"))
+        self.assertTrue(detail.startswith("real UC1 pipeline over a recorded cube"))
 
     def test_demoModeIsNotPersisted(self) -> None:
         _, widget = self._moduleRepresentationAndWidget()
@@ -1604,7 +1607,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             {
                 RESULT_SOURCE_DEVICE_ATTRIBUTE: LIVE_VIEW_DEVICE_NAME,
                 RESULT_SOURCE_ORIGIN_ATTRIBUTE: RESULT_SOURCE_SIMULATED_ORIGIN,
-                RESULT_SOURCE_DETAIL_ATTRIBUTE: "acquisition stand-in, synthetic scene",
+                RESULT_SOURCE_DETAIL_ATTRIBUTE: "acquisition stand-in, laptop camera",
             },
         )
 

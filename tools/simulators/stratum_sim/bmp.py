@@ -9,7 +9,7 @@ import numpy
 
 # This is one definition, read from gpu_single_bsq/source/functions_cuda.cu.
 # The exported forward and inverse dictionaries below are derived from it so
-# the SLIA-013 palette inverse cannot drift from the stand-in's forward table.
+# the SLIA-013 palette inverse cannot drift from this forward table.
 CLASS_PALETTE = (
     (1, (0, 255, 0)),
     (2, (255, 0, 0)),

@@ -3,16 +3,15 @@
 Nothing here computes a classification. The calibration, PCA, SVM, KNN, K-means
 and majority voting are the vendored UC1 code, compiled unmodified and executed
 on the local GPU; this module stages the run, reads back what the binary wrote,
-and sends it. Only the acquisition is simulated: the cube is either a synthetic
-scene or a recorded case of the public HSI Human Brain Database.
+and sends it. Only the acquisition is simulated: the cube is a recorded case of
+the public HSI Human Brain Database, and nothing else is accepted.
 
 The binary yields exactly one of the five contract maps. `main.cu` writes
 `output/rgb/{red,green,blue}.txt` and `output/<dataset>/imageRGB.bmp` and
 nothing else; `tmdMap`, `majorityVotingProbabilityMap`, `svmProbability` and
 `knnProbability` are computed on the device and then discarded. So this producer
-populates `majorityVotingMap` and leaves the other four `None`, and never mixes
-its output with the arithmetic stand-in's in one session. A real map beside four
-invented ones would imply UC1 produced all five.
+populates `majorityVotingMap` and leaves the other four `None`, and nothing is
+substituted for them.
 
 Two properties of the binary shape everything below.
 
@@ -44,28 +43,19 @@ from pathlib import Path
 
 import numpy
 
-from . import bmp, config, contract, envi, igtl_transport, spectra, tissue, uc1_maps
+from . import bmp, config, contract, envi, igtl_transport, spectra, uc1_maps
 
-# The palette inverse is SLIA-012's forward table read backwards. It is imported
-# rather than restated so the two directions cannot drift apart.
+# The palette inverse is the forward table in `bmp.py` read backwards. It is
+# imported rather than restated so the two directions cannot drift apart.
 RGB_TO_CLASS = bmp.RGB_TO_CLASS
 
-# The detail names the scene as well as the pipeline, because they are separate
-# claims and only one of them is about the algorithm. A phantom built to have
-# the spectral shape of tissue is a different kind of input from a scene mixed
-# from camera colour curves, and a result node that cannot say which it was
-# leaves a viewer to assume. `SIMULATION_DETAIL` remains the string for any
-# dataset that is not a phantom.
-SIMULATION_DETAIL = "real UC1 pipeline, synthetic input"
-SIMULATION_DETAIL_PHANTOM = "real UC1 pipeline, synthetic tissue phantom"
-
-# A recorded case is described through `contract.recordedCaseDetail`, as
-# `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)`. Calling
-# it synthetic input would understate what is on screen.
+# The detail names the case as well as the pipeline, because they are separate
+# claims and only one of them is about the algorithm. It is built through
+# `contract.recordedCaseDetail`, as
+# `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)`.
 SIMULATION_DETAIL_PRODUCER = "real UC1 pipeline"
 
-# The detail says what the cube is, so the banner does not repeat a claim about
-# it that is only true of some cubes.
+# The detail says what the cube is, so the banner does not repeat it.
 CYCLE_BANNER = (
     "REAL UC1 OUTPUT cycle {cycle}: genuine UC1 pipeline ({detail}). Only "
     "majorityVotingMap is produced; the other four maps are not sent."
@@ -85,13 +75,9 @@ EXECUTABLE_NAME = "stratum.opt.exe"
 # out of `w_vector.bin` with no bounds check at all: a dataset with more bands
 # reads past the end of the file into whatever `fread` leaves in the buffer, and
 # one with fewer silently classifies against a truncated model. Both produce a
-# map that looks exactly like a result.
-#
-# The acquisition stand-in documents any band count of 8 or more and writes an
-# `svm_model/` sized for whatever it generated - but into the dataset folder,
-# which is not where UC1 looks. So the mismatch is reachable from documented
-# settings, and the runner refuses it rather than trusting the operator to have
-# noticed.
+# map that looks exactly like a result. Every recorded case read so far has 93
+# bands, but the header is what the binary trusts, so the runner checks it rather
+# than trusting the operator to have noticed.
 UC1_MODEL_BAND_COUNT = 93
 
 # Byte sizes the five model files must have for that band count. float32
@@ -170,6 +156,10 @@ class Uc1RgbBandError(Uc1RunnerError):
     """The header cannot say which bands make the colour background."""
 
 
+class Uc1UnrecordedInputError(Uc1RunnerError):
+    """The folder is not an identified recorded case, so UC1 is not run on it."""
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     """What the runner needs from a finished process.
@@ -244,7 +234,7 @@ class Uc1Build:
         """Where `main.cu` writes `imageRGB.bmp` for this dataset.
 
         `parse_arguments` derives the name from the folder basename, so a
-        `sim-YYYYMMDD-HHMMSS` dataset keeps its runs self-labelling on disk.
+        recorded case keeps its runs labelled by case name on disk.
         """
         return self.outputDirectory / datasetName
 
@@ -300,11 +290,10 @@ class Uc1Build:
                 f"{self.svmModelDirectory} is sized for {UC1_MODEL_BAND_COUNT}. UC1 reads "
                 f"{envi.WEIGHT_VECTOR_FILE_NAME} using the header's band count and never checks "
                 "how much it read, so this run would classify against truncated or "
-                "uninitialised weights and still produce a map that looks like a result. "
-                f"Regenerate the dataset with bands={UC1_MODEL_BAND_COUNT}. The dataset's own "
-                f"{envi.SVM_MODEL_DIRECTORY_NAME}/ is not a substitute: UC1 opens the model as "
-                f"../../{SVM_MODEL_DIRECTORY_NAME}/*.bin relative to its working directory, not "
-                "relative to the dataset."
+                "uninitialised weights and still produce a map that looks like a result. A "
+                f"{envi.SVM_MODEL_DIRECTORY_NAME}/ inside the dataset is not a substitute: UC1 "
+                f"opens the model as ../../{SVM_MODEL_DIRECTORY_NAME}/*.bin relative to its "
+                "working directory, not relative to the dataset."
             )
 
     @contextlib.contextmanager
@@ -434,6 +423,21 @@ def _assertFresh(paths: tuple[Path, ...], runStartTime: float) -> None:
             )
 
 
+def assertRecordedCase(dataset: contract.DatasetRef) -> None:
+    """Refuse a folder that is not an identified recorded case.
+
+    There is no override: a recorded database case is the only approved input,
+    and a folder that is not one is refused before anything runs or is described.
+    """
+    if not dataset.recorded:
+        raise Uc1UnrecordedInputError(
+            f"Refusing to run UC1 on {dataset.folder}: it does not identify as a case of "
+            f"the {envi.RECORDED_DATASET_MARKER}, because its "
+            f"{envi.GROUND_TRUTH_HEADER_FILE_NAME} does not carry that marker. UC1 runs on "
+            "recorded cases only."
+        )
+
+
 class RealUc1Classifier:
     """Implement the SLIA-011 `Classifier` seam with the genuine UC1 binary.
 
@@ -447,24 +451,14 @@ class RealUc1Classifier:
     def __init__(
         self,
         build: Uc1Build | None = None,
-        requireSimulatedMarker: bool = True,
         processRunner: ProcessRunner = runSubprocess,
     ) -> None:
         self.build = build if build is not None else Uc1Build(defaultBuildRoot())
-        self.requireSimulatedMarker = requireSimulatedMarker
         self.processRunner = processRunner
 
     def classify(self, dataset: contract.DatasetRef) -> contract.Uc1Maps:
         """Run the pipeline and return the one map it actually produces."""
-        # A recorded database case is approved input and passes. The refusal a
-        # folder of neither kind meets is worded exactly as it was before
-        # recorded cases existed.
-        if self.requireSimulatedMarker and not dataset.approvedInput:
-            raise uc1_maps.SimulatedMarkerRequiredError(
-                f"Refusing to run UC1 on {dataset.folder}: raw.hdr lacks the "
-                f"{uc1_maps.enviMarkerName()} marker. Pass --force-unmarked only for an "
-                "explicitly approved synthetic test dataset."
-            )
+        assertRecordedCase(dataset)
 
         self.build.assertUsable()
         self.build.assertModelIsIntact()
@@ -510,7 +504,7 @@ class RealUc1Classifier:
                     print(f"  [{label}] {line.rstrip()}")
 
     def _assertProcessSucceeded(self, result: ProcessResult, command: list[str]) -> None:
-        """Fail loudly on every failure mode, and never fall back to a stand-in.
+        """Fail loudly on every failure mode, and never fall back to anything else.
 
         A silent fallback would be the worst outcome this runner could have: the
         operator would believe the real pipeline ran when it did not.
@@ -530,17 +524,12 @@ class RealUc1Classifier:
 
 
 def simulationDetailForDataset(dataset: contract.DatasetRef) -> str:
-    """Name the scene the pipeline was fed, read from the dataset itself.
+    """Name the recorded case the pipeline was fed, from its folder.
 
-    A recorded case is named, from its folder. A phantom dataset carries the
-    record the acquisition stand-in wrote beside it. Reading the folder rather
-    than taking a flag means the detail cannot disagree with the data: there is
-    no argument to forget to pass.
+    Reading the folder rather than taking a flag means the detail cannot
+    disagree with the data: there is no argument to forget to pass.
     """
-    if dataset.recorded:
-        return contract.recordedCaseDetail(SIMULATION_DETAIL_PRODUCER, dataset.folder.name)
-    phantomRecord = dataset.folder / tissue.REGION_LEGEND_FILE_NAME
-    return SIMULATION_DETAIL_PHANTOM if phantomRecord.is_file() else SIMULATION_DETAIL
+    return contract.recordedCaseDetail(SIMULATION_DETAIL_PRODUCER, dataset.folder.name)
 
 
 @dataclass(frozen=True)
@@ -667,7 +656,7 @@ def prepareRgbBackground(dataset: contract.DatasetRef) -> numpy.ndarray | None:
 
 def mapMessages(
     maps: contract.Uc1Maps,
-    simulationDetail: str = SIMULATION_DETAIL,
+    simulationDetail: str,
     background: numpy.ndarray | None = None,
     captureId: str | None = None,
 ) -> Iterator[tuple[numpy.ndarray, str, dict[str, str]]]:
@@ -710,7 +699,7 @@ def mapMessages(
 def sendMaps(
     server: igtl_transport.ImageStreamServer,
     maps: contract.Uc1Maps,
-    simulationDetail: str = SIMULATION_DETAIL,
+    simulationDetail: str,
     background: numpy.ndarray | None = None,
     captureId: str | None = None,
 ) -> bool:
@@ -834,8 +823,8 @@ def buildArgumentParser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m stratum_sim uc1-real",
         description=(
-            "Run the genuine UC1 CUDA pipeline on a simulated dataset or a recorded case "
-            "of the HSI Human Brain Database, and send its majority-voting class map as "
+            "Run the genuine UC1 CUDA pipeline on a recorded case of the HSI Human Brain "
+            "Database, and send its majority-voting class map as "
             "UC1_MV_CLASS. The pipeline is real; the acquisition is simulated. UC1 "
             "discards the other four contract maps, so they are never sent and never "
             "substituted."
@@ -844,10 +833,7 @@ def buildArgumentParser() -> argparse.ArgumentParser:
     parser.add_argument(
         "datasetFolder",
         type=Path,
-        help=(
-            "A dataset folder written by the acquisition stand-in, or a recorded "
-            "database case folder, which is read and never written."
-        ),
+        help="A recorded database case folder, which is read and never written.",
     )
     parser.add_argument(
         "--build-root",
@@ -869,12 +855,6 @@ def buildArgumentParser() -> argparse.ArgumentParser:
         type=_nonNegativeFloat,
         default=DEFAULT_INTERVAL_SEC,
         help="Seconds between sends.",
-    )
-    parser.add_argument(
-        "--force-unmarked",
-        dest="forceUnmarked",
-        action="store_true",
-        help="Allow an explicitly approved synthetic dataset without the marker.",
     )
     parser.add_argument(
         "--classify-only",
@@ -904,17 +884,10 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.port, allowSharedPort=arguments.allowSharedPort
             )
         dataset = contract.loadDataset(arguments.datasetFolder)
-        if arguments.forceUnmarked:
-            print(
-                "WARNING: --force-unmarked is enabled. Use only with an explicitly "
-                "approved synthetic test dataset; the input remains synthetic and "
-                "non-clinical, and so does the result."
-            )
+        # Before the origin line, which names the folder as a recorded case.
+        assertRecordedCase(dataset)
         buildRoot = arguments.buildRoot if arguments.buildRoot is not None else defaultBuildRoot()
-        classifier = RealUc1Classifier(
-            build=Uc1Build(buildRoot),
-            requireSimulatedMarker=not arguments.forceUnmarked,
-        )
+        classifier = RealUc1Classifier(build=Uc1Build(buildRoot))
 
         print(f"Dataset:    {dataset.folder}")
         print(f"Build root: {buildRoot}")
@@ -960,10 +933,10 @@ __all__ = [
     "RGB_TARGET_WAVELENGTHS_NM",
     "RGB_TO_CLASS",
     "RgbBand",
-    "SIMULATION_DETAIL",
-    "SIMULATION_DETAIL_PHANTOM",
+    "SIMULATION_DETAIL_PRODUCER",
     "ProcessResult",
     "RealUc1Classifier",
+    "assertRecordedCase",
     "Uc1Build",
     "Uc1BuildMissingError",
     "Uc1BusyError",
@@ -974,6 +947,7 @@ __all__ = [
     "Uc1RgbBandError",
     "Uc1RunnerError",
     "Uc1StaleOutputError",
+    "Uc1UnrecordedInputError",
     "buildArgumentParser",
     "defaultBuildRoot",
     "describeRgbBands",

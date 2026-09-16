@@ -1,14 +1,12 @@
 [CmdletBinding()]
 param(
-    # Which producer takes port 18945 at startup. The session swaps between the
-    # two with the `s` key, which is manual step 3.
-    [ValidateSet("genuine", "standin")]
-    [string]$MapProducer = "genuine",
-
-    # Reuse an existing dataset instead of writing a new one. The overwrite
-    # interlock still applies, so a folder that is not a simulated dataset is
-    # refused by the acquisition stand-in itself.
-    [string]$DatasetFolder,
+    # The recorded case of the public HSI Human Brain Database to run, for
+    # example -Case 004-02. Required: a session without one is refused. The
+    # acquisition stand-in streams the laptop camera on LiveView, publishes the
+    # case's cube on each capture (the c key), and writes nothing. The genuine UC1
+    # pipeline starts on the case once the first capture reports READY. Only one
+    # process can hold the camera, so leave SLIAFlow's own camera path off.
+    [string]$Case,
 
     [ValidateSet("demo", "medium", "full")]
     [string]$Preset = "demo",
@@ -27,22 +25,14 @@ param(
     # and tears down cleanly without sitting through a session.
     [int]$RunSeconds = 0,
 
-    # Stop whatever already holds 18944 or 18945 (and 18947 and 18950 with -Case)
-    # instead of refusing to start.
+    # Stop whatever already holds 18944, 18945, 18947 or 18950 instead of
+    # refusing to start.
     # Off by default: a stray producer from an earlier run is indistinguishable
     # from a healthy session in the panel, and that is what forced a whole run
     # to be discarded the first time this procedure was followed.
     [switch]$StopStrays,
 
-    # Run a recorded case of the public HSI Human Brain Database instead of
-    # writing a phantom dataset, for example -Case 004-02. The acquisition
-    # stand-in then streams the laptop camera on LiveView, publishes the case's
-    # cube on each capture (the c key), and writes nothing. The map producer
-    # starts on the case once the first capture reports READY. Only one process
-    # can hold the camera, so leave SLIAFlow's own camera path off.
-    [string]$Case,
-
-    # Where recorded cases live, for -Case. Defaults to input\bin\bin. Read,
+    # Where recorded cases live. Defaults to input\bin\bin. Read,
     # never written.
     [string]$DatasetRoot,
 
@@ -67,8 +57,7 @@ $controlPort = 18950
 # Reserved for producers that do not exist yet. Nothing in this rig binds them.
 $reservedPorts = @(18948, 18949)
 
-$recordedSession = -not [string]::IsNullOrWhiteSpace($Case)
-$sessionPorts = if ($recordedSession) { @($liveViewPort, $mapPort, $cubePort, $controlPort) } else { @($liveViewPort, $mapPort) }
+$sessionPorts = @($liveViewPort, $mapPort, $cubePort, $controlPort)
 
 $sessionStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $sessionRoot = Join-Path $repositoryRoot "workspace\simulators\sessions\session-$sessionStamp"
@@ -271,7 +260,7 @@ function Show-ProducerOutput {
             # The stand-in says when a capture is complete. The map producer is
             # started from the session loop rather than from here, because
             # starting it waits on its port and that wait tails output too.
-            if ($recordedSession -and $producer.Name -eq "acq" -and $line -match "complete: READY ") {
+            if ($producer.Name -eq "acq" -and $line -match "complete: READY ") {
                 $script:captureReadySeen = $true
             }
         }
@@ -300,15 +289,12 @@ function Show-LinkState {
     $liveClients = Get-EstablishedCount -Port $liveViewPort
     $mapClients = Get-EstablishedCount -Port $mapPort
     $mapName = if ($script:producers.ContainsKey("uc1-genuine")) { "genuine UC1 pipeline" }
-    elseif ($script:producers.ContainsKey("uc1-standin")) { "arithmetic stand-in" }
-    elseif ($recordedSession -and -not $script:mapProducerStarted) { "waiting for the first capture" }
+    elseif (-not $script:mapProducerStarted) { "waiting for the first capture" }
     else { "no producer" }
     $slicerState = if ($script:slicerProcess -and -not $script:slicerProcess.HasExited) { "running" } else { "not running" }
 
     $report = "live ${liveViewPort}: $liveClients client(s) | map ${mapPort}: $mapClients client(s), $mapName"
-    if ($recordedSession) {
-        $report += " | cube ${cubePort}: $(Get-EstablishedCount -Port $cubePort) client(s)"
-    }
+    $report += " | cube ${cubePort}: $(Get-EstablishedCount -Port $cubePort) client(s)"
     $report += " | Slicer: $slicerState"
     if (-not $Always -and $report -eq $script:lastLinkReport) { return }
 
@@ -356,56 +342,15 @@ function Wait-ForListener {
 }
 
 function Start-MapProducer {
-    param([string]$Which)
-
-    if ($Which -eq "genuine") {
-        Write-Tagged "session" "The genuine pipeline classifies the cube on the GPU before it opens the port, so this takes a moment." "DarkGray"
-        Start-Producer -Name "uc1-genuine" -Color "Magenta" -Arguments @(
-            "-m", "stratum_sim", "uc1-real", $script:datasetFolder,
-            "--build-root", $uc1BuildRoot, "--port", "$mapPort")
-        Wait-ForListener -Port $mapPort -What "The genuine UC1 pipeline" | Out-Null
-    }
-    else {
-        Start-Producer -Name "uc1-standin" -Color "DarkYellow" -Arguments @(
-            "-m", "stratum_sim", "uc1", $script:datasetFolder,
-            "--port", "$mapPort", "--cycles", "0", "--send-notice")
-        Wait-ForListener -Port $mapPort -What "The arithmetic stand-in" | Out-Null
-    }
+    Write-Tagged "session" "The genuine pipeline classifies the cube on the GPU before it opens the port, so this takes a moment." "DarkGray"
+    Start-Producer -Name "uc1-genuine" -Color "Magenta" -Arguments @(
+        "-m", "stratum_sim", "uc1-real", $script:datasetFolder,
+        "--build-root", $uc1BuildRoot, "--port", "$mapPort")
+    Wait-ForListener -Port $mapPort -What "The genuine UC1 pipeline" | Out-Null
     $script:mapProducerStarted = $true
 }
 
-function Invoke-ProducerSwap {
-    Write-Stage "Manual step 3 - the producer swap on port $mapPort"
-    Write-Tagged "action" "Change nothing in Slicer. No Disconnect, no restart, no change of result map." "Yellow"
-
-    $wasGenuine = $script:producers.ContainsKey("uc1-genuine")
-    if ($wasGenuine) { Stop-Producer -Name "uc1-genuine" } else { Stop-Producer -Name "uc1-standin" }
-
-    Write-Tagged "session" "Nothing is serving port $mapPort now. Watch what the UC1 link row says for the next few seconds." "Cyan"
-    for ($second = 0; $second -lt 6; $second++) {
-        Show-ProducerOutput
-        Show-LinkState -Always
-        Start-Sleep -Seconds 1
-    }
-
-    if ($wasGenuine) {
-        Start-MapProducer -Which "standin"
-        Write-Tagged "expect" "Banner should change to: SIMULATED - NOT A GENUINE UC1 RESULT" "Cyan"
-        Write-Tagged "expect" "                          arithmetic stand-in, not a classifier" "Cyan"
-    }
-    else {
-        Start-MapProducer -Which "genuine"
-        Write-Tagged "expect" "Banner should change to: SIMULATED INPUT - REAL UC1 PIPELINE, NOT A CLINICAL RESULT" "Cyan"
-        Write-Tagged "expect" "                          real UC1 pipeline, synthetic tissue phantom" "Cyan"
-    }
-}
-
 function Start-CaptureTrigger {
-    if (-not $recordedSession) {
-        Write-Tagged "session" "c triggers a capture only in a recorded session. Start with -Case, for example -Case 004-02." "Yellow"
-        return
-    }
-
     # One short-lived client per press, leaving as soon as the stand-in has
     # answered. pyigtl serves one client at a time, so a client that waited for
     # READY would hold the control port for the whole delay: a second press
@@ -514,16 +459,11 @@ function Read-SessionKey {
 
 function Show-Help {
     Write-Stage "Keys"
-    if ($recordedSession) {
-        Write-Host "  c   trigger a capture of case $Case on port $controlPort"
-    }
-    else {
-        Write-Host "  s   swap the map producer on port $mapPort        (manual step 3)"
-    }
+    Write-Host "  c   trigger a capture of case $Case on port $controlPort"
     Write-Host "  m   measure the delivered LiveView frame rate  (manual step 2)"
     Write-Host "  l   start Slicer again after closing it       (manual step 6)"
     Write-Host "  n   show what is listening on $($sessionPorts -join ', ')"
-    Write-Host "  d   print the dataset folder and the log paths"
+    Write-Host "  d   print the case folder and the log paths"
     Write-Host "  ?   this list"
     Write-Host "  q   stop both producers and end the session"
     Write-Host ""
@@ -533,80 +473,55 @@ function Show-Help {
 # Preflight
 # ---------------------------------------------------------------------------
 
-Write-Stage "STRATUM end-to-end session"
-if ($recordedSession) {
-    Write-Host "Nothing here is a clinical result. The cube is recorded case $Case of the public," -ForegroundColor DarkGray
-    Write-Host "anonymized HSI Human Brain Database, read where it lies and never written; only" -ForegroundColor DarkGray
-    Write-Host "the acquisition is simulated. Quick start: docs\development\pipeline_test_quickstart.md" -ForegroundColor DarkGray
-}
-else {
-    Write-Host "Nothing here is a clinical result: the scene is a synthetic phantom and the" -ForegroundColor DarkGray
-    Write-Host "pipeline is run over invented data. Procedure and evidence tables:" -ForegroundColor DarkGray
-    Write-Host "docs\development\end_to_end_verification.md" -ForegroundColor DarkGray
+if ([string]::IsNullOrWhiteSpace($Case)) {
+    Stop-WithError ("A session runs one recorded case of the HSI Human Brain Database. Pass -Case, " +
+        "for example -Case 004-02.")
 }
 
-foreach ($recordedOnly in @("DatasetRoot", "InstantCapture")) {
-    if (-not $recordedSession -and $PSBoundParameters.ContainsKey($recordedOnly)) {
-        Stop-WithError "-$recordedOnly is only used with -Case."
-    }
-}
-if ($recordedSession -and $MapProducer -ne "genuine") {
-    Stop-WithError ("-MapProducer $MapProducer cannot run on a recorded case: the arithmetic stand-in's " +
-        "marker interlock accepts only datasets this simulator wrote. A recorded session uses the genuine pipeline.")
-}
-if ($recordedSession -and $DatasetFolder) {
-    Stop-WithError "-DatasetFolder names a dataset this simulator wrote and -Case names a recorded one. Pass one of them."
-}
+Write-Stage "STRATUM end-to-end session"
+Write-Host "Nothing here is a clinical result. Only the acquisition is simulated." -ForegroundColor DarkGray
+Write-Host "Quick start: docs\development\pipeline_test_quickstart.md" -ForegroundColor DarkGray
 
 if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
     Stop-WithError "The repository virtual environment was not found at $pythonPath. Create it and install tools\simulators\requirements.txt."
 }
 Write-Tagged "check" "Interpreter: $pythonPath" "Green"
 
-if ($MapProducer -eq "genuine") {
-    if (-not (Test-Path -LiteralPath $uc1BuildRoot -PathType Container)) {
-        Stop-WithError "The staged UC1 build was not found at $uc1BuildRoot. Build it with .\scripts\development\build-uc1.ps1, or start with -MapProducer standin."
-    }
-    Write-Tagged "check" "UC1 build: $uc1BuildRoot" "Green"
+if (-not (Test-Path -LiteralPath $uc1BuildRoot -PathType Container)) {
+    Stop-WithError "The staged UC1 build was not found at $uc1BuildRoot. Build it with .\scripts\development\build-uc1.ps1."
 }
+Write-Tagged "check" "UC1 build: $uc1BuildRoot" "Green"
 
 Assert-PortAvailable -Port $liveViewPort -Purpose "LiveView"
 Assert-PortAvailable -Port $mapPort -Purpose "UC1 maps"
-if ($recordedSession) {
-    Assert-PortAvailable -Port $cubePort -Purpose "HSCube"
-    Assert-PortAvailable -Port $controlPort -Purpose "capture control"
-}
+Assert-PortAvailable -Port $cubePort -Purpose "HSCube"
+Assert-PortAvailable -Port $controlPort -Purpose "capture control"
 Assert-NoStaleClients -Ports $sessionPorts
+
+if ($DatasetRoot) {
+    if (-not (Test-Path -LiteralPath $DatasetRoot -PathType Container)) {
+        Stop-WithError "The dataset root does not exist: $DatasetRoot"
+    }
+    $recordedRoot = (Resolve-Path -LiteralPath $DatasetRoot).Path
+}
+else {
+    $recordedRoot = Join-Path $repositoryRoot "input\bin\bin"
+}
+$script:datasetFolder = Join-Path $recordedRoot $Case
+if (-not (Test-Path -LiteralPath $script:datasetFolder -PathType Container)) {
+    Stop-WithError "There is no case folder $($script:datasetFolder). Check -Case and -DatasetRoot."
+}
+# The same identification `envi.isRecordedDatabaseCase` makes, done before the
+# folder is called recorded anywhere in this session.
+$groundTruthHeader = Join-Path $script:datasetFolder "gtMap.hdr"
+if (-not (Test-Path -LiteralPath $groundTruthHeader -PathType Leaf) -or
+    -not (Get-Content -LiteralPath $groundTruthHeader -Raw).Contains("HSI Human Brain Database")) {
+    Stop-WithError "Refusing $($script:datasetFolder): its gtMap.hdr does not identify it as a case of the HSI Human Brain Database."
+}
+Write-Tagged "check" "Case: $($script:datasetFolder) (recorded case $Case of the public, anonymized HSI Human Brain Database; read-only)" "Green"
 
 New-Item -ItemType Directory -Path $sessionRoot -Force | Out-Null
 Write-Tagged "check" "Session folder: $sessionRoot" "Green"
-
-if ($recordedSession) {
-    if ($DatasetRoot) {
-        if (-not (Test-Path -LiteralPath $DatasetRoot -PathType Container)) {
-            Stop-WithError "The dataset root does not exist: $DatasetRoot"
-        }
-        $recordedRoot = (Resolve-Path -LiteralPath $DatasetRoot).Path
-    }
-    else {
-        $recordedRoot = Join-Path $repositoryRoot "input\bin\bin"
-    }
-    $script:datasetFolder = Join-Path $recordedRoot $Case
-    if (-not (Test-Path -LiteralPath $script:datasetFolder -PathType Container)) {
-        Stop-WithError "There is no recorded case folder $($script:datasetFolder). Check -Case and -DatasetRoot."
-    }
-}
-elseif ($DatasetFolder) {
-    if (-not (Test-Path -LiteralPath $DatasetFolder -PathType Container)) {
-        Stop-WithError "The dataset folder does not exist: $DatasetFolder"
-    }
-    $script:datasetFolder = (Resolve-Path -LiteralPath $DatasetFolder).Path
-}
-else {
-    $script:datasetFolder = Join-Path $sessionRoot "dataset"
-}
-$datasetNote = if ($recordedSession) { " (recorded case, read-only)" } else { "" }
-Write-Tagged "check" "Dataset: $($script:datasetFolder)$datasetNote" "Green"
 
 # `stratum_sim` is a standalone package rather than an installed distribution,
 # so its parent goes on PYTHONPATH for the duration of this session.
@@ -620,35 +535,22 @@ try {
     # Startup, in the order the procedure fixes
     # -----------------------------------------------------------------------
 
-    if ($recordedSession) {
-        Write-Stage "Acquisition stand-in on 127.0.0.1:$liveViewPort, $cubePort and $controlPort"
-        Write-Tagged "session" "It reads recorded case $Case and writes nothing. LiveView comes from the laptop camera; the cube is published on each capture." "DarkGray"
-        $acquisitionArguments = @(
-            "-m", "stratum_sim", "acquisition", "--scene-mode", "recorded",
-            "--case", $Case, "--recorded-root", $recordedRoot, "--frame-source", "webcam",
-            "--preset", $Preset, "--port", "$liveViewPort",
-            "--cube-port", "$cubePort", "--control-port", "$controlPort")
-        if ($InstantCapture) { $acquisitionArguments += "--instant-capture" }
-        Start-Producer -Name "acq" -Color "Blue" -Arguments $acquisitionArguments
-        Wait-ForListener -Port $liveViewPort -What "The acquisition stand-in's LiveView" | Out-Null
-        Wait-ForListener -Port $cubePort -What "The HSCube channel" | Out-Null
-        Wait-ForListener -Port $controlPort -What "The capture control channel" | Out-Null
-        Show-ReservedPorts
+    Write-Stage "Acquisition stand-in on 127.0.0.1:$liveViewPort, $cubePort and $controlPort"
+    Write-Tagged "session" "It reads recorded case $Case and writes nothing. LiveView comes from the laptop camera; the cube is published on each capture." "DarkGray"
+    $acquisitionArguments = @(
+        "-m", "stratum_sim", "acquisition",
+        "--case", $Case, "--recorded-root", $recordedRoot,
+        "--preset", $Preset, "--port", "$liveViewPort",
+        "--cube-port", "$cubePort", "--control-port", "$controlPort")
+    if ($InstantCapture) { $acquisitionArguments += "--instant-capture" }
+    Start-Producer -Name "acq" -Color "Blue" -Arguments $acquisitionArguments
+    Wait-ForListener -Port $liveViewPort -What "The acquisition stand-in's LiveView" | Out-Null
+    Wait-ForListener -Port $cubePort -What "The HSCube channel" | Out-Null
+    Wait-ForListener -Port $controlPort -What "The capture control channel" | Out-Null
+    Show-ReservedPorts
 
-        Write-Stage "Map producer on 127.0.0.1:$mapPort"
-        Write-Tagged "session" "Not started yet. It starts on the case when the first capture reports READY: camera, capture, cube, UC1. Press c." "Yellow"
-    }
-    else {
-        Write-Stage "Acquisition stand-in on 127.0.0.1:$liveViewPort"
-        Write-Tagged "session" "It writes the ENVI dataset first and serves LiveView afterwards. The dataset write is the slow part." "DarkGray"
-        Start-Producer -Name "acq" -Color "Blue" -Arguments @(
-            "-m", "stratum_sim", "acquisition", "--preset", $Preset,
-            "--port", "$liveViewPort", "--dataset-folder", $script:datasetFolder)
-        Wait-ForListener -Port $liveViewPort -What "The acquisition stand-in" | Out-Null
-
-        Write-Stage "Map producer on 127.0.0.1:$mapPort"
-        Start-MapProducer -Which $MapProducer
-    }
+    Write-Stage "Map producer on 127.0.0.1:$mapPort"
+    Write-Tagged "session" "Not started yet. It starts on the case when the first capture reports READY: camera, capture, cube, UC1. Press c." "Yellow"
 
     if ($NoSlicer) {
         Write-Tagged "session" "Slicer was not started (-NoSlicer). Press l when you want it." "Yellow"
@@ -662,9 +564,7 @@ try {
     Write-Host "  1. Open SLIAFlow from the STRATUM category."
     Write-Host "  2. Live source -> AcquisitionSystemApp LiveView, then Connect on the Acquisition link row."
     Write-Host "  3. Result map -> majorityVotingMap, then Connect on the UC1 link row."
-    if ($recordedSession) {
-        Write-Host "     In a recorded session nothing serves the UC1 link until the first capture is READY. Press c here first." -ForegroundColor Yellow
-    }
+    Write-Host "     Nothing serves the UC1 link until the first capture is READY. Press c here first." -ForegroundColor Yellow
     Write-Host "  4. Tick Demo mode. The red banner appears over the result pane."
     Write-Host ""
     Write-Host "  The status line below turns green once Slicer has connected to both ports." -ForegroundColor DarkGray
@@ -710,10 +610,10 @@ try {
             }
         }
 
-        if ($recordedSession -and $script:captureReadySeen -and -not $script:mapProducerStarted) {
+        if ($script:captureReadySeen -and -not $script:mapProducerStarted) {
             Write-Stage "Map producer on 127.0.0.1:$mapPort"
             Write-Tagged "session" "The first capture is ready. Starting the genuine UC1 pipeline on $($script:datasetFolder)." "Cyan"
-            Start-MapProducer -Which "genuine"
+            Start-MapProducer
         }
 
         if ($script:slicerProcess -and $script:slicerProcess.HasExited -and -not $script:slicerExitReported) {
@@ -726,12 +626,6 @@ try {
         $pressedKey = Read-SessionKey
         if ($null -ne $pressedKey) {
             switch ($pressedKey) {
-                "s" {
-                    if ($recordedSession) {
-                        Write-Tagged "session" "No swap in a recorded session: the arithmetic stand-in refuses a recorded case, so there is nothing to swap to." "Yellow"
-                    }
-                    else { Invoke-ProducerSwap }
-                }
                 "c" { Start-CaptureTrigger }
                 "m" { Invoke-RateMeasurement }
                 "l" { Start-Slicer }
@@ -741,7 +635,7 @@ try {
                         ForEach-Object { Write-Tagged "netstat" $_.ToString().Trim() "Gray" }
                 }
                 "d" {
-                    Write-Tagged "session" "Dataset: $($script:datasetFolder)" "Cyan"
+                    Write-Tagged "session" "Case: $($script:datasetFolder)" "Cyan"
                     foreach ($producer in @($script:producers.Values)) {
                         Write-Tagged "session" "$($producer.Name) log: $($producer.Log)" "Cyan"
                     }
@@ -757,7 +651,7 @@ try {
 }
 finally {
     Write-Stage "Shutdown"
-    if ($recordedSession) { Show-ReservedPorts }
+    Show-ReservedPorts
     foreach ($name in @($script:producers.Keys)) { Stop-Producer -Name $name }
 
     $remaining = @()
@@ -766,8 +660,7 @@ finally {
         if ($owners.Count -gt 0) { $remaining += "$port (PID $($owners -join ', '))" }
     }
     if ($remaining.Count -eq 0) {
-        $portList = if ($recordedSession) { $sessionPorts -join ", " } else { "$liveViewPort or $mapPort" }
-        Write-Tagged "check" "Nothing is listening on $portList. No socket was left held." "Green"
+        Write-Tagged "check" "Nothing is listening on $($sessionPorts -join ', '). No socket was left held." "Green"
     }
     else {
         Write-Tagged "check" "Still listening: $($remaining -join '; '). Record that in the failures table." "Red"
@@ -777,7 +670,7 @@ finally {
         Write-Tagged "session" "Slicer (PID $($script:slicerProcess.Id)) is still running and has been left alone." "Yellow"
     }
 
-    Write-Tagged "session" "Logs and dataset: $sessionRoot" "Cyan"
+    Write-Tagged "session" "Logs: $sessionRoot" "Cyan"
     Write-Tagged "session" "Write the measurements into docs\development\end_to_end_verification.md." "Cyan"
 
     $env:PYTHONPATH = $previousPythonPath

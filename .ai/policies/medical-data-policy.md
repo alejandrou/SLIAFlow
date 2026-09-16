@@ -4,7 +4,12 @@ This repository is an active SLIAFlow-related 3D Slicer development project and 
 
 ## Allowed Data
 
-- Synthetic data.
+- Test fixtures in automated tests: placeholder arrays that stand for no
+  imagery, are labelled as test fixtures, and are never presented as data. A
+  test may write them to a temporary folder it deletes afterwards, laid out like
+  an approved dataset and carrying that dataset's identifying marker, when the
+  test exercises reading or identifying that layout. Such a folder never leaves
+  the test's temporary directory.
 - Public Slicer sample data.
 - Anonymized test data.
 - Mock JSON/results.

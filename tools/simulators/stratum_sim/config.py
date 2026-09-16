@@ -2,7 +2,8 @@
 
 Settings come from the `simulators` block of `config/local.json`, which is
 already ignored by Git. `config/local.example.json` documents the block. Every
-key is optional; the defaults below are what the demo runs on.
+key is optional except `case`, which the acquisition stand-in needs from here or
+from its command line; the defaults below are what the demo runs on.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import contract, spectra
+from . import contract
 
 # Frame presets are (samples, lines). Every `samples` value is a multiple of 4
 # so a BMP row written from a frame needs no padding.
@@ -24,41 +25,12 @@ FRAME_PRESETS: dict[str, tuple[int, int]] = {
 
 DEFAULT_PRESET_NAME = "demo"
 
-# The Headwall sensor the UC1 pipeline was built around. 93 bands is confirmed
-# twice over: it is the band count the shipped `w_vector.bin` is sized for
-# (bands * 6 binary classifiers * 4 bytes = 2232 bytes).
-DEFAULT_BAND_COUNT = 93
-
-FRAME_SOURCE_NAMES = ("synthetic", "webcam")
-
-# The only LiveView source scene mode `recorded` accepts: the laptop camera.
-RECORDED_FRAME_SOURCE = "webcam"
-
-# How the spectral scene is built.
+# The acquisition stand-in reads one case of the public HSI Human Brain Database
+# where it lies, streams the laptop camera on LiveView, and publishes the case's
+# cube when a capture is triggered. The LiveView frame and the cube are
+# unrelated: the camera stands in for the rig, and the cube was recorded by a
+# different one.
 #
-# `tissue` is the default because it is the only one the genuine UC1 pipeline
-# resolves to anything: the `channel` scene is spectrally rich but its spectra
-# are mixtures of camera colour curves, and UC1's SVM - which sees only the
-# min-max normalized *shape* of each spectrum - classified every pixel of it as
-# background. `tissue` builds the shape from haemoglobin absorption and a
-# scattering power law instead. See `tissue.py` for what that does and does not
-# claim.
-#
-# `channel` is kept because it is the only mode that can carry a moving scene
-# or a webcam: it turns a frame into a cube, where `tissue` renders its frame
-# from the cube.
-#
-# `recorded` builds nothing. It reads one case of the public HSI Human Brain
-# Database where it lies, streams LiveView from the frame source, and publishes
-# the case's cube when a capture is triggered. It is its own mode rather than a
-# flag on the other two because it is the only one in which the LiveView frame
-# and the cube are unrelated: the camera stands in for the rig, and the cube was
-# recorded by a different one.
-SCENE_MODE_TISSUE = "tissue"
-SCENE_MODE_CHANNEL = "channel"
-SCENE_MODE_RECORDED = "recorded"
-SCENE_MODE_NAMES = (SCENE_MODE_TISSUE, SCENE_MODE_CHANNEL, SCENE_MODE_RECORDED)
-
 # Where `.ai/policies/medical-data-policy.md` records the approved cases live.
 RECORDED_ROOT_RELATIVE_PATH = Path("input") / "bin" / "bin"
 
@@ -67,25 +39,13 @@ RECORDED_ROOT_RELATIVE_PATH = Path("input") / "bin" / "bin"
 DEFAULT_CAPTURE_DELAY_MIN_SEC = 5.0
 DEFAULT_CAPTURE_DELAY_MAX_SEC = 8.0
 
-# `OpenIGTLinkServer.cpp` serves LiveView on 18944. The UC1 map stream gets
-# 18945 in SLIA-012; nothing here listens on it.
+# `OpenIGTLinkServer.cpp` serves LiveView on 18944. The UC1 map stream is on
+# 18945; the acquisition stand-in does not listen on it.
 DEFAULT_LIVE_VIEW_PORT = 18944
 DEFAULT_LIVE_VIEW_DEVICE_NAME = "LiveView"
 
-# The dataset contract requires a band covariance of at least
-# `MINIMUM_SPECTRAL_RANK`, and a rank can never exceed the band count, so a cube
-# with fewer bands than that cannot satisfy it however it is generated.
-MINIMUM_BAND_COUNT = spectra.MINIMUM_SPECTRAL_RANK
-
-# The channel basis reaches `CHANNEL_BASIS_RANK` on its own and each texture
-# feature adds one direction, so this many features are needed to clear the
-# floor. Below it the writer would produce a rank-deficient cube - a dataset
-# that looks valid, loads, and is degenerate.
-MINIMUM_TEXTURE_FEATURE_COUNT = spectra.MINIMUM_SPECTRAL_RANK - spectra.CHANNEL_BASIS_RANK
-
 CONFIG_FILE_RELATIVE_PATH = Path("config") / "local.json"
 CONFIG_BLOCK_NAME = "simulators"
-DATASET_ROOT_RELATIVE_PATH = Path("workspace") / "simulators" / "datasets"
 
 
 class ConfigurationError(ValueError):
@@ -102,19 +62,11 @@ class SimulatorConfig:
 
     repositoryRoot: Path
     presetName: str = DEFAULT_PRESET_NAME
-    bands: int = DEFAULT_BAND_COUNT
-    frameSource: str = "synthetic"
-    sceneMode: str = SCENE_MODE_TISSUE
     webcamIndex: int = 0
     liveViewPort: int = DEFAULT_LIVE_VIEW_PORT
     liveViewDeviceName: str = DEFAULT_LIVE_VIEW_DEVICE_NAME
     targetFrameRate: float = 10.0
     rotate180: bool = True
-    seed: int = 20260902
-    noiseCounts: int = 0
-    textureFeatureCount: int = 6
-    frameCount: int = 0
-    datasetRoot: Path | None = None
     case: str | None = None
     recordedRoot: Path | None = None
     hsCubePort: int = contract.HS_CUBE_PORT
@@ -128,89 +80,25 @@ class SimulatorConfig:
                 f"Unknown frame preset {self.presetName!r}. "
                 f"Choose one of: {', '.join(sorted(FRAME_PRESETS))}."
             )
-        if self.frameSource not in FRAME_SOURCE_NAMES:
+        if self.case is not None and (
+            not self.case
+            or self.case in (".", "..")
+            or "/" in self.case
+            or "\\" in self.case
+            or Path(self.case).name != self.case
+        ):
             raise ConfigurationError(
-                f"Unknown frame source {self.frameSource!r}. "
-                f"Choose one of: {', '.join(FRAME_SOURCE_NAMES)}."
-            )
-        if self.sceneMode not in SCENE_MODE_NAMES:
-            raise ConfigurationError(
-                f"Unknown scene mode {self.sceneMode!r}. "
-                f"Choose one of: {', '.join(SCENE_MODE_NAMES)}."
-            )
-        if self.sceneMode == SCENE_MODE_TISSUE and self.frameSource != "synthetic":
-            # In tissue mode the frame is rendered from the cube, so there is
-            # nowhere for a camera frame to enter. Accepting the setting and
-            # ignoring it would leave an operator believing the phantom was
-            # built from what the camera saw.
-            raise ConfigurationError(
-                f"Scene mode {SCENE_MODE_TISSUE!r} renders its own frame from the phantom cube, "
-                f"so it cannot take frames from frameSource {self.frameSource!r}. Use "
-                f"sceneMode {SCENE_MODE_CHANNEL!r} to drive the cube from a camera."
-            )
-        if self.sceneMode == SCENE_MODE_RECORDED:
-            if self.frameSource != RECORDED_FRAME_SOURCE:
-                # A recorded session shows recorded data and the laptop camera.
-                # A generated LiveView scene beside a recorded cube would put
-                # made-up imagery next to real imagery, so it is refused rather
-                # than kept as a fallback for a machine without a camera.
-                raise ConfigurationError(
-                    f"Scene mode {SCENE_MODE_RECORDED!r} takes LiveView from the laptop camera "
-                    f"only, so frameSource must be {RECORDED_FRAME_SOURCE!r}, not "
-                    f"{self.frameSource!r}."
-                )
-            if self.case is None:
-                raise ConfigurationError(
-                    f"Scene mode {SCENE_MODE_RECORDED!r} reads one recorded case, so it needs "
-                    "case: the case folder name under recordedRoot, for example '004-02'."
-                )
-            if (
-                not self.case
-                or self.case in (".", "..")
-                or "/" in self.case
-                or "\\" in self.case
-                or Path(self.case).name != self.case
-            ):
-                raise ConfigurationError(
-                    f"case must be one folder name under recordedRoot, not {self.case!r}. A path "
-                    "would let a session read from somewhere recordedRoot does not say."
-                )
-        elif self.case is not None:
-            # Ignoring it would leave an operator believing the scene on
-            # screen was the recorded case they named.
-            raise ConfigurationError(
-                f"case {self.case!r} is only read in scene mode {SCENE_MODE_RECORDED!r}, and "
-                f"scene mode {self.sceneMode!r} would ignore it. Use sceneMode "
-                f"{SCENE_MODE_RECORDED!r} to read a recorded case."
+                f"case must be one folder name under recordedRoot, not {self.case!r}. A path "
+                "would let a session read from somewhere recordedRoot does not say."
             )
         if self.captureDelayMinSec < 0.0 or self.captureDelayMaxSec < self.captureDelayMinSec:
             raise ConfigurationError(
                 "The capture delay needs 0 <= captureDelayMinSec <= captureDelayMaxSec, not "
                 f"{self.captureDelayMinSec} and {self.captureDelayMaxSec}."
             )
-        if self.bands < MINIMUM_BAND_COUNT:
-            raise ConfigurationError(
-                f"bands must be at least {MINIMUM_BAND_COUNT}, not {self.bands}: the dataset "
-                f"contract requires a band covariance of rank {spectra.MINIMUM_SPECTRAL_RANK}, "
-                "and a rank cannot exceed the band count."
-            )
-        if self.textureFeatureCount < MINIMUM_TEXTURE_FEATURE_COUNT:
-            raise ConfigurationError(
-                f"textureFeatureCount must be at least {MINIMUM_TEXTURE_FEATURE_COUNT}, not "
-                f"{self.textureFeatureCount}: the channel basis reaches rank "
-                f"{spectra.CHANNEL_BASIS_RANK} alone and each feature adds one direction, so "
-                f"fewer than {MINIMUM_TEXTURE_FEATURE_COUNT} cannot reach the required rank "
-                f"{spectra.MINIMUM_SPECTRAL_RANK}."
-            )
         if self.targetFrameRate <= 0.0:
             raise ConfigurationError(
                 f"targetFrameRate must be positive, not {self.targetFrameRate}."
-            )
-        if self.noiseCounts < 0:
-            raise ConfigurationError(f"noiseCounts must not be negative, not {self.noiseCounts}.")
-        if self.datasetRoot is None:
-            object.__setattr__(
-                self, "datasetRoot", self.repositoryRoot / DATASET_ROOT_RELATIVE_PATH
             )
         if self.recordedRoot is None:
             object.__setattr__(
@@ -266,9 +154,8 @@ def loadSimulatorConfig(
 
     if "preset" in settings:
         settings["presetName"] = settings.pop("preset")
-    for pathSetting in ("datasetRoot", "recordedRoot"):
-        if settings.get(pathSetting) is not None:
-            settings[pathSetting] = Path(str(settings[pathSetting])).expanduser()
+    if settings.get("recordedRoot") is not None:
+        settings["recordedRoot"] = Path(str(settings["recordedRoot"])).expanduser()
 
     known = {field for field in SimulatorConfig.__dataclass_fields__ if field != "repositoryRoot"}
     unknown = sorted(set(settings) - known)

@@ -1,30 +1,25 @@
 [CmdletBinding()]
 param(
-    # Frame size. `demo` is the default because CRC over a larger frame is what
-    # holds the achieved frame rate down, and the demonstration only needs a
-    # frame that is visibly live.
+    # The recorded case to publish on each capture, for example 004-02. Required:
+    # the stand-in reads one case of the HSI Human Brain Database and nothing else.
+    [string]$Case,
+
+    # Where recorded cases live. Defaults to input\bin\bin. Read, never written.
+    [string]$DatasetRoot,
+
+    # LiveView frame size. `demo` is the default because CRC over a larger frame
+    # is what holds the achieved frame rate down. LiveView is the laptop camera,
+    # which SLIAFlowLogic.startCamera also wants: on Windows the second open
+    # fails, so the SLIAFlow live pane and this stand-in cannot both run.
     [ValidateSet("demo", "medium", "full")]
     [string]$Preset,
-
-    # `synthetic` needs no hardware. `webcam` opens camera index 0, which
-    # SLIAFlowLogic.startCamera also wants: on Windows the second open fails, so
-    # the SLIAFlow live pane and this source cannot both run.
-    [ValidateSet("synthetic", "webcam")]
-    [string]$FrameSource,
 
     [int]$Port,
 
     [double]$FrameRate,
 
-    # Stop after this many frames. 0, the default, streams until Ctrl-C.
-    [int]$Frames,
-
-    # Write into this exact folder instead of a new sim-YYYYMMDD-HHMMSS one.
-    # The overwrite interlock still applies.
-    [string]$DatasetFolder,
-
-    # Write the dataset and exit without serving LiveView.
-    [switch]$DatasetOnly
+    # Complete each capture at once instead of holding the 5-8 s delay.
+    [switch]$InstantCapture
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,14 +56,16 @@ if (-not (Test-Path -LiteralPath $requirementsPath -PathType Leaf)) {
     Stop-WithError "The simulator requirements file is missing: $requirementsPath"
 }
 
-$simulatorArguments = @("-m", "stratum_sim", "acquisition")
+if ([string]::IsNullOrWhiteSpace($Case)) {
+    Stop-WithError "The acquisition stand-in publishes one recorded case. Pass -Case, for example -Case 004-02."
+}
+
+$simulatorArguments = @("-m", "stratum_sim", "acquisition", "--case", $Case)
+if ($PSBoundParameters.ContainsKey("DatasetRoot")) { $simulatorArguments += @("--recorded-root", $DatasetRoot) }
 if ($PSBoundParameters.ContainsKey("Preset")) { $simulatorArguments += @("--preset", $Preset) }
-if ($PSBoundParameters.ContainsKey("FrameSource")) { $simulatorArguments += @("--frame-source", $FrameSource) }
 if ($PSBoundParameters.ContainsKey("Port")) { $simulatorArguments += @("--port", $Port) }
 if ($PSBoundParameters.ContainsKey("FrameRate")) { $simulatorArguments += @("--frame-rate", $FrameRate) }
-if ($PSBoundParameters.ContainsKey("Frames")) { $simulatorArguments += @("--frames", $Frames) }
-if ($PSBoundParameters.ContainsKey("DatasetFolder")) { $simulatorArguments += @("--dataset-folder", $DatasetFolder) }
-if ($DatasetOnly) { $simulatorArguments += "--dataset-only" }
+if ($InstantCapture) { $simulatorArguments += "--instant-capture" }
 
 Write-Host "== STRATUM acquisition stand-in =="
 Write-Host "Interpreter: $pythonPath"
