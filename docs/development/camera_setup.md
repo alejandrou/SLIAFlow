@@ -51,5 +51,5 @@ result` while laptop capture runs.
   SLIAFlow converts OpenCV BGR frames to RGB before updating its vector volume.
 
 For developer verification, enable Developer Mode and use **Reload** or
-**Reload and Test**. Automated tests use injected fake captures and synthetic
-in-memory colour arrays; they never open the physical camera.
+**Reload and Test**. Automated tests use injected fake captures and in-memory
+placeholder colour arrays; they never open the physical camera.

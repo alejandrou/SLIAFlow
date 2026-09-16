@@ -73,7 +73,7 @@ Use passive logic by default: the widget creates or owns the logic instance, and
 
 Scripted-module tests should exercise logic and important integration paths. Prefer tests that can run without manual UI clicking.
 
-Tests should use synthetic data, public Slicer sample data, anonymized test data, mock results, or explicitly approved public medical data.
+Tests should use in-memory placeholder fixtures, public Slicer sample data, anonymized test data, mock results, or explicitly approved public medical data.
 
 ## Parameter Nodes
 

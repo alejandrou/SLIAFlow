@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+    # A recorded case folder, for example input\bin\bin\004-02. Read, never
+    # written. A folder that is not a recorded case is refused.
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$DatasetFolder,
 
@@ -13,10 +15,6 @@ param(
     [int]$Cycles,
 
     [double]$Interval,
-
-    # The marker is required by default. This switch is only for an explicitly
-    # approved synthetic test folder whose header does not carry the marker.
-    [switch]$ForceUnmarked,
 
     # Run the pipeline and report the recovered map without opening a server.
     [switch]$ClassifyOnly
@@ -44,6 +42,14 @@ if (-not (Test-Path -LiteralPath $DatasetFolder -PathType Container)) {
     Stop-WithError "The dataset folder does not exist: $DatasetFolder"
 }
 
+# The same identification `envi.isRecordedDatabaseCase` makes, done here so the
+# banner below never calls a folder recorded before it is known to be one.
+$groundTruthHeader = Join-Path $DatasetFolder "gtMap.hdr"
+if (-not (Test-Path -LiteralPath $groundTruthHeader -PathType Leaf) -or
+    -not (Get-Content -LiteralPath $groundTruthHeader -Raw).Contains("HSI Human Brain Database")) {
+    Stop-WithError "Refusing ${DatasetFolder}: its gtMap.hdr does not identify it as a case of the HSI Human Brain Database."
+}
+
 $resolvedBuildRoot = if ($PSBoundParameters.ContainsKey("BuildRoot")) { $BuildRoot } else { $defaultBuildRoot }
 if (-not (Test-Path -LiteralPath $resolvedBuildRoot -PathType Container)) {
     Write-Host "ERROR: The staged UC1 build was not found at $resolvedBuildRoot." -ForegroundColor Red
@@ -64,7 +70,6 @@ $simulatorArguments = @(
 if ($PSBoundParameters.ContainsKey("Port")) { $simulatorArguments += @("--port", $Port) }
 if ($PSBoundParameters.ContainsKey("Cycles")) { $simulatorArguments += @("--cycles", $Cycles) }
 if ($PSBoundParameters.ContainsKey("Interval")) { $simulatorArguments += @("--interval", $Interval) }
-if ($ForceUnmarked) { $simulatorArguments += "--force-unmarked" }
 if ($ClassifyOnly) { $simulatorArguments += "--classify-only" }
 
 Write-Host "== STRATUM genuine UC1 pipeline =="
@@ -72,8 +77,9 @@ Write-Host "Interpreter: $pythonPath"
 Write-Host "Dataset:     $($simulatorArguments[3])"
 Write-Host "Build root:  $($simulatorArguments[5])"
 Write-Host ""
-Write-Host "The pipeline is the vendored UC1 CUDA binary, compiled unmodified. The scene is"
-Write-Host "synthetic and non-clinical, so the result is marked simulated on the wire."
+Write-Host "The pipeline is the vendored UC1 CUDA binary, compiled unmodified. The cube is a"
+Write-Host "recorded case and only its acquisition is simulated, so the result is marked"
+Write-Host "simulated on the wire. It is not a clinical result."
 Write-Host "UC1 keeps one of the five contract maps, so this sends UC1_MV_CLASS alone."
 Write-Host ""
 

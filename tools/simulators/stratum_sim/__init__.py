@@ -1,12 +1,12 @@
-"""STRATUM stand-in simulators.
+"""STRATUM acquisition stand-in and genuine UC1 runner.
 
-These processes stand where the missing hyperspectral acquisition system and
-the UC1 classifier stand. They exist so the genuine UC1 pipeline and SLIAFlow
-have something valid to consume before any hardware arrives.
+These processes stand where the missing hyperspectral acquisition system stands,
+and run the genuine UC1 pipeline, so SLIAFlow has something real to consume
+before any hardware arrives.
 
-Everything produced here is synthetic and non-clinical. It is not patient data,
-it is not derived from patient data, and no output of these processes carries
-diagnostic meaning.
+Every cube is a recorded case of the public, anonymized HSI Human Brain
+Database, read where it lies. Only the acquisition event is simulated, and no
+output of these processes carries diagnostic meaning.
 
 The package deliberately lives outside `extensions/`: the seam between a
 stand-in and the real component is the network boundary the architecture
@@ -37,8 +37,6 @@ __all__ = [
     "frames",
     "igtl_transport",
     "spectra",
-    "tissue",
     "uc1_maps",
     "uc1_runner",
-    "uc1_sim",
 ]

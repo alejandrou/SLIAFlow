@@ -5,10 +5,11 @@ machine, and what was actually measured when it was. Nothing in
 `workspace/components/` is modified: the sources are staged, built and executed
 somewhere else, and every build re-proves that property by hash.
 
-The scene the pipeline runs on is synthetic. The pipeline is not. Calibration,
-PCA, SVM, KNN, K-means and majority voting are the vendored code doing real work
-on the local GPU, so a result is a genuine algorithm output over an invented
-input, and it is marked `simulated` on the wire for exactly that reason.
+The pipeline runs on recorded cases of the public, anonymized HSI Human Brain
+Database. Calibration, PCA, SVM, KNN, K-means and majority voting are the
+vendored code doing real work on the local GPU. The acquisition event is
+simulated, so a result is marked `simulated` on the wire, and nothing it produces
+is a clinical result.
 
 ## Toolchain the binary was proven against
 
@@ -120,25 +121,22 @@ owner, not a silent fix.
 
 ## Running
 
-The runner is a `Classifier` implementation like the arithmetic stand-in, so it
-plugs into the same seam. It uses `dataset.folder` and never loads a calibrated
-cube: the binary opens `raw.dat`, `whiteReference.dat`, `darkReference.dat` and
-`raw.hdr` itself and calibrates on the GPU.
+The runner is a `Classifier` implementation. It uses `dataset.folder` and never
+loads a calibrated cube: the binary opens `raw.dat`, `whiteReference.dat`,
+`darkReference.dat` and `raw.hdr` itself and calibrates on the GPU.
 
 ```powershell
 $env:PYTHONPATH = "$PWD\tools\simulators"
 
 # Run the pipeline and report the recovered map, without opening a server.
-.\.venv\Scripts\python.exe -m stratum_sim uc1-real `
-    workspace\simulators\datasets\sim-YYYYMMDD-HHMMSS --classify-only
+.\.venv\Scripts\python.exe -m stratum_sim uc1-real input\bin\bin\004-02 --classify-only
 
 # Run once, then serve UC1_MV_CLASS on 127.0.0.1:18945 until Ctrl-C.
-.\.venv\Scripts\python.exe -m stratum_sim uc1-real `
-    workspace\simulators\datasets\sim-YYYYMMDD-HHMMSS
+.\.venv\Scripts\python.exe -m stratum_sim uc1-real input\bin\bin\004-02
 ```
 
 The pipeline runs once, before the server opens. A GPU run per cycle would turn
-a display refresh into a second of compute, and the dataset does not change
+a display refresh into a second of compute, and the case does not change
 between cycles.
 
 Inspect the session from a second shell:
@@ -153,11 +151,10 @@ not whether five arrived but whether anything other than `UC1_MV_CLASS` did.
 
 ### What the runner guarantees
 
-- **The marker interlock.** A dataset whose `raw.hdr` lacks
-  `STRATUM SIMULATED CUBE` is refused, and `--force-unmarked` is the only
-  escape. This is the same interlock SLIA-012 uses and it is not optional: it is
-  what physically prevents the pipeline from being pointed at a patient cube in
-  this prototype.
+- **Recorded cases only.** A folder whose `gtMap.hdr` does not carry the
+  `HSI Human Brain Database` marker is refused before the GPU runs and before
+  anything describes it, and there is no switch to override that. It is what
+  keeps the pipeline pointed at approved public data in this prototype.
 - **An exclusive lock.** `output/rgb/*.txt` are three fixed names shared by every
   dataset, so two runners in one staged build would interleave writes into the
   same three files and each would read the other's output. The lock file
@@ -168,30 +165,29 @@ not whether five arrived but whether anything other than `UC1_MV_CLASS` did.
   starts. A file that predates the run is a failure, never a result. An
   existence check could not tell this run's output from last week's.
 - **Loud failure.** A non-zero exit code, a missing output, a stale output, or
-  `Path too long` on stderr each stop the run. There is no fallback to the
-  arithmetic stand-in on any path: an operator who believed the real pipeline
-  ran when it did not would be the worst outcome this runner could have.
+  `Path too long` on stderr each stop the run. There is no fallback on any
+  path: an operator who believed the real pipeline ran when it did not would be
+  the worst outcome this runner could have.
 - **A model the dataset actually fits.** The staged `svm_model/` is sized for 93
   bands, and `main.cu` reads the header's band count out of `w_vector.bin`
   without checking how much it read - so a 40-band dataset would classify
   against a truncated model, and a 120-band one against uninitialised memory,
   both exiting 0 with a map that looks like a result. The runner checks the
   header's band count and all five model file sizes before starting the
-  process. The `svm_model/` inside a dataset folder is not a substitute: UC1
+  process. An `svm_model/` inside a dataset folder is not a substitute: UC1
   resolves `../../svm_model/*.bin` against its working directory, never against
   the dataset.
 - **A strict palette inverse.** The RGB triples are mapped back to classes
-  through SLIA-012's shared table read backwards. A triple that is not in the
+  through the shared table in `bmp.py` read backwards. A triple that is not in the
   table is reported with its count and first coordinates, never resolved to the
   nearest known colour.
 
-### The scene is named on the wire
+### The case is named on the wire
 
-`SLIAFlow.SimulationDetail` reads `real UC1 pipeline, synthetic tissue phantom`
-for a phantom dataset and `real UC1 pipeline, synthetic input` for anything
-else. The runner decides by looking for the phantom record in the dataset
-folder rather than by taking a flag, so the detail cannot disagree with the data
-that was actually read.
+`SLIAFlow.SimulationDetail` reads
+`real UC1 pipeline, recorded HSI case <case> (simulated acquisition)`. The runner
+takes the case name from the folder rather than from a flag, so the detail cannot
+disagree with the data that was actually read.
 
 ### One map, not five
 
@@ -199,71 +195,54 @@ The binary computes `tmdMap`, `majorityVotingProbabilityMap`, `svmProbability`
 and `knnProbability` on the device and then discards them; the write that would
 have surfaced them is inside a comment block at `main.cu` lines 164-174. So a
 real-UC1 session populates `majorityVotingMap` and leaves the other four
-absent. They are never substituted with zeros, and the real runner and the
-arithmetic stand-in are never run in the same session - five maps from two
-different boxes would imply UC1 produced all five.
+absent. They are never substituted with zeros.
 
 ## Measured behaviour
 
 Measured on the toolchain above, `nvidia-smi` sampled throughout each run
-against a 1190 MiB idle desktop baseline on the 8151 MiB card.
+against a 1190 MiB idle desktop baseline on the 8151 MiB card, at two cube sizes
+under `SLIA-013`:
 
-| Preset | Cube | Scene | UC1 internal time | Peak VRAM | Over baseline |
-| --- | --- | --- | --- | --- | --- |
-| `demo` | 160 x 120 x 93 | channel | 262.7 ms | 1325 MiB | 135 MiB |
-| `full` | 640 x 480 x 93 | channel | 622.3 ms | 1973 MiB | 783 MiB |
-| `demo` | 160 x 120 x 93 | phantom | 299.3 ms | 1325 MiB | 143 MiB |
-| `full` | 640 x 480 x 93 | phantom | 446.8 ms | 1973 MiB | 791 MiB |
+| Cube | Peak VRAM | Over baseline |
+| --- | --- | --- |
+| 160 x 120 x 93 | 1325 MiB | about 140 MiB |
+| 640 x 480 x 93 | 1973 MiB | about 790 MiB |
 
-The 8 GB card is nowhere near the limit at `full`, and the scene does not move
-the memory figures: they are set by the cube size. It does move the time,
-because it moves the K-means iteration count. On the channel scene K-means took
-11 iterations at `demo` and hit the 20-iteration cap from `parameters.txt` at
-`full` with an error of 0.001554 against a 1e-3 threshold, so that `full` result
-is the capped iterate rather than a converged one. On the phantom it converges
-in 3 iterations at `demo` and 2 at `full`, well inside the cap - the phantom's
-regions are spectrally further apart than the channel scene's texture.
+The memory figures are set by the cube size. Scaled linearly, the largest
+recorded case, 752 x 721, needs about 3.5 GiB, which fits on this card with less
+headroom than the demonstration case; that run is deferred until the pipeline is
+complete.
 
-Re-running on the same dataset is not byte-identical on a varied map: six
-consecutive `demo` runs on one phantom dataset changed 6 pixels of 19200
-(0.036 %), all of them on a class boundary. The reported K-means error varies in
-the sixth decimal place between runs. Both are ordinary floating-point
+On recorded case `004-02`, 345 x 389 x 93, the pipeline reported
+`Time simulation ---> 564.417 ms` in the 2026-09-16 session and `379.774 ms` in
+a later run the same day, with K-means converging in 18 iterations against the
+20-iteration cap in `parameters.txt`. Time moves with the K-means iteration
+count, so it varies by case as well as by size.
+
+Re-running on the same case is not byte-identical: the two `004-02` runs above
+recovered class counts `{1: 55948, 2: 7954, 3: 31589, 4: 38714}` and
+`{1: 55938, 2: 7954, 3: 31584, 4: 38729}`, and the reported K-means error
+differs in the sixth decimal place. Both are ordinary floating-point
 non-determinism in the GPU K-means reduction, which moves a borderline pixel
 between clusters; majority voting then hands it the other cluster's class.
 
-The byte-identical result recorded earlier was measured on a uniformly
-single-class map, which is byte-identical far more easily than a varied one, so
-it was never evidence of determinism.
-
 Treat this as bounded drift rather than as a defect to chase. SLIA-013 asks for
 at most 0.1% of pixels to change between runs on one dataset, every changed
-pixel on a class boundary, which is what the measurement shows; byte-identical
-output is not a requirement, because making the K-means reduction bit-stable
-would mean editing vendored UC1 source. A run that moved pixels away from class
-boundaries, or moved appreciably more of them, would be a real regression.
+pixel on a class boundary; byte-identical output is not a requirement, because
+making the K-means reduction bit-stable would mean editing vendored UC1 source. A
+run that moved pixels away from class boundaries, or moved appreciably more of
+them, would be a real regression.
 
-## What the scene has to look like
+## A map that shows nothing
 
-**A scene whose spectra are mixtures of camera colour curves is resolved to
-class 4, background, in every pixel.** That was measured on the channel-driven
-scene at both presets, and it is why the acquisition stand-in's default scene
-is now the tissue phantom.
-
-The reason is in `normalizeImgKernel_optimized`: UC1 min-max normalizes each
-pixel across its bands before the SVM, so only spectral *shape* reaches the
-classifier, never magnitude - and `w_vector.bin` is a linear model trained on
-real in-vivo brain reflectance. The channel scene was never spectrally
-degenerate; its shape was simply nothing the model had been asked about.
-
-The phantom builds that shape from haemoglobin absorption and a scattering
-power law instead, and UC1 then produces a two-class, spatially coherent map.
-**It is a plumbing demonstration and not a detector**: UC1 does not separate the
-phantom's cortex from its tumour-like region, and at `demo` it calls the
-vessels background. `docs/development/synthetic_tissue_phantom.md` records the
-full comparison, the parameters, and what may and may not be claimed from it.
+UC1 min-max normalizes each pixel across its bands before the SVM
+(`normalizeImgKernel_optimized`), so only spectral *shape* reaches the
+classifier, never magnitude, and `w_vector.bin` is a linear model trained on
+real in-vivo brain reflectance. An input whose spectra have no shape the model
+was trained on comes back as a single class.
 
 The classifier itself is never tuned, under any option. Changing
-`parameters.txt`, the SVM model, or vendored source to make an invented scene
-produce a colourful map would make every future result meaningless. The runner
-still reports a uniform map loudly - `uniformClassWarning` on stderr - so a
-scene that stops working says so.
+`parameters.txt`, the SVM model, or vendored source to make a case produce a
+different map would make every future result meaningless. The runner reports a
+uniform map loudly - `uniformClassWarning` on stderr - so an input the model
+does not recognise says so.

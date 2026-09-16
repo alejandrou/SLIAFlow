@@ -87,9 +87,10 @@ mode, which is transient widget state, defaults to off, is reset on entering
 the module and on scene close, and is never written to the parameter node or a
 saved scene.
 
-Real-algorithm-on-synthetic-input is still `simulated`. A genuine PCA, SVM or
-KNN run over an invented brain is not a genuine clinical result, so the origin
-gate stays binary: `external-genuine` or nothing.
+A real algorithm run on a simulated acquisition is still `simulated`. A genuine
+PCA, SVM or KNN run over a recorded cube whose acquisition was simulated is not a
+genuine clinical result, so the origin gate stays binary: `external-genuine` or
+nothing.
 
 Only two origin values are recognized. Absent, empty or unrecognized
 provenance is invalid, not a default, and reaches the result view under
@@ -116,9 +117,9 @@ SLIAFlow.SimulationDetail = <free text, display-only>
 ```
 
 The detail is optional and describes *how* a simulated result was produced -
-for example, `real UC1 pipeline, synthetic input` against `arithmetic stand-in,
-not a classifier`. Both are fake; they are not equally fake, and the second
-banner line is what lets a viewer tell them apart.
+for example, `real UC1 pipeline, recorded HSI case 004-02 (simulated
+acquisition)`, which names both the producer and the input. The second banner
+line is what lets a viewer read that.
 
 It is read only once the origin is already `simulated`, is collapsed to a
 single line and truncated before it reaches a text actor, and never appears in
@@ -136,9 +137,9 @@ PIPELINE, NOT A CLINICAL RESULT`; everything else, including an absent detail,
 gets `SIMULATED - NOT A GENUINE UC1 RESULT`. Both bar the result from clinical
 reading, and the second is the default precisely because a producer that stops
 describing itself must not be handed the softer wording. The distinction exists
-because the arithmetic stand-in is genuinely not a UC1 result, while the
-vendored pipeline run on an invented scene genuinely is one - and a banner an
-audience can see is factually wrong is a banner they stop believing. The banner is a pair of text actors, because one text actor
+because the vendored pipeline's output genuinely is a UC1 result, while a
+producer that does not say so cannot be vouched for - and a banner an audience
+can see is factually wrong is a banner they stop believing. The banner is a pair of text actors, because one text actor
 carries a single text property for its whole string and so cannot render a
 second line at a smaller size. The pair is added, removed and re-asserted as a
 unit, and is re-asserted on every successful refresh, because the slice view
@@ -225,7 +226,7 @@ so it describes the build SLIAFlow will actually run against.
 
 The source above says what the receiver should do; the table below is what it
 did. It was recorded by connecting a bare `vtkMRMLIGTLConnectorNode` to the
-SLIA-012 stand-in on `127.0.0.1:18945` under
+SLIA-012 arithmetic stand-in (retired in `SLIA-025`) on `127.0.0.1:18945` under
 `build\SLIAFlow\SlicerWithSLIAFlow.exe` and printing `GetAttributeNames()`
 and every value of each received node. All five map nodes carried exactly
 these names:
@@ -354,12 +355,10 @@ SLIAFlow must never infer `simulated` from a port or a hostname. A stand-in and
 the real application use the same port; the difference between them is what the
 metadata says, and nothing else.
 
-## SLIA-012 arithmetic stand-in
+## Result device names
 
-No UC1-to-OpenIGTLink wrapper exists upstream. The project therefore supplies a
-CUDA-free arithmetic stand-in under `tools/simulators/stratum_sim/uc1_sim.py` to
-prove the producer/consumer seam before SLIA-013 connects the genuine binary.
-It listens on `127.0.0.1:18945` and sends these five exact device names:
+These are the five exact device names for the five map roles, on
+`127.0.0.1:18945`:
 
 | Map role | Device name |
 | --- | --- |
@@ -369,29 +368,16 @@ It listens on `127.0.0.1:18945` and sends these five exact device names:
 | `svmProbability` | `UC1_SVM_PROB` |
 | `knnProbability` | `UC1_KNN_PROB` |
 
-The stand-in derives a redness-index map and a luminance map from the calibrated
-cube, feeds those two maps to four fixed logits, and produces the two
-probability maps first. `knnProbability` is the same arithmetic at temperature
-`1.6`, not a second algorithm. The elementwise mean of those probability maps
-then defines the class map, majority-voting probability map and tumour map. The
-rule has hand-chosen constants, was not fitted or validated, and has no
-diagnostic meaning.
-
-Before each image send, the producer re-checks finite values, contract ranges,
-probability sums, class values, and the relationships among all five maps. The
-sender also requires `STRATUM SIMULATED CUBE` in `raw.hdr`; the explicit
-`--force-unmarked` switch is reserved for an approved synthetic test folder.
-That interlock is a data-safety boundary, not evidence that any result is
-clinical. An optional `UC1_SIM_NOTICE` STRING message repeats the simulated
-provenance on the wire.
+`SLIA-012` first sent all five from a CUDA-free arithmetic stand-in, to prove the
+producer/consumer seam before `SLIA-013` connected the genuine binary. `SLIA-025`
+retired that stand-in, so today the genuine runner is the only map producer.
 
 ## SLIA-013 genuine UC1 runner
 
 The genuine pipeline is connected by `tools/simulators/stratum_sim/uc1_runner.py`,
 which builds nothing of its own: it runs the vendored UC1 binary, compiled
-unmodified, and reads back what that binary wrote. It listens on the same
-`127.0.0.1:18945` and implements the same `Classifier` seam as the stand-in, so
-swapping one for the other is stopping a process and starting another.
+unmodified, and reads back what that binary wrote. It listens on
+`127.0.0.1:18945` and implements the `Classifier` seam in `contract.py`.
 
 ### A real-UC1 producer supplies one of the five roles
 
@@ -418,8 +404,7 @@ Three options exist for the other four, and the chosen default is the third.
 
 An absent map is `None` in `Uc1Maps` and is never substituted with zeros. A
 consumer must be able to read "this producer did not produce this map" without
-being handed a fabricated one, and the real runner and the arithmetic stand-in
-are never run in the same session.
+being handed a fabricated one.
 
 ### Wire metadata the real runner stamps
 
@@ -428,22 +413,22 @@ are never run in the same session.
 | `SLIAFlow.ResultMap` | `majorityVotingMap` |
 | `SLIAFlow.DeviceName` | `UC1_MV_CLASS` |
 | `SLIAFlow.DataOrigin` | `simulated` |
-| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, synthetic input`; `real UC1 pipeline, synthetic tissue phantom` for a phantom dataset; or `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` for a recorded database case |
+| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` |
 | `SLIAFlow.CaptureId` | the run's capture ID, also on `UC1_RGB` when it is sent |
 
 The origin is `simulated` even though the algorithm is genuine, and that is the
 point of `SimulationDetail` carrying the distinction. A genuine algorithm run
-over an invented scene is not a genuine clinical result, so the origin describes
-the data and the detail describes how it was produced. Header version 2 applies
+over a recorded cube whose acquisition was simulated is not a genuine clinical
+result, so the origin describes the acquisition and the detail describes the
+producer and the input. Header version 2 applies
 here for the same reason it applies everywhere else: at version 1 all five keys
 are silently dropped.
 
 ### Recovering the class map
 
 The binary emits colour, not classes, so the class map is recovered by inverting
-the palette. The forward table SLIA-012 writes with and the inverse SLIA-013
-reads with are one definition in `bmp.py`, exported both ways, so they cannot
-drift apart. An RGB triple that is not in the table is reported with its count
+the palette. The forward table and the inverse SLIA-013 reads with are one
+definition in `bmp.py`, exported both ways, so they cannot drift apart. An RGB triple that is not in the table is reported with its count
 and first offending coordinates and fails the run; it is never resolved to the
 nearest known colour, because a nearest-colour fallback would turn an unexpected
 pipeline output into a plausible-looking class map.
@@ -455,44 +440,31 @@ run that left last week's files behind would pass one. A file that predates the
 run fails it.
 
 `docs/development/uc1_local_build.md` records the build, the measured runtime and
-VRAM, and what the scene has to look like before UC1 resolves it to anything.
+VRAM, and why a map can come back as a single class.
 
-### The input scene is part of the provenance
+### The input is part of the provenance
 
-Three inputs exist and they are not the same kind of thing, so every stream names
-which one produced a message:
+Every cube is a recorded case of the public, anonymized HSI Human Brain Database
+(`SLIA-023`), and every stream names what produced a message:
 
-| Input | LiveView detail | Map-stream detail | What UC1 makes of it |
-| --- | --- | --- | --- |
-| channel | `acquisition stand-in, synthetic scene` | `real UC1 pipeline, synthetic input` | every pixel class 4, background |
-| tissue phantom | `acquisition stand-in, synthetic tissue phantom` | `real UC1 pipeline, synthetic tissue phantom` | two classes, coherent regions |
-| recorded case (`SLIA-023`) | `acquisition stand-in, laptop camera`, which names the camera and never the case | `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` | not characterised here |
+| Stream | Detail |
+| --- | --- |
+| `LiveView` | `acquisition stand-in, laptop camera`, which names the camera and never the case |
+| `HSCube` | `acquisition stand-in, recorded HSI case <case> (simulated acquisition)` |
+| `UC1_RGB`, `UC1_MV_CLASS` | `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` |
 
-A recorded case is a case of the public, anonymized HSI Human Brain Database. Its
-`HSCube` message carries `acquisition stand-in, recorded HSI case <case> (simulated
-acquisition)`. It is never described as synthetic: that would understate what is
-on screen, which is the direction of error the simulated banner does not guard
-against.
+A recorded case is always described as one. A detail that did not name the case
+would leave a viewer to guess what is on screen.
 
-The runner decides from the folder itself - the `gtMap.hdr` marker for a recorded
-case, the phantom record for a phantom - not from a flag, so the detail cannot
-disagree with the data that was read. `DataOrigin` stays `simulated` in every
-case: in this repository the acquisition is always simulated, and the origin
-never softens because the algorithm is genuine or the cube was recorded.
+The runner reads the case from the folder itself - a folder is a recorded case
+only when its `gtMap.hdr` carries the database marker - not from a flag, so the
+detail cannot disagree with the data that was read, and any other folder is
+refused. `DataOrigin` stays `simulated` in every case: in this repository the
+acquisition is always simulated, and the origin never softens because the
+algorithm is genuine or the cube was recorded.
 
-The phantom's spectra are built from a haemoglobin absorption and scattering
-model so that they have the *shape* of brain reflectance, because UC1 min-max
-normalizes each pixel across its bands before its SVM and shape is all that
-classifier ever sees. That is what makes a demonstration possible, and it is
-also what makes the labelling delicate: a red area over the phantom's
-tumour-like region **is not a detection**, and UC1 in fact fails to separate the
-phantom's cortex from its tumour-like region at all.
-`docs/development/synthetic_tissue_phantom.md` records the model, the measured
-agreement, and what may and may not be claimed.
-
-A consumer must not branch on the detail. It is display-only, it is free text,
-and a new scene will add a new string: SLIAFlow reads it to write the second
-banner line and for nothing else.
+A consumer must not branch on the detail. It is display-only and free text:
+SLIAFlow reads it to write the second banner line and for nothing else.
 
 ## SLIA-024 cube-derived background
 
@@ -511,9 +483,8 @@ Wire metadata: `SLIAFlow.DeviceName = UC1_RGB`, and `SLIAFlow.DataOrigin`,
 
 `SLIAFlow.CaptureId` is an opaque value, one per classification of one cube. It is
 never reused for another cube or another classification, and a resend of a
-result already computed reuses it. Both producers, the genuine runner and the
-arithmetic stand-in, make one random value per run and send it in every cycle, on
-every map and on `UC1_RGB` when it is sent. It identifies nothing to a person. It
+result already computed reuses it. The genuine runner makes one random value per
+run and sends it in every cycle, on the map and on `UC1_RGB` when it is sent. It identifies nothing to a person. It
 exists so that a `UC1_RGB` retained in the scene from another run - same device,
 origin, detail and size - cannot be composited under a later map.
 

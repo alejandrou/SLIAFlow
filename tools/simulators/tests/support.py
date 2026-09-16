@@ -1,14 +1,14 @@
 """Shared helpers for the simulator tests.
 
-The UC1 re-implementations here exist so the tests check the written dataset
-against the consumer's own parsing rules rather than against the writer's idea
-of them.
+Every dataset folder a test builds is laid out like a recorded case of the HSI
+Human Brain Database and holds counting placeholders, not imagery. The one test
+that needs a real cube reads `RECORDED_CASE_004_02` where it lies.
 """
 
 from __future__ import annotations
 
 import hashlib
-import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy
@@ -28,17 +28,13 @@ UC1_PARAMETERS_PATH = (
     / "parameters.txt"
 )
 
-# `main.cu` reads parameters.txt with successive fscanf calls in a fixed order:
-# checkHySime, then numberOfPcaBands, then pca_epsilon, then numberOfClasses.
-PCA_BAND_COUNT_VALUE_INDEX = 1
-
-# `data_loader.cpp` reads header lines with `fgets(line, MAX_PATH_LENGTH, file)`
-# and `MAX_PATH_LENGTH` is 128, so a longer line is split mid-parse.
-UC1_MAX_PATH_LENGTH = 128
-
 TINY_DATASET_SAMPLES = 8
 TINY_DATASET_LINES = 4
 TINY_DATASET_BANDS = 6
+
+# The recorded case the genuine UC1 integration test classifies. Read, never
+# written; `input/` is the approved location in the medical-data policy.
+RECORDED_CASE_004_02 = REPOSITORY_ROOT / "input" / "bin" / "bin" / "004-02"
 
 
 UC1_SVM_MODEL_PATH = UC1_PARAMETERS_PATH.parents[2] / "svm_model"
@@ -46,19 +42,6 @@ UC1_SVM_MODEL_PATH = UC1_PARAMETERS_PATH.parents[2] / "svm_model"
 # The staged build root the build script writes, used by the tests that exercise
 # the real binary. Absent until `scripts/development/build-uc1.ps1` has run.
 STAGED_UC1_BUILD_ROOT = REPOSITORY_ROOT / "build" / "uc1" / "UC1"
-
-
-def buildTinyCubes() -> tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray]:
-    """Build the small ENVI fixture shared by writer and contract tests."""
-    shape = (TINY_DATASET_BANDS, TINY_DATASET_LINES, TINY_DATASET_SAMPLES)
-    voxelCount = numpy.prod(shape)
-    darkCube = numpy.full(shape, 1200, dtype=numpy.uint16)
-    whiteCube = numpy.full(shape, 51200, dtype=numpy.uint16)
-    rawCube = (
-        numpy.arange(voxelCount, dtype=numpy.uint16).reshape(shape) % 40000 + 1200
-    ).astype(numpy.uint16)
-    wavelengthsNm = numpy.linspace(400.482, 1000.73, TINY_DATASET_BANDS)
-    return rawCube, whiteCube, darkCube, wavelengthsNm
 
 
 def pinnedRequirement(requirementsPath: Path, packageName: str) -> str:
@@ -91,77 +74,6 @@ def stagedUc1Executable() -> Path | None:
     return executable if executable.is_file() else None
 
 
-def readUc1PcaBandCount() -> int | None:
-    """Return the PCA component count UC1 requests, or None when unavailable."""
-    if not UC1_PARAMETERS_PATH.is_file():
-        return None
-    values = UC1_PARAMETERS_PATH.read_text(encoding="ascii").split()
-    if len(values) <= PCA_BAND_COUNT_VALUE_INDEX:
-        return None
-    return int(float(values[PCA_BAND_COUNT_VALUE_INDEX]))
-
-
-def parseHeaderTheWayUc1Does(headerPath: Path) -> dict[str, int]:
-    """Re-implement the three-key header scan in `data_loader.cpp`.
-
-    The loop reads at most `MAX_PATH_LENGTH` bytes per line and stops as soon as
-    three of `bands`, `lines` and `samples` have been matched, so a key that
-    only appears after the wavelength block is never reached.
-    """
-    found: dict[str, int] = {}
-    patterns = {
-        "bands": re.compile(r"^bands = ([+-]?\d+)"),
-        "lines": re.compile(r"^lines = ([+-]?\d+)"),
-        "samples": re.compile(r"^samples = ([+-]?\d+)"),
-    }
-
-    with headerPath.open("rb") as headerFile:
-        while len(found) < 3:
-            line = headerFile.readline(UC1_MAX_PATH_LENGTH - 1)
-            if not line:
-                break
-            text = line.decode("ascii", errors="replace")
-            for key, pattern in patterns.items():
-                if key in found:
-                    continue
-                match = pattern.match(text)
-                if match is not None:
-                    found[key] = int(match.group(1))
-                    break
-    return found
-
-
-def parseHeaderTheWayHsCubeLoaderDoes(headerPath: Path) -> dict[str, str]:
-    """Re-implement the key/value scan in `HSCubeLoader.cpp`.
-
-    Everything from a `;` onwards is a comment, and each remaining `key = value`
-    line contributes one entry.
-    """
-    values: dict[str, str] = {}
-    for rawLine in headerPath.read_text(encoding="ascii").splitlines():
-        commentIndex = rawLine.find(";")
-        line = rawLine if commentIndex < 0 else rawLine[:commentIndex]
-        separatorIndex = line.find("=")
-        if separatorIndex < 0:
-            continue
-        key = line[:separatorIndex].strip().lower()
-        value = line[separatorIndex + 1:].strip()
-        if key:
-            values[key] = value
-    return values
-
-
-def makeTestFrame(samples: int, lines: int) -> numpy.ndarray:
-    """Build a deterministic BGR frame with all three channels distinguishable."""
-    x = numpy.linspace(0.0, 1.0, samples, dtype=numpy.float32)[None, :]
-    y = numpy.linspace(0.0, 1.0, lines, dtype=numpy.float32)[:, None]
-    blue = x + 0.0 * y
-    green = y + 0.0 * x
-    red = 0.5 * (x + y[::-1])
-    frame = numpy.stack([blue, green, red], axis=-1)
-    return numpy.clip(frame * 255.0, 0.0, 255.0).astype(numpy.uint8)
-
-
 # The marker the HSI Human Brain Database stamps into every case's `gtMap.hdr`.
 # Read from all 61 cases in `input/bin/bin` on 2026-09-11 and again on
 # 2026-09-13. It is not in `raw.hdr`.
@@ -174,18 +86,28 @@ RECORDED_WAVELENGTH_STEP_NM = 5
 RECORDED_VALUES_PER_WAVELENGTH_LINE = 6
 
 
-def buildRecordedRawHeader(samples: int, lines: int, bands: int, description: str = "") -> str:
+def buildRecordedRawHeader(
+    samples: int,
+    lines: int,
+    bands: int,
+    description: str = "",
+    wavelengthsNm: Sequence[float] | None = None,
+) -> str:
     """Reproduce the layout every recorded `raw.hdr` has.
 
     The two properties a reader has to survive are reproduced rather than
     tidied: the wavelength block is closed by a `}` on its last value line, and
     `lines` and `samples` come after the block. Value lines end in `", "` before
-    the newline, as they do on disk.
+    the newline, as they do on disk. The recorded grid is used unless a test
+    names other wavelengths.
     """
-    wavelengths = [
-        str(RECORDED_FIRST_WAVELENGTH_NM + RECORDED_WAVELENGTH_STEP_NM * index)
-        for index in range(bands)
-    ]
+    if wavelengthsNm is None:
+        wavelengths = [
+            str(RECORDED_FIRST_WAVELENGTH_NM + RECORDED_WAVELENGTH_STEP_NM * index)
+            for index in range(bands)
+        ]
+    else:
+        wavelengths = [f"{float(value):g}" for value in wavelengthsNm]
     rows = [
         ", ".join(wavelengths[start:start + RECORDED_VALUES_PER_WAVELENGTH_LINE])
         for start in range(0, bands, RECORDED_VALUES_PER_WAVELENGTH_LINE)
@@ -245,24 +167,39 @@ def writeRecordedCaseFixture(
     bands: int = TINY_DATASET_BANDS,
     groundTruthMarker: str = RECORDED_DATABASE_MARKER,
     rawHeaderDescription: str = "",
+    wavelengthsNm: Sequence[float] | None = None,
+    rawCube: numpy.ndarray | None = None,
+    whiteLevel: int = 51200,
+    darkLevel: int = 1200,
 ) -> Path:
     """Write a tiny test folder laid out like a recorded database case.
 
-    The arrays are counting placeholders, not imagery. Only the file set and the
-    two header layouts copy a recorded case, because those are what the reader
-    and the identification have to handle. Returns the resolved folder.
+    The arrays are counting placeholders, not imagery, unless a test passes the
+    exact `rawCube` and reference levels an arithmetic check needs. Only the file
+    set and the two header layouts copy a recorded case, because those are what
+    the reader and the identification have to handle. Returns the resolved folder.
     """
     caseFolder = Path(caseFolder)
     caseFolder.mkdir(parents=True)
 
+    if wavelengthsNm is not None:
+        bands = len(wavelengthsNm)
     shape = (bands, lines, samples)
     voxelCount = int(numpy.prod(shape))
+    if rawCube is None:
+        rawValues = numpy.arange(voxelCount, dtype=numpy.int64) % 40000 + 1200
+    else:
+        if rawCube.shape != shape:
+            raise ValueError(f"rawCube has shape {rawCube.shape}, not {shape}.")
+        rawValues = rawCube.reshape(-1)
     cubes = {
-        "raw": numpy.arange(voxelCount, dtype=numpy.int64) % 40000 + 1200,
-        "whiteReference": numpy.full(voxelCount, 51200),
-        "darkReference": numpy.full(voxelCount, 1200),
+        "raw": rawValues,
+        "whiteReference": numpy.full(voxelCount, whiteLevel),
+        "darkReference": numpy.full(voxelCount, darkLevel),
     }
-    headerBytes = buildRecordedRawHeader(samples, lines, bands, rawHeaderDescription).encode("ascii")
+    headerBytes = buildRecordedRawHeader(
+        samples, lines, bands, rawHeaderDescription, wavelengthsNm
+    ).encode("ascii")
     for stem, values in cubes.items():
         (caseFolder / f"{stem}.hdr").write_bytes(headerBytes)
         (caseFolder / f"{stem}.dat").write_bytes(numpy.asarray(values, dtype="<u2").tobytes())

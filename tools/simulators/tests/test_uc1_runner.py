@@ -11,7 +11,6 @@ from __future__ import annotations
 import contextlib
 import io
 import os
-import shutil
 import socket
 import tempfile
 import unittest
@@ -22,7 +21,7 @@ from unittest import mock
 
 import numpy
 
-from stratum_sim import bmp, contract, envi, spectra, tissue, uc1_maps, uc1_runner
+from stratum_sim import bmp, contract, envi, uc1_maps, uc1_runner
 from tests import support
 
 # A 2x3 class map, one of every class plus a repeat, used as the recorded run.
@@ -67,13 +66,14 @@ def makeStagedBuild(root: Path, modelBands: int = uc1_runner.UC1_MODEL_BAND_COUN
     return build
 
 
-def makeMarkedDataset(
-    datasetFolder: Path,
+def makeRecordedCase(
+    caseFolder: Path,
     samples: int,
     lines: int,
     bands: int = uc1_runner.UC1_MODEL_BAND_COUNT,
+    **keywords,
 ) -> contract.DatasetRef:
-    """Write a small marked dataset with the shape the fixtures describe.
+    """Write a small folder laid out like a recorded case, shaped like the fixtures.
 
     The band count defaults to the one the staged SVM model is sized for. A
     fixture with a convenient four bands would exercise a configuration the real
@@ -81,15 +81,8 @@ def makeMarkedDataset(
     reads `numberOfBands` weights per classifier out of a file sized for 93 and
     never checks how many it got.
     """
-    shape = (bands, lines, samples)
-    envi.writeDataset(
-        datasetFolder,
-        numpy.full(shape, 2500, dtype=numpy.uint16),
-        numpy.full(shape, 5000, dtype=numpy.uint16),
-        numpy.full(shape, 1000, dtype=numpy.uint16),
-        numpy.linspace(400.482, 1000.73, bands, dtype=numpy.float64),
-    )
-    return contract.loadDataset(datasetFolder)
+    support.writeRecordedCaseFixture(caseFolder, samples=samples, lines=lines, bands=bands, **keywords)
+    return contract.loadDataset(caseFolder)
 
 
 class RecordedRun:
@@ -149,14 +142,14 @@ class RecordedRun:
 
 
 class Uc1RunnerTestCase(unittest.TestCase):
-    """Set up a staged build and a marked dataset shaped like the fixture."""
+    """Set up a staged build and a recorded-case fixture shaped like the class map."""
 
     def setUp(self) -> None:
         self._temporaryDirectory = tempfile.TemporaryDirectory()
         root = Path(self._temporaryDirectory.name)
         self.build = makeStagedBuild(root / "build" / "uc1" / "UC1")
         lines, samples = FIXTURE_CLASS_MAP.shape
-        self.dataset = makeMarkedDataset(root / "sim-20260903-000000", samples, lines)
+        self.dataset = makeRecordedCase(root / "004-02", samples, lines)
         self.datasetName = self.dataset.folder.name
         self.rgb = bmp.classMapToRgb(FIXTURE_CLASS_MAP)
 
@@ -322,30 +315,10 @@ class ProcessFailureTest(Uc1RunnerTestCase):
         self.assertIn("code 3", message)
         self.assertIn("CUDA error 999", message)
 
-        # The failure mode this card forbids: a runner that falls back to the
-        # arithmetic stand-in would have returned five valid maps here, and the
-        # operator would believe the real pipeline ran. The assertRaises above
-        # proves that no map result was returned.
-
-
-class MarkerInterlockTest(Uc1RunnerTestCase):
-    def test_unmarkedDatasetIsRefused(self) -> None:
-        headerPath = self.dataset.folder / envi.HEADER_FILE_NAME
-        headerPath.write_text(
-            headerPath.read_text(encoding="ascii").replace(envi.DATASET_MARKER, "UNMARKED"),
-            encoding="ascii",
-        )
-        self.dataset = contract.loadDataset(self.dataset.folder)
-        process = RecordedRun(self.build, self.datasetName, self.rgb)
-
-        with self.assertRaises(uc1_maps.SimulatedMarkerRequiredError) as caught:
-            self.classifyWith(process)
-
-        self.assertIn(envi.DATASET_MARKER, str(caught.exception))
-        self.assertEqual(process.commands, [])
-
-        maps = self.classifyWith(process, requireSimulatedMarker=False)
-        self.assertEqual(maps.presentMapNames(), ("majorityVotingMap",))
+        # The failure mode this card forbids: a runner that fell back to anything
+        # else would have returned a valid map here, and the operator would
+        # believe the real pipeline ran. The assertRaises above proves that no
+        # map result was returned.
 
 
 class ExclusiveLockTest(Uc1RunnerTestCase):
@@ -369,7 +342,9 @@ class WireMetadataTest(Uc1RunnerTestCase):
     def test_realRunnerSendsOnlyTheClassMapWithCompleteProvenance(self) -> None:
         maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
 
-        messages = list(uc1_runner.mapMessages(maps))
+        messages = list(
+            uc1_runner.mapMessages(maps, uc1_runner.simulationDetailForDataset(self.dataset))
+        )
 
         self.assertEqual(len(messages), 1)
         image, deviceName, metadata = messages[0]
@@ -385,10 +360,11 @@ class WireMetadataTest(Uc1RunnerTestCase):
                 contract.METADATA_RESULT_MAP_KEY: "majorityVotingMap",
                 contract.METADATA_DEVICE_NAME_KEY: "UC1_MV_CLASS",
                 contract.METADATA_DATA_ORIGIN_KEY: contract.DATA_ORIGIN_SIMULATED,
-                contract.METADATA_SIMULATION_DETAIL_KEY: "real UC1 pipeline, synthetic input",
+                contract.METADATA_SIMULATION_DETAIL_KEY: (
+                    "real UC1 pipeline, recorded HSI case 004-02 (simulated acquisition)"
+                ),
             },
         )
-        self.assertEqual(uc1_runner.SIMULATION_DETAIL, "real UC1 pipeline, synthetic input")
 
 
 class BuildLayoutTest(Uc1RunnerTestCase):
@@ -431,13 +407,12 @@ class ModelCompatibilityTest(Uc1RunnerTestCase):
     """The staged model is sized for one band count and cannot say so itself."""
 
     def test_datasetWithADifferentBandCountIsRefusedBeforeTheProcessStarts(self) -> None:
-        # 40 bands is inside everything the acquisition stand-in documents - the
-        # floor is 8 - so this is reachable from a supported configuration, not
-        # from a corrupted file. UC1 would read 40 weights per classifier out of
-        # a file holding 93 and produce a map that looks exactly like a result.
+        # A header is what UC1 trusts for the band count. UC1 would read 40
+        # weights per classifier out of a file holding 93 and produce a map that
+        # looks exactly like a result.
         lines, samples = FIXTURE_CLASS_MAP.shape
-        dataset = makeMarkedDataset(
-            self.dataset.folder.parent / "sim-20260903-000001", samples, lines, bands=40
+        dataset = makeRecordedCase(
+            self.dataset.folder.parent / "005-01", samples, lines, bands=40
         )
         process = RecordedRun(self.build, dataset.folder.name, self.rgb)
         classifier = uc1_runner.RealUc1Classifier(build=self.build, processRunner=process)
@@ -452,14 +427,17 @@ class ModelCompatibilityTest(Uc1RunnerTestCase):
         self.assertEqual(process.commands, [])
 
     def test_datasetOwnSvmModelIsNotAcceptedAsASubstitute(self) -> None:
-        # `envi.writeDataset` puts a correctly sized model inside the dataset
-        # folder, which is not where UC1 looks. Its presence must not make the
-        # band-count check pass.
+        # A model sized for the dataset, inside the dataset folder, is not where
+        # UC1 looks. Its presence must not make the band-count check pass.
         lines, samples = FIXTURE_CLASS_MAP.shape
-        dataset = makeMarkedDataset(
-            self.dataset.folder.parent / "sim-20260903-000002", samples, lines, bands=40
+        dataset = makeRecordedCase(
+            self.dataset.folder.parent / "005-02", samples, lines, bands=40
         )
-        self.assertTrue((dataset.folder / envi.SVM_MODEL_DIRECTORY_NAME).is_dir())
+        ownModel = dataset.folder / envi.SVM_MODEL_DIRECTORY_NAME
+        ownModel.mkdir()
+        (ownModel / envi.WEIGHT_VECTOR_FILE_NAME).write_bytes(
+            bytes(40 * envi.SVM_BINARY_CLASSIFIER_COUNT * 4)
+        )
 
         classifier = uc1_runner.RealUc1Classifier(
             build=self.build, processRunner=RecordedRun(self.build, dataset.folder.name, self.rgb)
@@ -510,18 +488,16 @@ class ModelCompatibilityTest(Uc1RunnerTestCase):
                 self.assertEqual((vendoredModel / fileName).stat().st_size, expectedSize)
 
 
-class SceneProvenanceTest(Uc1RunnerTestCase):
-    """A result node has to be able to say which scene the pipeline was fed."""
+class ProvenanceTest(Uc1RunnerTestCase):
+    """A result node has to be able to say which recorded case the pipeline was fed."""
 
-    def test_phantomDatasetIsNamedOnTheWire(self) -> None:
-        tissue.writePhantomRecord(
-            self.dataset.folder, tissue.phantomRegionMap(*FIXTURE_CLASS_MAP.shape)
-        )
+    EXPECTED_DETAIL = "real UC1 pipeline, recorded HSI case 004-02 (simulated acquisition)"
+
+    def test_theCaseIsNamedOnTheWire(self) -> None:
         maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
 
         detail = uc1_runner.simulationDetailForDataset(self.dataset)
-        self.assertEqual(detail, uc1_runner.SIMULATION_DETAIL_PHANTOM)
-        self.assertIn("tissue phantom", detail)
+        self.assertEqual(detail, self.EXPECTED_DETAIL)
 
         (_, _, metadata), = uc1_runner.mapMessages(maps, detail)
         self.assertEqual(metadata[contract.METADATA_SIMULATION_DETAIL_KEY], detail)
@@ -529,15 +505,6 @@ class SceneProvenanceTest(Uc1RunnerTestCase):
         self.assertEqual(
             metadata[contract.METADATA_DATA_ORIGIN_KEY], contract.DATA_ORIGIN_SIMULATED
         )
-
-    def test_datasetWithoutAPhantomRecordKeepsTheOriginalDetail(self) -> None:
-        self.assertEqual(
-            uc1_runner.simulationDetailForDataset(self.dataset), uc1_runner.SIMULATION_DETAIL
-        )
-        self.assertEqual(uc1_runner.SIMULATION_DETAIL, "real UC1 pipeline, synthetic input")
-
-    def test_theTwoDetailsAreDistinguishable(self) -> None:
-        self.assertNotEqual(uc1_runner.SIMULATION_DETAIL, uc1_runner.SIMULATION_DETAIL_PHANTOM)
 
     def test_sendFailureDoesNotReportACompleteMapSet(self) -> None:
         maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
@@ -551,10 +518,10 @@ class SceneProvenanceTest(Uc1RunnerTestCase):
                 return False
 
         server = RejectingServer()
-        self.assertFalse(uc1_runner.sendMaps(server, maps))
+        self.assertFalse(uc1_runner.sendMaps(server, maps, self.EXPECTED_DETAIL))
         self.assertEqual(len(server.calls), 1)
 
-    def test_servicePropagatesBothDatasetSceneDetails(self) -> None:
+    def test_servicePropagatesTheCaseDetail(self) -> None:
         class Classifier:
             def __init__(self, maps):
                 self.maps = maps
@@ -579,47 +546,34 @@ class SceneProvenanceTest(Uc1RunnerTestCase):
             requested = False
 
         maps = self.classifyWith(RecordedRun(self.build, self.datasetName, self.rgb))
-        for isPhantom, expectedDetail in (
-            (False, uc1_runner.SIMULATION_DETAIL),
-            (True, uc1_runner.SIMULATION_DETAIL_PHANTOM),
+        observedDetails = []
+        with (
+            mock.patch.object(
+                uc1_runner.igtl_transport,
+                "ImageStreamServer",
+                return_value=Context(Server()),
+            ),
+            mock.patch.object(
+                uc1_runner.igtl_transport,
+                "InterruptFlag",
+                return_value=Context(Interrupt()),
+            ),
+            mock.patch.object(
+                uc1_runner,
+                "sendMaps",
+                side_effect=lambda _server, _maps, detail, *_background, observed=observedDetails: (
+                    observed.append(detail) or True
+                ),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
         ):
-            with self.subTest(isPhantom=isPhantom):
-                recordPaths = ()
-                if isPhantom:
-                    recordPaths = tissue.writePhantomRecord(
-                        self.dataset.folder,
-                        tissue.phantomRegionMap(*FIXTURE_CLASS_MAP.shape),
-                    )
-                observedDetails = []
-                try:
-                    with (
-                        mock.patch.object(
-                            uc1_runner.igtl_transport,
-                            "ImageStreamServer",
-                            return_value=Context(Server()),
-                        ),
-                        mock.patch.object(
-                            uc1_runner.igtl_transport,
-                            "InterruptFlag",
-                            return_value=Context(Interrupt()),
-                        ),
-                        mock.patch.object(
-                            uc1_runner,
-                            "sendMaps",
-                            side_effect=lambda _server, _maps, detail, *_background, observed=observedDetails: (
-                                observed.append(detail) or True
-                            ),
-                        ),
-                    ):
-                        completed = uc1_runner.streamMaps(
-                            self.dataset, Classifier(maps), cycles=1, intervalSec=0.0
-                        )
-                finally:
-                    for recordPath in recordPaths:
-                        recordPath.unlink(missing_ok=True)
+            completed = uc1_runner.streamMaps(
+                self.dataset, Classifier(maps), cycles=1, intervalSec=0.0
+            )
 
-                self.assertEqual(completed, 1)
-                self.assertEqual(observedDetails, [expectedDetail])
+        self.assertEqual(completed, 1)
+        self.assertEqual(observedDetails, [self.EXPECTED_DETAIL])
 
 
 # The recorded database grid: 440 to 900 nm in 5 nm steps, 93 bands. Read from
@@ -637,15 +591,15 @@ class RgbBackgroundTest(Uc1RunnerTestCase):
     ) -> contract.DatasetRef:
         lines, samples = FIXTURE_CLASS_MAP.shape
         shape = (wavelengthsNm.size, lines, samples)
-        folder = Path(self._temporaryDirectory.name) / "sim-20260916-000000"
-        envi.writeDataset(
-            folder,
-            numpy.full(shape, 2500, dtype=numpy.uint16) if raw is None else raw,
-            numpy.full(shape, 5000, dtype=numpy.uint16),
-            numpy.full(shape, 1000, dtype=numpy.uint16),
-            wavelengthsNm,
+        return makeRecordedCase(
+            Path(self._temporaryDirectory.name) / "008-01",
+            samples,
+            lines,
+            wavelengthsNm=wavelengthsNm,
+            rawCube=numpy.full(shape, 2500, dtype=numpy.uint16) if raw is None else raw,
+            whiteLevel=5000,
+            darkLevel=1000,
         )
-        return contract.loadDataset(folder)
 
     def test_resolvesRgbBandsByWavelength(self) -> None:
         dataset = self.writeGridDataset(RECORDED_GRID_NM)
@@ -1012,14 +966,12 @@ class RecordedCaseRunnerTest(unittest.TestCase):
         )
         return contract.loadDataset(caseFolder)
 
-    def classify(self, dataset: contract.DatasetRef, **keywords):
+    def classify(self, dataset: contract.DatasetRef):
         process = RecordedRun(self.build, dataset.folder.name, self.rgb)
-        classifier = uc1_runner.RealUc1Classifier(
-            build=self.build, processRunner=process, **keywords
-        )
+        classifier = uc1_runner.RealUc1Classifier(build=self.build, processRunner=process)
         return classifier.classify(dataset), process
 
-    def test_recordedCaseRunsWithoutForceUnmarked(self) -> None:
+    def test_recordedCaseRuns(self) -> None:
         maps, process = self.classify(self.writeCase())
 
         self.assertEqual(maps.presentMapNames(), ("majorityVotingMap",))
@@ -1054,26 +1006,34 @@ class RecordedCaseRunnerTest(unittest.TestCase):
                 self.assertTrue(text)
                 self.assertNotIn("synthetic", text.lower())
 
-    def test_unidentifiedFolderIsStillRefused(self) -> None:
+    def test_unidentifiedFolderIsRefusedWithNoOverride(self) -> None:
         dataset = self.writeCase(groundTruthMarker="")
         process = RecordedRun(self.build, dataset.folder.name, self.rgb)
         classifier = uc1_runner.RealUc1Classifier(build=self.build, processRunner=process)
 
-        with self.assertRaises(uc1_maps.SimulatedMarkerRequiredError) as caught:
+        with self.assertRaises(uc1_runner.Uc1UnrecordedInputError) as caught:
             classifier.classify(dataset)
 
-        # The wording `uc1_runner.py` used before recorded cases existed, at
-        # commit 3ff2f38. A folder that is neither kind meets exactly that.
-        self.assertEqual(
-            str(caught.exception),
-            f"Refusing to run UC1 on {dataset.folder}: raw.hdr lacks the STRATUM SIMULATED "
-            "CUBE marker. Pass --force-unmarked only for an explicitly approved synthetic "
-            "test dataset.",
-        )
+        message = str(caught.exception)
+        self.assertIn(str(dataset.folder), message)
+        self.assertIn(envi.RECORDED_DATASET_MARKER, message)
+        self.assertIn(envi.GROUND_TRUTH_HEADER_FILE_NAME, message)
         self.assertEqual(process.commands, [])
 
-        maps, _ = self.classify(dataset, requireSimulatedMarker=False)
-        self.assertEqual(maps.presentMapNames(), ("majorityVotingMap",))
+        # SLIA-025: nothing lets a folder that is not a recorded case through.
+        with self.assertRaises(TypeError):
+            uc1_runner.RealUc1Classifier(build=self.build, requireSimulatedMarker=False)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            uc1_runner.buildArgumentParser().parse_args([str(dataset.folder), "--force-unmarked"])
+
+        # From the command line the refusal comes before anything describes the
+        # folder, so it is never printed as a recorded case first.
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exitCode = uc1_runner.main([str(dataset.folder), "--classify-only"])
+        self.assertEqual(exitCode, 1)
+        self.assertIn("Refusing to run UC1", stderr.getvalue())
+        self.assertNotIn("recorded HSI case", stdout.getvalue())
 
 
 class RealBinaryIntegrationTest(unittest.TestCase):
@@ -1082,17 +1042,14 @@ class RealBinaryIntegrationTest(unittest.TestCase):
     Every other test in this file replaces the process, which is what makes them
     fast and GPU-free - but it also means they never touch model loading, CUDA
     execution, UC1's own path handling, or the creation of real output files.
-    This one runs the staged binary for real. It skips rather than fails where
-    the build has not been run: `build/` is absent on a fresh clone and the CUDA
-    toolchain is not a checkout prerequisite.
+    This one runs the staged binary for real on recorded case `004-02`. It skips
+    rather than fails where the build has not been run: the CUDA toolchain is
+    not a checkout prerequisite.
 
     It mutates the shared staged build, taking the same exclusive lock and
     clearing the same fixed output paths as any other run, so it cannot run
     beside a live sender - which is the behaviour the lock exists to enforce.
     """
-
-    SAMPLES = 32
-    LINES = 24
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1101,48 +1058,19 @@ class RealBinaryIntegrationTest(unittest.TestCase):
                 "The staged UC1 build is absent; run scripts/development/build-uc1.ps1"
             )
 
-    def setUp(self) -> None:
-        # Written under `build/` rather than the system temporary directory:
-        # `data_loader.cpp` reads header and file paths into a 128-byte buffer,
-        # and a temporary path is long enough to trip that on this machine.
-        self.datasetFolder = (
-            support.STAGED_UC1_BUILD_ROOT.parent / "integration" / "sim-20260101-000000"
-        )
-        if self.datasetFolder.exists():
-            shutil.rmtree(self.datasetFolder)
-
-        wavelengthsNm = spectra.bandWavelengthsNm(uc1_runner.UC1_MODEL_BAND_COUNT)
-        regionMap = tissue.phantomRegionMap(self.LINES, self.SAMPLES)
-        reflectance = tissue.phantomReflectanceCube(regionMap, wavelengthsNm)
-        rng = numpy.random.default_rng(20260904)
-        darkCube, whiteCube = spectra.referenceCubes(
-            rng, uc1_runner.UC1_MODEL_BAND_COUNT, self.LINES, self.SAMPLES
-        )
-        rawCube = spectra.rawFromReflectance(reflectance, darkCube, whiteCube)
-        self.dataset = envi.writeDataset(
-            self.datasetFolder, rawCube, whiteCube, darkCube, wavelengthsNm
-        )
-
-        pathLength = envi.uc1WhiteReferencePathLength(self.dataset.folder)
-        if pathLength >= envi.UC1_MAX_PATH_LENGTH:
-            self.skipTest(
-                f"The dataset path is {pathLength} characters, at or over UC1's "
-                f"{envi.UC1_MAX_PATH_LENGTH}-byte buffer"
-            )
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.datasetFolder.parent, ignore_errors=True)
-
-    def test_stagedBinaryClassifiesARealDatasetOnTheGpu(self) -> None:
+    def test_stagedBinaryClassifiesARecordedCaseOnTheGpu(self) -> None:
+        dataset = contract.loadDataset(support.RECORDED_CASE_004_02)
+        self.assertTrue(dataset.recorded)
+        before = support.folderFingerprint(dataset.folder)
         build = uc1_runner.Uc1Build(support.STAGED_UC1_BUILD_ROOT)
         classifier = uc1_runner.RealUc1Classifier(build=build)
 
-        maps = classifier.classify(self.dataset)
+        with contextlib.redirect_stdout(io.StringIO()):
+            maps = classifier.classify(dataset)
 
         classMap = maps.majorityVotingMap
-        self.assertEqual(classMap.shape, (1, self.LINES, self.SAMPLES))
+        self.assertEqual(classMap.shape, (1, dataset.lines, dataset.samples))
         self.assertEqual(classMap.dtype, numpy.uint8)
-        self.assertTrue(set(numpy.unique(classMap).tolist()).issubset({1, 2, 3, 4}))
         uc1_maps.validateMajorityVotingMap(classMap)
         self.assertEqual(maps.presentMapNames(), ("majorityVotingMap",))
 
@@ -1150,10 +1078,13 @@ class RealBinaryIntegrationTest(unittest.TestCase):
         # injected process writes these too, so only here do they prove that
         # UC1's own output paths resolved.
         for path in (*build.channelPaths(),
-                     build.datasetOutputDirectory(self.dataset.folder.name)
+                     build.datasetOutputDirectory(dataset.folder.name)
                      / uc1_runner.CLASS_IMAGE_FILE_NAME):
             self.assertTrue(path.is_file(), f"{path} was not written")
             self.assertGreater(path.stat().st_size, 0)
+
+        # The recorded case is read where it lies and never written.
+        self.assertEqual(support.folderFingerprint(dataset.folder), before)
 
     def test_stagedModelIsTheOneTheRunnerRequires(self) -> None:
         # Model loading is silent in `main.cu`: a wrong-sized file produces no

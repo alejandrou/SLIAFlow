@@ -33,9 +33,9 @@ modes without letting an operator confuse one for the other.
 - Document one-time camera support installation and dependency checks.
 - Document camera-only, acquisition-connected, simulated (stand-in producers),
   and full-integration modes.
-- Document that the SLIA-011 webcam frame source and `SLIAFlowLogic.startCamera`
-  both want camera index 0 and that Windows will fail the second open, so the
-  simulator defaults to its synthetic frame source.
+- Document that the acquisition stand-in's webcam LiveView and
+  `SLIAFlowLogic.startCamera` both want camera index 0 and that Windows will fail
+  the second open, so only one of them can run at a time.
 - State in the runbook that a banner on the result pane means the displayed map
   is not a genuine clinical result, and that demo mode is never persisted.
 - Make missing camera, missing OpenIGTLink, disconnected sender, malformed result, and clean shutdown messages understandable.

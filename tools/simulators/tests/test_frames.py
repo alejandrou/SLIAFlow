@@ -1,4 +1,4 @@
-"""Direct tests for acquisition frame sources; no physical webcam is used."""
+"""Direct tests for the LiveView frame source; no physical webcam is used."""
 
 from __future__ import annotations
 
@@ -10,27 +10,6 @@ from unittest import mock
 import numpy
 
 from stratum_sim import frames
-
-
-class SyntheticFrameSourceTest(unittest.TestCase):
-
-    def test_seededSourcesProduceTheSameSequence(self):
-        first = frames.SyntheticFrameSource(samples=12, lines=8, seed=37)
-        second = frames.SyntheticFrameSource(samples=12, lines=8, seed=37)
-
-        for _frameIndex in range(3):
-            numpy.testing.assert_array_equal(first.read(), second.read())
-
-    def test_frameMovesAndSatisfiesTheSourceProtocol(self):
-        source = frames.SyntheticFrameSource(samples=12, lines=8, seed=37)
-
-        first = source.read()
-        second = source.read()
-
-        self.assertIsInstance(source, frames.FrameSource)
-        self.assertEqual(first.shape, (8, 12, 3))
-        self.assertEqual(first.dtype, numpy.uint8)
-        self.assertFalse(numpy.array_equal(first, second))
 
 
 class ResizeFrameTest(unittest.TestCase):
@@ -108,24 +87,6 @@ class WebcamFrameSourceTest(unittest.TestCase):
             source = frames.WebcamFrameSource(cameraIndex=0, samples=8, lines=6)
         source.close()
         self.assertTrue(capture.released)
-
-
-class FrameSourceFactoryTest(unittest.TestCase):
-
-    def test_factoryRoutesEverySupportedSourceAndRejectsUnknownNames(self):
-        synthetic = object()
-        webcam = object()
-        with (
-            mock.patch.object(frames, "SyntheticFrameSource", return_value=synthetic) as makeSynthetic,
-            mock.patch.object(frames, "WebcamFrameSource", return_value=webcam) as makeWebcam,
-        ):
-            self.assertIs(frames.createFrameSource("synthetic", 8, 6, 37, 4), synthetic)
-            self.assertIs(frames.createFrameSource("webcam", 8, 6, 37, 4), webcam)
-
-        makeSynthetic.assert_called_once_with(8, 6, 37)
-        makeWebcam.assert_called_once_with(4, 8, 6)
-        with self.assertRaises(ValueError):
-            frames.createFrameSource("telepathy", 8, 6, 37, 4)
 
 
 if __name__ == "__main__":

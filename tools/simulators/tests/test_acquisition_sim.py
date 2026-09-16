@@ -1,9 +1,8 @@
-"""Guards that run at the acquisition level rather than inside one module.
+"""The acquisition stand-in: capture timing, the recorded case on the wire, and refusals.
 
-The configuration validator predicts whether a dataset can satisfy the contract.
-These cover what happens to the prediction afterwards: the measured rank has to
-be enforced, not merely printed, and the reported frame rate has to divide by
-the intervals it actually spans.
+Every case folder here is `support.writeRecordedCaseFixture`: the file layout of
+a recorded case holding counting placeholders, so the reader and the transport
+are exercised without the camera or `input/`.
 """
 
 from __future__ import annotations
@@ -17,67 +16,13 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 import numpy
 import pyigtl
 
-from stratum_sim import acquisition_sim, capture_client, config, contract, spectra
+from stratum_sim import acquisition_sim, capture_client, config, contract
 from tests import support
-
-
-def buildRankReport(rank: int) -> spectra.SpectralRankReport:
-    return spectra.SpectralRankReport(
-        rank=rank,
-        conditionNumber=1.0,
-        largestSingularValue=1.0,
-        smallestRetainedSingularValue=1.0,
-    )
-
-
-class SpectralRankGuardTest(unittest.TestCase):
-
-    def test_aDegenerateDatasetIsNotAllowedToLookSuccessful(self):
-        # Printing the rank and exiting 0 would let a dataset no consumer can
-        # use pass for a good one.
-        with self.assertRaises(acquisition_sim.SpectralRankTooLowError) as refused:
-            acquisition_sim.assertSpectralRankIsSufficient(
-                buildRankReport(spectra.MINIMUM_SPECTRAL_RANK - 1)
-            )
-        self.assertIn(str(spectra.MINIMUM_SPECTRAL_RANK), str(refused.exception))
-
-    def test_theFloorItselfPasses(self):
-        acquisition_sim.assertSpectralRankIsSufficient(
-            buildRankReport(spectra.MINIMUM_SPECTRAL_RANK)
-        )
-
-
-class EnqueueRateTest(unittest.TestCase):
-
-    def test_theRateDividesByIntervalsNotByFrames(self):
-        # n frames span n-1 intervals. Ten frames one tenth of a second apart
-        # took 0.9 s, so the rate is 10 fps, not the 11.1 that dividing by the
-        # frame count would report.
-        frameCount = 10
-        measurementStart = 100.0
-        measurementEnd = 100.9
-
-        # Patch the simulator's own reference to the clock. Patching
-        # `acquisition_sim.time.perf_counter` would reach into the stdlib
-        # module every other test in the process is sharing.
-        fixedClock = SimpleNamespace(perf_counter=lambda: measurementEnd)
-        with mock.patch.object(acquisition_sim, "time", fixedClock):
-            rate = acquisition_sim.enqueueRate(frameCount, measurementStart)
-
-        expectedRate = (frameCount - 1) / (measurementEnd - measurementStart)
-        self.assertEqual(rate, expectedRate)
-        self.assertLess(rate, frameCount / (measurementEnd - measurementStart))
-
-    def test_noMeasurementIsReportedAsZeroRatherThanGuessed(self):
-        self.assertEqual(acquisition_sim.enqueueRate(0, None), 0.0)
-        self.assertEqual(acquisition_sim.enqueueRate(1, 100.0), 0.0)
-
 
 # The port table in `docs/architecture/WP5_MS5_DEMO_PLAN.md` is the authority for
 # these numbers, not the code under test.
@@ -228,11 +173,9 @@ class RecordedCaptureTest(unittest.TestCase):
         self.simulatorConfig = config.loadSimulatorConfig(
             self.repositoryRoot,
             overrides={
-                "sceneMode": "recorded",
+                # The camera itself is never opened: the frames come from the
+                # `StillFrameSource` passed in below.
                 "case": CASE_NAME,
-                # The session's setting. The camera itself is never opened:
-                # the frames come from the `StillFrameSource` passed in below.
-                "frameSource": "webcam",
                 "captureDelayMinSec": 0.0,
                 "captureDelayMaxSec": 0.0,
                 "targetFrameRate": 100.0,
@@ -289,10 +232,9 @@ class RecordedCaptureTest(unittest.TestCase):
             with self.subTest(reservedPort=reservedPort):
                 self.assertNotIn(reservedPort, servers)
 
-    def test_recordedNoticeNeverCallsTheCubeSynthetic(self):
-        # The phantom's notice says the data is synthetic and not patient data.
-        # Over a recorded case both claims are false, and false in the
-        # direction that understates what is on screen.
+    def test_recordedNoticeNamesTheCaseAndTheSimulatedAcquisition(self):
+        # A notice that called the cube made up, or said it was not derived from
+        # patient imagery, would understate what is on screen.
         notice = acquisition_sim.recordedNotice(CASE_NAME)
 
         self.assertIn(CASE_NAME, notice)
@@ -311,14 +253,76 @@ class RecordedCaptureTest(unittest.TestCase):
         self.assertEqual(detail, EXPECTED_LIVE_VIEW_DETAIL)
         self.assertNotIn("synthetic", detail.lower())
 
-    def test_recordedCommandLineTakesTheLaptopCameraByDefault(self):
-        # The launcher passes `--frame-source webcam`; a person typing the
-        # command should not have to, and must not get a generated scene.
-        arguments = acquisition_sim.buildArgumentParser().parse_args(
-            ["--scene-mode", "recorded", "--case", CASE_NAME]
+    def test_theOnlyLiveViewSourceIsTheLaptopCamera(self):
+        opened = []
+
+        def recordingCamera(*arguments):
+            opened.append(arguments)
+            return StillFrameSource(self.simulatorConfig.samples, self.simulatorConfig.lines)
+
+        servers: dict[int, FakeServer] = {}
+
+        def serverFactory(port: int) -> FakeServer:
+            servers[port] = FakeServer(port)
+            return servers[port]
+
+        with (
+            mock.patch.object(acquisition_sim.frames, "WebcamFrameSource", side_effect=recordingCamera),
+            mock.patch.object(
+                acquisition_sim.igtl_transport, "InterruptFlag", return_value=StoppedInterrupt()
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            exitCode = acquisition_sim.runRecordedStandIn(self.simulatorConfig, serverFactory)
+
+        self.assertEqual(exitCode, 0)
+        self.assertEqual(
+            opened,
+            [(self.simulatorConfig.webcamIndex, self.simulatorConfig.samples, self.simulatorConfig.lines)],
         )
 
-        self.assertEqual(acquisition_sim.commandLineOverrides(arguments)["frameSource"], "webcam")
+
+class RetiredSwitchesTest(unittest.TestCase):
+    """SLIA-025: nothing on the command line generates a scene or writes a dataset."""
+
+    RETIRED_SWITCHES = (
+        ["--scene-mode", "tissue"],
+        ["--frame-source", "synthetic"],
+        ["--dataset-only"],
+        ["--dataset-folder", "somewhere"],
+        ["--dataset-root", "somewhere"],
+        ["--seed", "1"],
+        ["--noise-counts", "1"],
+        ["--frames", "1"],
+    )
+
+    def test_retiredSwitchesAreNotAccepted(self):
+        parser = acquisition_sim.buildArgumentParser()
+        for switch in self.RETIRED_SWITCHES:
+            with self.subTest(switch=switch):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    parser.parse_args(["--case", CASE_NAME, *switch])
+
+    def test_aSessionWithoutACaseIsRefusedBeforeAnythingOpens(self):
+        with tempfile.TemporaryDirectory() as temporaryDirectory:
+            simulatorConfig = config.loadSimulatorConfig(Path(temporaryDirectory))
+        self.assertIsNone(simulatorConfig.case)
+
+        errors = io.StringIO()
+        refusal = mock.Mock(side_effect=AssertionError("Something was opened."))
+        with (
+            mock.patch.object(acquisition_sim.config, "loadSimulatorConfig", return_value=simulatorConfig),
+            mock.patch.object(acquisition_sim.igtl_transport, "assertPortCanBeServed", refusal),
+            mock.patch.object(acquisition_sim, "runRecordedStandIn", refusal),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(errors),
+        ):
+            exitCode = acquisition_sim.main([])
+
+        self.assertEqual(exitCode, 1)
+        self.assertIn("--case", errors.getvalue())
+        self.assertIn("004-02", errors.getvalue())
+        refusal.assert_not_called()
 
 
 class RecordedCaptureWireTest(unittest.TestCase):
@@ -346,9 +350,7 @@ class RecordedCaptureWireTest(unittest.TestCase):
         self.simulatorConfig = config.loadSimulatorConfig(
             repositoryRoot,
             overrides={
-                "sceneMode": "recorded",
                 "case": CASE_NAME,
-                "frameSource": "webcam",
                 "captureDelayMinSec": 0.0,
                 "captureDelayMaxSec": 0.0,
                 "targetFrameRate": 50.0,
@@ -509,9 +511,7 @@ class AcquisitionPortTest(unittest.TestCase):
         self.simulatorConfig = config.loadSimulatorConfig(
             repositoryRoot,
             overrides={
-                "sceneMode": "recorded",
                 "case": CASE_NAME,
-                "frameSource": "webcam",
                 "captureDelayMinSec": 0.0,
                 "captureDelayMaxSec": 0.0,
                 "liveViewPort": self.liveViewPort,
@@ -519,7 +519,7 @@ class AcquisitionPortTest(unittest.TestCase):
                 "controlPort": self.controlPort,
             },
         )
-        self.commandLine = ["--scene-mode", "recorded", "--case", CASE_NAME]
+        self.commandLine = ["--case", CASE_NAME]
 
     def runMain(self, arguments, **patches) -> tuple[int, str]:
         errors = io.StringIO()
@@ -552,7 +552,7 @@ class AcquisitionPortTest(unittest.TestCase):
                 caseRead = mock.Mock(side_effect=AssertionError("The case was read."))
                 exitCode, errors = self.runMain(
                     self.commandLine + arguments,
-                    camera=(acquisition_sim.frames, "createFrameSource", {"new": camera}),
+                    camera=(acquisition_sim.frames, "WebcamFrameSource", {"new": camera}),
                     case=(acquisition_sim, "loadRecordedCase", {"new": caseRead}),
                 )
 
@@ -574,7 +574,7 @@ class AcquisitionPortTest(unittest.TestCase):
                 caseRead = mock.Mock(side_effect=AssertionError("The case was read."))
                 exitCode, errors = self.runMain(
                     self.commandLine + arguments,
-                    camera=(acquisition_sim.frames, "createFrameSource", {"new": camera}),
+                    camera=(acquisition_sim.frames, "WebcamFrameSource", {"new": camera}),
                     case=(acquisition_sim, "loadRecordedCase", {"new": caseRead}),
                 )
 
@@ -607,7 +607,7 @@ class AcquisitionPortTest(unittest.TestCase):
                     ),
                     camera=(
                         acquisition_sim.frames,
-                        "createFrameSource",
+                        "WebcamFrameSource",
                         {
                             "return_value": StillFrameSource(
                                 self.simulatorConfig.samples, self.simulatorConfig.lines

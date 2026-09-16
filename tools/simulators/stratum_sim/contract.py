@@ -4,8 +4,7 @@ The seam is a **dataset**, not an in-memory cube. SLIA-013's producer is an
 executable that is handed a folder path and opens `raw.dat`,
 `whiteReference.dat`, `darkReference.dat` and `raw.hdr` itself, so a protocol
 that accepted only an array could not express the real producer at all. A
-stand-in calls `loadCalibratedCube()`; the real runner uses `dataset.folder` and
-never materialises the cube.
+runner uses `dataset.folder` and never materialises the cube.
 """
 
 from __future__ import annotations
@@ -91,16 +90,16 @@ UC1_RGB_DEVICE_NAME = "UC1_RGB"
 
 @dataclass(frozen=True)
 class DatasetRef:
-    """A written ENVI/BSQ dataset, addressed the way both producers address it.
+    """An ENVI/BSQ dataset folder, addressed the way the producers address it.
 
     `wavelengthsNm` is a tuple rather than an array so that two references to
     the same folder compare equal.
 
-    Two kinds of folder are approved input. `simulated` means this simulator
-    wrote it. `recorded` means it is a case of the public HSI Human Brain
-    Database, identified by the marker in its `gtMap.hdr`, which is read and
-    never written. Both travel as `simulated` on the wire, because in this
-    repository the acquisition is always simulated; neither is a third origin.
+    The one kind of folder that is approved input is a case of the public HSI
+    Human Brain Database, identified by the marker in its `gtMap.hdr`, which is
+    read and never written. `recorded` says whether this folder is one. A cube
+    travels as `simulated` on the wire, because in this repository the
+    acquisition is always simulated; that is not a claim about the cube.
     """
 
     folder: Path
@@ -108,25 +107,7 @@ class DatasetRef:
     lines: int
     bands: int
     wavelengthsNm: tuple[float, ...]
-    simulated: bool
-    recorded: bool = False
-
-    @property
-    def approvedInput(self) -> bool:
-        """Whether the folder is one of the two kinds the tooling may process."""
-        return self.simulated or self.recorded
-
-    def loadCalibratedCube(self) -> numpy.ndarray:
-        """Read the dataset and apply UC1's calibration, returning float32 counts.
-
-        The result is a (bands, lines, samples) array of `100 * reflectance`,
-        which is the same quantity UC1 computes on the GPU.
-        """
-        # Imported here rather than at module scope: `envi` builds DatasetRef
-        # instances, so a module-level import in this direction would be a cycle.
-        from . import envi
-
-        return envi.loadCalibratedCube(self)
+    recorded: bool
 
 
 @dataclass(frozen=True, eq=False)
@@ -155,8 +136,8 @@ class Uc1Maps:
 class Classifier(Protocol):
     """Turn a written dataset into whichever UC1 maps the producer can produce.
 
-    Unimplemented here. This is the seam SLIA-012's arithmetic stand-in and
-    SLIA-013's genuine CUDA runner plug into.
+    Unimplemented here. This is the seam SLIA-013's genuine CUDA runner plugs
+    into.
     """
 
     def classify(self, dataset: DatasetRef) -> Uc1Maps:
@@ -164,13 +145,9 @@ class Classifier(Protocol):
 
 
 def loadDataset(folder: Path) -> DatasetRef:
-    """Build a DatasetRef from an existing dataset folder.
-
-    The writer returns an equal reference for the dataset it just wrote, so both
-    producers reach a dataset by the same route.
-    """
-    # Imported here rather than at module scope, for the same cycle reason as
-    # DatasetRef.loadCalibratedCube.
+    """Build a DatasetRef from an existing dataset folder, reading headers only."""
+    # Imported here rather than at module scope: `envi` builds DatasetRef
+    # instances, so a module-level import in this direction would be a cycle.
     from . import envi
 
     return envi.loadDataset(folder)
@@ -203,8 +180,7 @@ def recordedCaseDetail(producer: str, caseName: str) -> str:
     """Name a recorded case, and say that only its acquisition was simulated.
 
     Every producer describes a recorded cube through this one form. A detail
-    that called it synthetic would understate what is on screen, which is the
-    direction of error the simulated banner does not guard against.
+    that did not name the case would leave a viewer to guess what is on screen.
     """
     return f"{producer}, recorded HSI case {caseName} (simulated acquisition)"
 
@@ -277,7 +253,7 @@ def uc1RgbMetadata(
 def resultMapMetadata(
     mapName: str, dataOrigin: str, simulationDetail: str = "", *, captureId: str
 ) -> dict[str, str]:
-    """Provenance for one UC1 result map, for the producers SLIA-012 and -013 add."""
+    """Provenance for one UC1 result map."""
     if mapName not in UC1_MAP_DEVICE_NAMES:
         raise ValueError(
             f"Unknown result map {mapName!r}. Known maps: {', '.join(UC1_MAP_FIELD_NAMES)}."

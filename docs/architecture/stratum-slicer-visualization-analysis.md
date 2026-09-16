@@ -105,7 +105,7 @@ lectura.
 
 `extensions/SLIAFlow/SLIAFlow/SLIAFlowLib/SLIAFlowTest.py`
 
-5 tests con datos sintéticos vía `_createSyntheticVolume()`. Adaptador de descubrimiento
+5 tests con volúmenes de prueba en memoria vía `_createTestVolume()`. Adaptador de descubrimiento
 en `extensions/SLIAFlow/SLIAFlow/Testing/Python/SLIAFlowModuleTest.py`, registrado como
 `py_SLIAFlowModuleTest`.
 
@@ -133,7 +133,7 @@ visible.
 | Ciclo de vida de observadores en `SLIAFlowWidget` | Patrón exacto para observar nodos IGTL sin fugas tras Reload |
 | `_setSummaryState()` + convención PASS/WARN/FAIL | Presentación de estado de conexión y de validación |
 | `VTKObservationMixin.addObserver/removeObservers` | Base de la detección de resultados (§9) |
-| `_createSyntheticVolume()` | Semilla de los fixtures RGB sintéticos (§11) |
+| `_createTestVolume()` | Semilla de los fixtures RGB de prueba (§11) |
 | `run-slicer-tests.ps1` + registro CTest | Ya funciona headless; no rehacer |
 | `.ai/` completo (políticas, workflows, plantilla) | Marco de gobernanza; `algorithm-boundary-policy.md` aplica tal cual |
 
@@ -167,7 +167,7 @@ desarrollo. Conservarlos, pero no forman parte del flujo.
 | BSSL-001 … BSSL-004 (completadas) | **Conservar** | Infraestructura, no experimentos. Son el historial que sostiene el resto. |
 | BSSL-005 | **Conservar** | El parameter node es la base sobre la que se construye STRATUM. |
 | BSSL-006 *Define algorithm provider boundary* | **Sustituir** | Su premisa —"a provider protocol or interface", un mock invocable desde Python in-process— queda obsoleta: UC2 vive fuera del proceso de Slicer. La frontera ya no es un protocolo Python, es un contrato de transporte (tipo de mensaje IGTL, nombre de dispositivo, forma y dtype). Lo que sí sobrevive intacto es su mitad de validación: *"Validate results before scene mutation, persistence, or successful display"*. |
-| BSSL-007 *First mock vertical slice* | **Sustituir** | La idea del "vertical slice" es correcta; el mecanismo no. El "mock provider" ya no es una clase Python: es un emisor externo sintético. El slice pasa a ser *recibir → validar → presentar lado a lado*. |
+| BSSL-007 *First mock vertical slice* | **Sustituir** | La idea del "vertical slice" es correcta; el mecanismo no. El "mock provider" ya no es una clase Python: es un emisor externo. El slice pasa a ser *recibir → validar → presentar lado a lado*. |
 | BSSL-008 *Persist and summarize results* | **Conservar, reformular y posponer** | La pregunta que plantea (propiedad del resultado en MRML, provenance, resultados obsoletos) es real y seguirá siéndolo. Pero no se puede responder antes de que existan resultados. Renumerar al final de la nueva secuencia. |
 
 Sobre la nomenclatura: el prefijo `BSSL` ya no describe nada. Se sugiere `STR-###` para
@@ -468,7 +468,7 @@ el widget existente lo pinte sin cambios. Es la capa más testeable y la que cum
 
 ### 5 · Datos clínicos
 
-Ninguno, por política. En concreto: solo fixtures sintéticos, ninguna ruta de importación
+Ninguno, por política. En concreto: solo fixtures de prueba en memoria, ninguna ruta de importación
 DICOM, y etiqueta visible de prototipo/no-clínico tanto en la UI como en el nombre de los
 nodos.
 
@@ -477,17 +477,17 @@ should not depend on the widget"*.
 
 ---
 
-## 11. Pruebas automatizables con imágenes sintéticas
+## 11. Pruebas automatizables con volúmenes de prueba en memoria
 
 Casi todo es testeable **sin socket alguno**, que es el punto clave.
 
 ### Fixture base
 
-Extensión de `SLIAFlowTest._createSyntheticVolume()`:
+Extensión de `SLIAFlowTest._createTestVolume()`:
 
 ```python
 @staticmethod
-def _createSyntheticRgbVolume(name="SyntheticRGB", width=64, height=48):
+def _createTestRgbVolume(name="TestRGB", width=64, height=48):
     volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", name)
     imageData = vtk.vtkImageData()
     imageData.SetDimensions(width, height, 1)
@@ -523,7 +523,7 @@ A nivel MRML (IDs correctos en los composite nodes correctos), con la cautela de
 
 `pyigtl` (PyPI, recomendado por el core dev de Slicer Kyle Sunderland en
 `discourse.slicer.org` id36194) permite levantar un servidor IGTL en un hilo y enviar un
-`ImageMessage` RGB sintético a `127.0.0.1`. Debe ser *skippable* con
+`ImageMessage` RGB de prueba a `127.0.0.1`. Debe ser *skippable* con
 `hasattr(slicer, "vtkMRMLIGTLConnectorNode")` para no romper el runner cuando la
 extensión no está. El patrón de referencia en C++ es
 `OpenIGTLinkIF/Testing/vtkMRMLConnectorImageSendAndReceiveTest.cxx`.
@@ -539,8 +539,8 @@ Cada tarea es pequeña, revisable y deja un artefacto que sobrevive a la siguien
 |---|---|---|---|
 | **STR-001** | Fijar el runtime Slicer objetivo | Decidir oficial 5.13.0 vs `apps/SR`; verificar disponibilidad de SlicerOpenIGTLink para esa revisión; actualizar `config/local.example.json` y `docs/slicer/openigtlink_environment.md` | — |
 | **STR-002** | ADR del contrato de cable | Primer ADR en `docs/architecture/decisions/`: IMAGE sobre OpenIGTLink, Slicer=servidor:18944, device names `STRATUM_INPUT`/`STRATUM_UC2`, RGB uint8, algoritmo fuera de proceso | STR-001 |
-| **STR-003** | MVP manual, cero código en SLIAFlow | Emisor sintético con `pyigtl` + `docs/slicer/igtl_reception_walkthrough.md` con evidencia de los dos `vtkMRMLVectorVolumeNode` | STR-002 |
-| **STR-004** | Capa de validación | `SLIAFlowValidation.py`; añadir `GetNumberOfScalarComponents()` a `inspectVolumeMetadata`; suite sintética completa | STR-002 |
+| **STR-003** | MVP manual, cero código en SLIAFlow | Emisor de prueba con `pyigtl` + `docs/slicer/igtl_reception_walkthrough.md` con evidencia de los dos `vtkMRMLVectorVolumeNode` | STR-002 |
+| **STR-004** | Capa de validación | `SLIAFlowValidation.py`; añadir `GetNumberOfScalarComponents()` a `inspectVolumeMetadata`; suite de fixtures completa | STR-002 |
 | **STR-005** | Detección de resultados | Observadores `ImageDataModifiedEvent` + `NodeAddedEvent` en la Logic, sin importar clases IGTL; `resultVolumeNode` en el parameter node | STR-004 |
 | **STR-006** | Presentación lado a lado | `SLIAFlowPresentation.py`: layout personalizado, asignación por vista, etiquetado no-clínico | STR-005 |
 | **STR-007** | Panel STRATUM en la UI | Sección colapsable nueva en el `.ui`, reutilizando `_setSummaryState` y el patrón de parameter node | STR-006 |

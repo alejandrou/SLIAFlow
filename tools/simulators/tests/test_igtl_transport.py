@@ -67,7 +67,7 @@ def packAndUnpack(message: pyigtl.MessageBase) -> pyigtl.MessageBase:
 class MetadataRoundTripTest(unittest.TestCase):
 
     def test_metadataSurvivesPackUnpackRoundTrip(self):
-        metadata = contract.liveViewMetadata("acquisition stand-in, synthetic scene")
+        metadata = contract.liveViewMetadata("acquisition stand-in, laptop camera")
         message = igtl_transport.buildImageMessage(
             buildTestFrameRgb(), deviceName="LiveView", metadata=metadata
         )
@@ -86,7 +86,7 @@ class MetadataRoundTripTest(unittest.TestCase):
         # This is the failure mode the requirement exists to prevent: the send
         # succeeds, the message is well formed, and the provenance is gone.
         message = pyigtl.ImageMessage(image=buildTestFrameRgb(), device_name="LiveView")
-        message.metadata = dict(contract.liveViewMetadata("arithmetic stand-in"))
+        message.metadata = dict(contract.liveViewMetadata("acquisition stand-in, laptop camera"))
 
         self.assertEqual(message.header_version, 1)
         with self.assertLogs("pyigtl.messages", level="WARNING"):
