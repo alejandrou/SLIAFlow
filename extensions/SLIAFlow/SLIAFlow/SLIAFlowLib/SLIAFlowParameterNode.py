@@ -42,6 +42,10 @@ OUTPUT_FILE_ATTRIBUTE = "SLIAFlow.OutputFile"
 SIMULATED_ORIGIN = "simulated"
 # contract.recordedCaseDetail's producer name for the genuine UC1 pipeline.
 SIMULATION_DETAIL_PRODUCER = "real UC1 pipeline"
+# The same for the vendored UC2 blood-vessel enhancement (SLIA-021).
+UC2_SIMULATION_DETAIL_PRODUCER = "real UC2 blood-vessel enhancement"
+# The fixed bands and parameters a UC2 map was made with, on the map's node.
+UC2_PARAMETERS_ATTRIBUTE = "SLIAFlow.Uc2Parameters"
 
 # The calibrated cube's wavelengths in nm, comma-separated, on the cube volume
 # itself, so a spectrum is always plotted against the grid of the cube it reads.
@@ -57,6 +61,11 @@ def calibratedCubeDetail(cubeName: str) -> str:
 def uc1ResultDetail(cubeName: str) -> str:
     """The simulation detail of a UC1 output: the pipeline, then the cube it ran on."""
     return f"{SIMULATION_DETAIL_PRODUCER}, {calibratedCubeDetail(cubeName)}"
+
+
+def uc2ResultDetail(cubeName: str) -> str:
+    """The simulation detail of a UC2 map: the component, then the cube it ran on."""
+    return f"{UC2_SIMULATION_DETAIL_PRODUCER}, {calibratedCubeDetail(cubeName)}"
 
 
 @parameterNodeWrapper

@@ -1,0 +1,88 @@
+diff --git a/functions.c b/functions.c
+--- a/functions.c
++++ b/functions.c
+@@ -78,6 +78,36 @@ uint16_t *read_BSQ_reference(const char *refFile, int numberOfLines, int numberO
+ 
+ }
+ 
++/**
++*  Read only the 3 selected bands of an already calibrated BSQ cube stored
++*  as float32 (ENVI data type 4), e.g. LCTF_Calibrated_Cube_Single.dat.
++*  Output order: Blue, Green, Red (same as extract_selected_bands_LCTF_BSQ).
++*/
++float *read_selected_bands_BSQ_float(const char *file, int numberOfLines, int numberOfSamples, int headerOffset, int red, int green, int blue){
++
++	size_t numberOfPixels = (size_t)numberOfLines * numberOfSamples;
++	int bandIndexes[SELECTED_BANDS] = {blue, green, red};
++
++	float *threeBands = (float *)malloc(numberOfPixels * SELECTED_BANDS * sizeof(float));
++	FILE *fp = fopen(file, "rb");
++	if (threeBands == NULL || fp == NULL) {
++		printf("Error opening/allocating '%s'\n", file);
++		exit(1);
++	}
++
++	for (int b = 0; b < SELECTED_BANDS; b++) {
++		long offset = (long)headerOffset + (long)bandIndexes[b] * (long)(numberOfPixels * sizeof(float));
++		if (fseek(fp, offset, SEEK_SET) != 0 ||
++			fread(threeBands + b * numberOfPixels, sizeof(float), numberOfPixels, fp) != numberOfPixels) {
++			printf("Error reading band %d from '%s'\n", bandIndexes[b], file);
++			exit(1);
++		}
++	}
++
++	fclose(fp);
++	return threeBands;
++}
++
+ /**
+ *  From a cube (HS, dark or white reference), extract the 3 selected bands.  
+ *  In this case, it extracts, from the LCTF output, RGB bands. Notice that 
+diff --git a/functions.h b/functions.h
+--- a/functions.h
++++ b/functions.h
+@@ -9,4 +9,5 @@
+ uint16_t *read_LCTF_BSQ_ImageUint16(const char *LCTFCube, int numberOfLines, int numberOfSamples, int numberOfBands);
+ uint16_t *read_BSQ_reference(const char *refFile, int numberOfLines, int numberOfSamples, int numberOfBands);
+ uint16_t *extract_selected_bands_LCTF_BSQ(uint16_t *cube, int numberOfLines, int numberOfSamples, int red, int green, int blue);
++float *read_selected_bands_BSQ_float(const char *file, int numberOfLines, int numberOfSamples, int headerOffset, int red, int green, int blue);
+ float *calibratedLCTFCube(uint16_t *rawCubeS, uint16_t *whiteRefS, uint16_t *darkRefS, int numberOfLines, int numberOfSamples, int numberOfBands, ImageType iType);
+diff --git a/main.c b/main.c
+--- a/main.c
++++ b/main.c
+@@ -119,6 +119,35 @@ int main(int argc, char **argv){
+                 }
+             break;
+         
++        case 4: { // float32: cube already calibrated (LCTF_Calibrated_Cube_Single)
++
++            if (strcmp(hdrInfo.interleave, " bsq") != 0) {
++                printf("Unknown format.\n");
++                return 1;
++            }
++
++            // Bands of the Stratum HS sensor (460-1000 nm, 5 nm step): index = (nm - 460) / 5
++            int red = 50;   // 710 nm
++            int green = 16; // 540 nm
++            int blue = 4;   // 480 nm
++
++            // Read the 3 bands. No calibration: the cube is already calibrated
++            float *calibratedCube = read_selected_bands_BSQ_float(getRawPath(&paths), numberOfLines, numberOfSamples, hdrInfo.headerOffset, red, green, blue);
++
++            // SHOULD BE INPUT VARIABLES!!!!!!! Variables to be modified by the operating surgeon for visualization
++            float high_in = 0.15;
++            float high_out = 0.8;
++            int gamma = 1;
++            float bValue = 3;
++
++            float *BVMap = computeBVmapLCTF(calibratedCube, numberOfLines, numberOfSamples, high_in, high_out, gamma, bValue);
++            free(calibratedCube);
++
++            save_BVMap_as_png(".", getImageName(&paths), BVMap, numberOfSamples, numberOfLines);
++            free(BVMap);
++            break;
++        }
++
+         case 10: // This is not real, just to test 
+             
+             // If-else to read the HS cube depending on the .hdr "interleave" format
