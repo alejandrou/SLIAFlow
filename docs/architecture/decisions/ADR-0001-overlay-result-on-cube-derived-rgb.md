@@ -1,8 +1,9 @@
 ---
 id: ADR-0001
 title: Overlay algorithm results on a cube-derived RGB, never on the laptop camera
-status: proposed
+status: accepted
 date: 2026-09-11
+accepted: 2026-09-15
 related_tasks: SLIA-022, SLIA-024, SLIA-021
 supersedes:
 ---
@@ -11,8 +12,14 @@ supersedes:
 
 ## Status
 
-Proposed. Requires project-owner approval before `SLIA-024` or the overlay part
-of `SLIA-022` is activated.
+Accepted by the project owner on 2026-09-15, when activating `SLIA-022`.
+
+Proposed on 2026-09-11. Accepting it unblocked `SLIA-022` and `SLIA-024`.
+
+Applied at acceptance: rule 3 is why a result is composited only over a
+background from its own producer. `UC2_BV` therefore has its own panel and is
+never drawn over `UC1_RGB`, which comes from a different producer on a
+different connection.
 
 ## Context
 

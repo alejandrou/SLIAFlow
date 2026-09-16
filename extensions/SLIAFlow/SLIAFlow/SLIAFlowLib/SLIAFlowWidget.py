@@ -12,40 +12,160 @@ from slicer.util import VTKObservationMixin
 
 from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
+    ACQUISITION_PORT,
+    CAPTURE_REPLY_DEVICE_NAME,
+    CAPTURE_STATUS_DEVICE_NAME,
     CONNECTION_CONNECTING,
     CONNECTION_DISCONNECTED,
     CONNECTION_DISPLAYING,
     CONNECTION_INVALID,
     CONNECTION_RECEIVING,
     CONNECTOR_ACQUISITION,
+    CONNECTOR_CONTROL,
+    CONNECTOR_HS_CUBE,
+    CONNECTOR_ROLES,
     CONNECTOR_UC1,
+    CONNECTOR_UC2,
+    CONTROL_PORT,
+    HS_CUBE_PORT,
+    IGTL_HOST,
     LIVE_SOURCE_CHOICES,
     LIVE_SOURCE_IGTL,
     LIVE_SOURCE_LAPTOP,
     RESULT_MAP_KNN_PROB,
     RESULT_MAP_SVM_PROB,
     RESULT_SOURCE_SIMULATED_ORIGIN,
+    STEREOSCOPIC_PORT,
+    STO2_PORT,
+    UC2_DEVICE_NAME,
+    UC2_PORT,
+    UC2_SIMULATED_BANNER_MESSAGE,
     SLIAFlowParameterNode,
     simulatedBannerMessage,
 )
 
 
-class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
-    """Present the live image and the validated UC1 result side by side."""
+def _sliceViewItem(viewName: str, viewLabel: str) -> str:
+    return (
+        "<item>"
+        f'<view class="vtkMRMLSliceNode" singletontag="{viewName}">'
+        '<property name="orientation" action="default">Axial</property>'
+        f'<property name="viewlabel" action="default">{escape(viewLabel)}</property>'
+        "</view>"
+        "</item>"
+    )
 
-    CUSTOM_LAYOUT_ID = 701
+
+def _layoutDescription(rows) -> str:
+    """Two rows of views, each row one horizontal layout inside a vertical one."""
+    return (
+        '<layout type="vertical" split="true">'
+        + "".join(
+            '<item><layout type="horizontal" split="true">'
+            + "".join(_sliceViewItem(name, label) for name, label in row)
+            + "</layout></item>"
+            for row in rows
+        )
+        + "</layout>"
+    )
+
+
+class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
+    """Present the six-panel WP5 operator surface."""
+
+    # 702 rather than the two-pane 701, so that a Reload in a session whose
+    # layout node still holds 701's old description does not collide with it.
+    CUSTOM_LAYOUT_ID = 702
     LIVE_VIEW_NAME = "SLIAFlowLive"
+    STEREO_VIEW_NAME = "SLIAFlowStereoscopic"
+    CUBE_VIEW_NAME = "SLIAFlowCube"
+    STO2_VIEW_NAME = "SLIAFlowStO2"
+    VASCULAR_VIEW_NAME = "SLIAFlowVascularization"
     RESULT_VIEW_NAME = "SLIAFlowResult"
-    VIEW_NAMES = (LIVE_VIEW_NAME, RESULT_VIEW_NAME)
-    LIVE_VIEW_LABEL = _("Live Image")
-    RESULT_VIEW_LABEL = _("UC1 Result")
+    LIVE_VIEW_LABEL = _("LiveView")
+    STEREO_VIEW_LABEL = _("Stereoscopic")
+    CUBE_VIEW_LABEL = _("HS Cube")
+    STO2_VIEW_LABEL = _("Relative StO2")
+    VASCULAR_VIEW_LABEL = _("Enhanced Vascularization")
+    RESULT_VIEW_LABEL = _("Tumour Delineation")
+    # The target screen in docs/architecture/WP5_MS5_DEMO_PLAN.md.
+    VIEW_ROWS = (
+        (
+            (LIVE_VIEW_NAME, LIVE_VIEW_LABEL),
+            (STEREO_VIEW_NAME, STEREO_VIEW_LABEL),
+            (CUBE_VIEW_NAME, CUBE_VIEW_LABEL),
+        ),
+        (
+            (STO2_VIEW_NAME, STO2_VIEW_LABEL),
+            (VASCULAR_VIEW_NAME, VASCULAR_VIEW_LABEL),
+            (RESULT_VIEW_NAME, RESULT_VIEW_LABEL),
+        ),
+    )
+    VIEW_NAMES = tuple(name for row in VIEW_ROWS for name, _label in row)
+    # A reserved panel says what is missing and which port waits for it, so it
+    # can never be mistaken for a panel that is black because something broke.
+    RESERVED_PANEL_REASONS = {
+        STEREO_VIEW_NAME: _(
+            "No producer yet: stereoscopic depth from UPM.\n"
+            "Port {port} is reserved for it."
+        ).format(port=STEREOSCOPIC_PORT),
+        STO2_VIEW_NAME: _(
+            "No algorithm yet: relative StO2 from ULPGC.\n"
+            "Port {port} is reserved for it."
+        ).format(port=STO2_PORT),
+    }
+    CUBE_WAITING_MESSAGE = _(
+        "Waiting for the HS cube on port {port}.\nPress Capture."
+    ).format(port=HS_CUBE_PORT)
+    UC2_WAITING_MESSAGE = _(
+        "Waiting for the UC2 blood-vessel map on port {port}."
+    ).format(port=UC2_PORT)
+    # The LiveView panel says what it is waiting for in the panel itself. A
+    # status line elsewhere in the module leaves a black panel looking exactly
+    # like one that is black because something broke.
+    LIVE_WAITING_MESSAGE = _(
+        "Waiting for the LiveView image.\n"
+        "Start the laptop camera, or press Connect links for the stream on "
+        "port {port}."
+    ).format(port=ACQUISITION_PORT)
+    HIDDEN_LAYER_MESSAGE = _("{layer} is hidden in the layer list.")
+    LAYER_UC1 = "uc1"
+    LAYER_UC2 = "uc2"
+    LAYER_ROWS = (
+        (LAYER_UC1, _("Tumour delineation (UC1)"), RESULT_VIEW_NAME),
+        (LAYER_UC2, _("Enhanced vascularization (UC2)"), VASCULAR_VIEW_NAME),
+    )
+    LINK_STATE_LABELS = {
+        CONNECTOR_ACQUISITION: "acquisitionStateValueLabel",
+        CONNECTOR_UC1: "uc1StateValueLabel",
+        CONNECTOR_UC2: "uc2StateValueLabel",
+        CONNECTOR_HS_CUBE: "hsCubeStateValueLabel",
+        CONNECTOR_CONTROL: "controlStateValueLabel",
+    }
+    CAPTURE_NEEDS_CONTROL_LINK_STATUS = _(
+        "Capture needs the control link to the acquisition stand-in on "
+        "{host}:{port}. Press Connect links."
+    ).format(host=IGTL_HOST, port=CONTROL_PORT)
+    CAPTURE_NO_ANSWER_STATUS = _(
+        "The control link is connected. The stand-in has not reported a state yet."
+    )
+    UC2_STALE_STATUS = _(
+        "The UC2 link is not connected. The last valid map is still shown and "
+        "is not being updated."
+    )
+    UC2_INVALID_STATUS = _("Invalid UC2 map.")
+    UC2_INVALID_SIMULATED_STATUS = _("Invalid simulated UC2 map.")
+    UC2_INVALID_PROVENANCE_STATUS = _(
+        "Unrecognized UC2 provenance. The data arrived but does not say what it "
+        "is, so it is not displayed."
+    )
     WAITING_RESULT_MESSAGE = _("Waiting for genuine UC1 result")
     LAYOUT_CONFLICT_STATUS = _(
         "SLIAFlow could not activate layout 701 because another layout uses "
         "that reserved identifier."
     )
     LAYOUT_UNAVAILABLE_STATUS = _(
-        "The SLIAFlow two-pane layout is not available in this Slicer window."
+        "The SLIAFlow six-panel layout is not available in this Slicer window."
     )
     CAMERA_SUPPORT_MISSING_STATUS = _(
         "Camera support is not installed. Choose Install Camera Support, then "
@@ -98,26 +218,16 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # refreshes triggered by the wire are throttled. A refresh the operator
     # asks for is never throttled.
     RESULT_REFRESH_INTERVAL_SEC = 0.2
+    # How often the connector's own state is read, because the event that
+    # announces a lost link never arrives. See _pollLinkStates. One second is
+    # far below the point where an operator would read a dead label as live,
+    # and the poll is three attribute reads per link.
+    LINK_STATE_POLL_INTERVAL_SEC = 1.0
     BANNER_UNAVAILABLE_STATUS = _(
         "The SIMULATED banner could not be drawn, so the simulated result was "
         "withheld."
     )
-    CUSTOM_LAYOUT_DESCRIPTION = (
-        '<layout type="horizontal" split="true">'
-        "<item>"
-        '<view class="vtkMRMLSliceNode" singletontag="SLIAFlowLive">'
-        '<property name="orientation" action="default">Axial</property>'
-        f'<property name="viewlabel" action="default">{escape(LIVE_VIEW_LABEL)}</property>'
-        "</view>"
-        "</item>"
-        "<item>"
-        '<view class="vtkMRMLSliceNode" singletontag="SLIAFlowResult">'
-        '<property name="orientation" action="default">Axial</property>'
-        f'<property name="viewlabel" action="default">{escape(RESULT_VIEW_LABEL)}</property>'
-        "</view>"
-        "</item>"
-        "</layout>"
-    )
+    CUSTOM_LAYOUT_DESCRIPTION = _layoutDescription(VIEW_ROWS)
 
     def __init__(self, parent=None) -> None:
         ScriptedLoadableModuleWidget.__init__(self, parent)
@@ -139,22 +249,44 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._simulatedBannerRenderer = None
         self._cameraSupportAvailable = False
         self._cameraRestartRequired = False
-        self._connectionStates = {
-            CONNECTOR_ACQUISITION: CONNECTION_DISCONNECTED,
-            CONNECTOR_UC1: CONNECTION_DISCONNECTED,
-        }
+        self._connectionStates = dict.fromkeys(CONNECTOR_ROLES, CONNECTION_DISCONNECTED)
+        # One callback per role per observed event, created once and kept. See
+        # _connectorCallbacks: the identity of the callback is what carries the
+        # event, and it is also the key the observation bookkeeping uses.
+        self._connectorEventCallbacks: dict[str, dict] = {}
         # Whether anything valid has ever reached each pane. It decides what a
         # disconnection looks like: a stale last image, or black.
         self._resultEverDisplayed = False
         self._liveViewEverDisplayed = False
+        self._uc2EverDisplayed = False
+        self._lastUc2Simulated = False
+        # Panel text other than the result view's waiting annotation: reserved
+        # reasons, waiting text and hidden-layer text, one actor per view.
+        self._panelAnnotationActors: dict[str, Any] = {}
+        self._panelAnnotationRenderers: dict[str, Any] = {}
+        self._panelMessages: dict[str, str] = {}
+        self._uc2BannerActor = None
+        self._uc2DetailActor = None
+        self._uc2BannerRenderer = None
+        # Layer display state. Transient, like demo mode: it decides how a
+        # result is drawn, never whether it is shown under its banner.
+        self._layerVisible = {layer: True for layer, _label, _view in self.LAYER_ROWS}
+        self._layerOpacity = {layer: 1.0 for layer, _label, _view in self.LAYER_ROWS}
+        self._layerStatusText = {layer: "" for layer, _label, _view in self.LAYER_ROWS}
+        self._cubeBandCount = 0
+        self._cubeWavelengths = None
+        self._cubeWavelengthReason = ""
         # Whether a link that had connected or presented data was then lost.
         # A connector that only ever waited leaves no history. Connector state is the
         # authority for what the wire is doing now; this history keeps a
         # retained node stale until a later received node update proves that
         # the current connection has delivered new data.
+        # The HS cube and control links retain no presented image, so they
+        # carry no stale history.
         self._linkDropped = {
             CONNECTOR_ACQUISITION: False,
             CONNECTOR_UC1: False,
+            CONNECTOR_UC2: False,
         }
         # A reconnect must not promote the node left by the previous socket.
         # Store its identity and modification time at disconnect so that an
@@ -163,12 +295,16 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._linkDropSnapshots = {
             CONNECTOR_ACQUISITION: None,
             CONNECTOR_UC1: None,
+            CONNECTOR_UC2: None,
         }
         self._lastResultSimulated = False
         self._lastResultRefreshTime = 0.0
         # Set when a wire event arrived inside the throttle window and a
         # trailing refresh is owed to it.
         self._pendingResultRefresh = False
+        # Runs while any link is up. See _pollLinkStates for why a panel that
+        # observes six connector events still has to read the state itself.
+        self._linkStateTimer = None
 
     def setup(self) -> None:
         super().setup()
@@ -206,18 +342,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.liveSourceSelector.connect(
             "currentIndexChanged(int)", self._onLiveSourceChanged
         )
-        self.ui.connectAcquisitionButton.connect(
-            "clicked()", lambda: self._connectLink(CONNECTOR_ACQUISITION)
-        )
-        self.ui.disconnectAcquisitionButton.connect(
-            "clicked()", lambda: self._disconnectLink(CONNECTOR_ACQUISITION)
-        )
-        self.ui.connectUc1Button.connect(
-            "clicked()", lambda: self._connectLink(CONNECTOR_UC1)
-        )
-        self.ui.disconnectUc1Button.connect(
-            "clicked()", lambda: self._disconnectLink(CONNECTOR_UC1)
-        )
+        self.ui.connectLinksButton.connect("toggled(bool)", self._onConnectLinksToggled)
+        self.ui.captureButton.connect("clicked()", self._onCaptureClicked)
+        self.ui.bandSlider.connect("valueChanged(int)", self._setCubeBand)
+        self._setupLayerTable()
         demoModeCheckBox = getattr(self.ui, "demoModeCheckBox", None)
         if demoModeCheckBox is not None:
             demoModeCheckBox.connect("toggled(bool)", self._onDemoModeToggled)
@@ -331,14 +459,17 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._demoModeEnabled = bool(enabled)
         if not self._demoModeEnabled:
             self._removeSimulatedBanner()
+            self._removeUc2Banner()
         self._updateDemoModeIndicator()
         if self._presentationActive:
             self._refreshResultPresentation()
+            self._refreshUc2Presentation()
 
     def _resetDemoMode(self) -> None:
         """Return demo mode to off without re-entering the toggle handler."""
         self._demoModeEnabled = False
         self._removeSimulatedBanner()
+        self._removeUc2Banner()
         checkBox = getattr(getattr(self, "ui", None), "demoModeCheckBox", None)
         if checkBox is not None:
             blocked = checkBox.blockSignals(True)
@@ -452,6 +583,9 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if sliceWidget is None:
                 return
             self._clearSliceLayers(sliceWidget)
+            self._showPanelMessage(
+                self.LIVE_VIEW_NAME, self.LIVE_WAITING_MESSAGE, layoutManager
+            )
             sliceView = sliceWidget.sliceView()
             if sliceView is not None:
                 sliceView.forceRender()
@@ -478,6 +612,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             liveComposite.SetForegroundVolumeID(None)
             liveComposite.SetLabelVolumeID(None)
             liveLogic.FitSliceToBackground()
+        self._removePanelMessage(self.LIVE_VIEW_NAME)
         liveView = liveWidget.sliceView()
         if liveView is not None:
             liveView.forceRender()
@@ -539,6 +674,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._observeConnector(role, connector)
         state = self.logic.startConnector(role)
         self._setConnectionState(role, state or CONNECTION_CONNECTING)
+        self._startLinkStatePolling()
         return state
 
     def _disconnectLink(self, role: str) -> None:
@@ -546,52 +682,88 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         connector = self.logic.connectorNode(role)
         if connector is not None:
-            self.removeObservers(self._connectorCallback(role))
+            self._removeConnectorObservers(role)
         self.logic.stopConnector(role)
         self._onLinkDisconnected(role)
+        self._stopLinkStatePollingIfIdle()
+
+    def _onConnectLinksToggled(self, checked=None) -> None:
+        """Start or stop every link at once; one control for five links."""
+        if checked is None:
+            button = getattr(self.ui, "connectLinksButton", None)
+            checked = False if button is None else button.checked
+        for role in CONNECTOR_ROLES:
+            if checked:
+                self._connectLink(role)
+            else:
+                self._disconnectLink(role)
+        self._refreshConnectionControls()
 
     def _disconnectAllLinks(self) -> None:
         if self.logic is None:
             return
-        for role in (CONNECTOR_ACQUISITION, CONNECTOR_UC1):
+        for role in CONNECTOR_ROLES:
             connector = self.logic.connectorNode(role)
             hadSession = connector is not None and self._linkHadSession(role)
             if connector is not None:
-                self.removeObservers(self._connectorCallback(role))
+                self._removeConnectorObservers(role)
             self.logic.stopConnector(role)
             self._connectionStates[role] = CONNECTION_DISCONNECTED
-            if hadSession:
+            if hadSession and role in self._linkDropped:
                 self._linkDropped[role] = True
                 self._rememberLinkDrop(role)
+        self._stopLinkStatePolling()
         if hasattr(self, "ui"):
             self._refreshConnectionControls()
 
-    def _connectorCallback(self, role: str):
-        return (
-            self._onAcquisitionEvent
-            if role == CONNECTOR_ACQUISITION
-            else self._onUc1Event
-        )
-
-    def _observeConnector(self, role: str, connector) -> None:
-        callback = self._connectorCallback(role)
+    def _observedConnectorEvents(self) -> tuple:
         logic = self.logic
-        for event in (
+        return (
             logic.CONNECTOR_CONNECTED_EVENT,
             logic.CONNECTOR_DISCONNECTED_EVENT,
             logic.CONNECTOR_ACTIVATED_EVENT,
             logic.CONNECTOR_DEACTIVATED_EVENT,
             logic.CONNECTOR_NEW_DEVICE_EVENT,
             logic.CONNECTOR_DEVICE_MODIFIED_EVENT,
-        ):
+        )
+
+    def _connectorCallbacks(self, role: str) -> dict:
+        """One callback per observed event, because the argument cannot say which.
+
+        VTK calls a Python observer with the event as a string, and
+        `vtkCommand::GetStringFromEventId` has no case for the connector's
+        custom ids (118944 and up), so all six arrive as `"NoEvent"`. A single
+        callback shared by six events therefore cannot tell a lost socket from
+        a received frame, and the loss branch was unreachable in a real Slicer:
+        a stopped producer left the panel reporting `displaying` indefinitely.
+        Which callback VTK called is the one thing that still identifies the
+        event, so each event gets its own.
+
+        They are built once and kept because the observation bookkeeping is
+        keyed by the callback object: a fresh closure per call would register a
+        duplicate observer every time and remove none of them.
+        """
+        callbacks = self._connectorEventCallbacks.get(role)
+        if callbacks is None:
+            callbacks = {
+                event: (
+                    lambda caller=None, vtkEvent=None, role=role, event=event: (
+                        self._onConnectorEvent(role, event)
+                    )
+                )
+                for event in self._observedConnectorEvents()
+            }
+            self._connectorEventCallbacks[role] = callbacks
+        return callbacks
+
+    def _observeConnector(self, role: str, connector) -> None:
+        for event, callback in self._connectorCallbacks(role).items():
             if not self.hasObserver(connector, event, callback):
                 self.addObserver(connector, event, callback)
 
-    def _onAcquisitionEvent(self, caller=None, event=None) -> None:
-        self._onConnectorEvent(CONNECTOR_ACQUISITION, event)
-
-    def _onUc1Event(self, caller=None, event=None) -> None:
-        self._onConnectorEvent(CONNECTOR_UC1, event)
+    def _removeConnectorObservers(self, role: str) -> None:
+        for callback in self._connectorCallbacks(role).values():
+            self.removeObservers(callback)
 
     def _onConnectorEvent(self, role: str, event=None) -> None:
         if self.logic is None:
@@ -618,6 +790,18 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if role == CONNECTOR_ACQUISITION:
             if self._liveSource() == LIVE_SOURCE_IGTL:
                 self._displayLiveViewNode()
+            return
+        # UC2 and the cube arrive once per capture, so they are not throttled.
+        if role == CONNECTOR_UC2:
+            if self._presentationActive:
+                self._refreshUc2Presentation()
+            return
+        if role == CONNECTOR_HS_CUBE:
+            if self._presentationActive:
+                self._refreshCubePresentation()
+            return
+        if role == CONNECTOR_CONTROL:
+            self._refreshCaptureState()
             return
         now = time.monotonic()
         if now - self._lastResultRefreshTime < self.RESULT_REFRESH_INTERVAL_SEC:
@@ -654,6 +838,78 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._lastResultRefreshTime = time.monotonic()
         self._refreshResultPresentation()
 
+    def _pollLinkStates(self) -> None:
+        """Notice a lost peer, which the connector cannot announce.
+
+        `igtlioConnector`'s receiver thread sets the state to WaitConnection
+        and then only *queues* DisconnectedEvent, because it is not on the main
+        thread. That queue is drained by `ImportEventsFromEventBuffer`, which
+        is reached only from `PeriodicProcess`, and
+        `vtkSlicerOpenIGTLinkIFLogic::CallConnectorTimerHander` skips every
+        connector whose state is not StateConnected. The state has already left
+        StateConnected by the time the pump next runs, so the loss of a link is
+        the one event that link can never deliver, and a stopped producer left
+        the label reading `displaying` indefinitely.
+
+        The state itself stays truthful, so it is read directly. The observers
+        remain the fast path for everything they do deliver; this only catches
+        what they cannot.
+        """
+        if self.logic is None:
+            return
+        for role in CONNECTOR_ROLES:
+            if self.logic.connectorNode(role) is None:
+                continue
+            state = self.logic.connectorState(role)
+            reported = self.connectionState(role)
+            if state == reported:
+                continue
+            if state == CONNECTION_RECEIVING and reported in (
+                CONNECTION_DISPLAYING,
+                CONNECTION_INVALID,
+            ):
+                # Both are refinements of a connected socket, and both say
+                # more about the data than the socket state can. They are not
+                # disagreements with it.
+                continue
+            if reported in (
+                CONNECTION_RECEIVING,
+                CONNECTION_DISPLAYING,
+                CONNECTION_INVALID,
+            ):
+                # The panel claimed a live link and the socket says otherwise.
+                # This is the loss, reported through the same path the event
+                # would have taken, so the retained image and its stale
+                # wording are decided in exactly one place.
+                self._onLinkDisconnected(role)
+                continue
+            self._setConnectionState(role, state)
+
+    def _startLinkStatePolling(self) -> None:
+        if self._linkStateTimer is not None:
+            return
+        timer = qt.QTimer()
+        timer.setInterval(int(self.LINK_STATE_POLL_INTERVAL_SEC * 1000.0))
+        timer.connect("timeout()", self._pollLinkStates)
+        timer.start()
+        self._linkStateTimer = timer
+
+    def _stopLinkStatePolling(self) -> None:
+        timer, self._linkStateTimer = self._linkStateTimer, None
+        if timer is None:
+            return
+        timer.stop()
+        timer.disconnect("timeout()", self._pollLinkStates)
+
+    def _stopLinkStatePollingIfIdle(self) -> None:
+        """Stop polling once the last link is gone, not before."""
+        if self.logic is None:
+            self._stopLinkStatePolling()
+            return
+        if any(self.logic.connectorNode(role) is not None for role in CONNECTOR_ROLES):
+            return
+        self._stopLinkStatePolling()
+
     def _linkConnected(self, role: str) -> bool:
         """Whether this link's connector currently reports StateConnected.
 
@@ -677,6 +933,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return None
         if role == CONNECTOR_ACQUISITION:
             return self.logic.findLiveViewNode()
+        if role == CONNECTOR_UC2:
+            return self.logic.findReceivedNode(UC2_DEVICE_NAME)
         if self._parameterNode is None:
             return None
         descriptor = self.logic.resultDescriptor(self._parameterNode.resultMap)
@@ -708,11 +966,13 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         This is judged from the panel's own record, so it must be asked before
         the loss overwrites the panel state.
         """
-        retainedPresentation = (
-            self._liveViewEverDisplayed
-            if role == CONNECTOR_ACQUISITION
-            else self._resultEverDisplayed
-        )
+        if role not in self._linkDropped:
+            return False
+        retainedPresentation = {
+            CONNECTOR_ACQUISITION: self._liveViewEverDisplayed,
+            CONNECTOR_UC1: self._resultEverDisplayed,
+            CONNECTOR_UC2: self._uc2EverDisplayed,
+        }[role]
         return retainedPresentation or self.connectionState(role) in (
             CONNECTION_RECEIVING,
             CONNECTION_DISPLAYING,
@@ -727,6 +987,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         panel state is enough to distinguish a link that had been connected
         from a pre-existing scene node that never belonged to a link.
         """
+        if role not in self._linkDropped:
+            return
         if self._linkConnected(role) or self.connectionState(role) not in (
             CONNECTION_RECEIVING,
             CONNECTION_DISPLAYING,
@@ -787,6 +1049,15 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._clearResultView()
                 self._setResultStatus("WARN", self.RESULT_WAITING_STATUS)
             return
+        if role == CONNECTOR_UC2:
+            if self._uc2EverDisplayed:
+                self._setLayerStatus(self.LAYER_UC2, "WARN", self._staleUc2Status())
+            else:
+                self._clearUc2View()
+                self._setLayerStatus(self.LAYER_UC2, "WARN", self.UC2_WAITING_MESSAGE)
+            return
+        if role in (CONNECTOR_HS_CUBE, CONNECTOR_CONTROL):
+            return
         if self._liveSource() != LIVE_SOURCE_IGTL:
             return
         if self._liveViewEverDisplayed:
@@ -827,25 +1098,21 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         unavailableLabel = getattr(self.ui, "openIGTLinkUnavailableLabel", None)
         if unavailableLabel is not None:
             unavailableLabel.setVisible(not available)
-        for role, connectButton, disconnectButton, valueLabel in (
-            (
-                CONNECTOR_ACQUISITION,
-                "connectAcquisitionButton",
-                "disconnectAcquisitionButton",
-                "acquisitionStateValueLabel",
-            ),
-            (CONNECTOR_UC1, "connectUc1Button", "disconnectUc1Button", "uc1StateValueLabel"),
-        ):
-            connected = self.logic.connectorNode(role) is not None
-            button = getattr(self.ui, connectButton, None)
-            if button is not None:
-                button.setEnabled(available and not connected)
-            button = getattr(self.ui, disconnectButton, None)
-            if button is not None:
-                button.setEnabled(connected)
+        anyConnector = any(
+            self.logic.connectorNode(role) is not None for role in CONNECTOR_ROLES
+        )
+        button = getattr(self.ui, "connectLinksButton", None)
+        if button is not None:
+            blocked = button.blockSignals(True)
+            button.setChecked(anyConnector)
+            button.blockSignals(blocked)
+            button.setEnabled(available or anyConnector)
+            button.setText(_("Disconnect links") if anyConnector else _("Connect links"))
+        for role, valueLabel in self.LINK_STATE_LABELS.items():
             label = getattr(self.ui, valueLabel, None)
             if label is not None:
                 label.setText(self.connectionState(role))
+        self._refreshCaptureControls()
 
     def _displayLiveViewNode(self, layoutManager=None) -> dict:
         """Bind the received LiveView node to the left pane, and nowhere else.
@@ -921,6 +1188,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             liveComposite.SetForegroundVolumeID(None)
             liveComposite.SetLabelVolumeID(None)
             liveLogic.FitSliceToBackground()
+        self._removePanelMessage(self.LIVE_VIEW_NAME)
         liveView = liveWidget.sliceView()
         if liveView is not None:
             liveView.forceRender()
@@ -948,6 +1216,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         sourceValueLabel = getattr(self.ui, "resultSourceValueLabel", None)
         if sourceValueLabel is not None:
             sourceValueLabel.setText(sourceName or _("None"))
+        self._setLayerStatus(self.LAYER_UC1, status, message)
 
     def _refreshResultPresentation(self, caller=None, event=None) -> dict:
         if self.logic is None or self._parameterNode is None:
@@ -1046,6 +1315,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 return
             self._clearSliceLayers(resultWidget)
             self._removeSimulatedBanner()
+            self._removePanelMessage(self.RESULT_VIEW_NAME)
             self._showWaitingAnnotation(resultWidget)
             resultView = resultWidget.sliceView()
             if resultView is not None:
@@ -1059,21 +1329,18 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         resultNode = self._parameterNode.resultVolume
         if resultNode is None:
             return
-        if layoutManager is None:
-            layoutManager = slicer.app.layoutManager()
-        if layoutManager is None:
-            return
-        resultWidget = layoutManager.sliceWidget(self.RESULT_VIEW_NAME)
+        resultWidget = self._sliceWidgetOrNone(self.RESULT_VIEW_NAME, layoutManager)
         if resultWidget is None:
             return
-        resultLogic = resultWidget.sliceLogic()
-        resultComposite = resultLogic.GetSliceCompositeNode()
-        if resultComposite.GetBackgroundVolumeID() != resultNode.GetID():
-            resultComposite.SetBackgroundVolumeID(resultNode.GetID())
-            resultComposite.SetForegroundVolumeID(None)
-            resultComposite.SetLabelVolumeID(None)
-            resultLogic.FitSliceToBackground()
         self._removeWaitingAnnotation()
+        if self._bindLayer(resultWidget, resultNode.GetID(), self.LAYER_UC1):
+            self._removePanelMessage(self.RESULT_VIEW_NAME)
+        else:
+            self._showPanelMessage(
+                self.RESULT_VIEW_NAME,
+                self.HIDDEN_LAYER_MESSAGE.format(layer=self._layerLabel(self.LAYER_UC1)),
+                layoutManager,
+            )
         resultView = resultWidget.sliceView()
         if resultView is not None:
             resultView.forceRender()
@@ -1152,6 +1419,9 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._presentationActive = True
         self._configureResultControls()
         self._refreshResultPresentation()
+        self._refreshUc2Presentation()
+        self._refreshCubePresentation()
+        self._refreshCaptureControls()
         return True
 
     @staticmethod
@@ -1163,10 +1433,21 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     @staticmethod
     def _sliceViewRenderer(sliceWidget):
+        """The renderer now on screen for one panel, or None.
+
+        A view that cannot supply a renderer yields None rather than raising:
+        the callers draw text on a panel, and failing to decorate a panel must
+        not take down the presentation that owns it. Where the text is a
+        requirement rather than a decoration - a reserved panel's reason -
+        the caller checks the return value and refuses instead.
+        """
         sliceView = sliceWidget.sliceView()
         if sliceView is None:
             return None
-        renderWindow = sliceView.renderWindow()
+        renderWindow = getattr(sliceView, "renderWindow", None)
+        if renderWindow is None:
+            return None
+        renderWindow = renderWindow()
         if renderWindow is None:
             return None
         return renderWindow.GetRenderers().GetFirstRenderer()
@@ -1353,8 +1634,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _configurePresentation(self, layoutManager) -> bool:
         for viewName, viewLabel in (
-            (self.LIVE_VIEW_NAME, self.LIVE_VIEW_LABEL),
-            (self.RESULT_VIEW_NAME, self.RESULT_VIEW_LABEL),
+            view for row in self.VIEW_ROWS for view in row
         ):
             sliceWidget = layoutManager.sliceWidget(viewName)
             if sliceWidget is None:
@@ -1368,6 +1648,17 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if viewName == self.RESULT_VIEW_NAME:
                 if not self._showWaitingAnnotation(sliceWidget):
                     return False
+            elif viewName in self.RESERVED_PANEL_REASONS:
+                if not self._showPanelMessage(
+                    viewName, self.RESERVED_PANEL_REASONS[viewName], layoutManager
+                ):
+                    return False
+            elif viewName == self.CUBE_VIEW_NAME:
+                self._showPanelMessage(viewName, self.CUBE_WAITING_MESSAGE, layoutManager)
+            elif viewName == self.VASCULAR_VIEW_NAME:
+                self._showPanelMessage(viewName, self.UC2_WAITING_MESSAGE, layoutManager)
+            elif viewName == self.LIVE_VIEW_NAME:
+                self._showPanelMessage(viewName, self.LIVE_WAITING_MESSAGE, layoutManager)
 
             sliceView = sliceWidget.sliceView()
             if sliceView is None:
@@ -1396,6 +1687,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self._removeWaitingAnnotation()
         self._removeSimulatedBanner()
+        self._removeUc2Banner()
+        self._removeAllPanelMessages()
         if layoutManager is not None:
             layoutNode = layoutManager.layoutLogic().GetLayoutNode()
             if int(layoutNode.GetViewArrangement()) == self.CUSTOM_LAYOUT_ID:
@@ -1413,3 +1706,571 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._presentationActive = False
         if hasattr(self, "ui"):
             self._configureResultControls()
+
+    # ------------------------------------------------------------------
+    # Panel text (SLIA-022)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sliceWidgetOrNone(viewName: str, layoutManager=None):
+        if layoutManager is None:
+            layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            return None
+        try:
+            return layoutManager.sliceWidget(viewName)
+        except RuntimeError:
+            return None
+
+    def panelMessage(self, viewName: str) -> str:
+        """The text this panel is currently asked to carry, or an empty string."""
+        return self._panelMessages.get(viewName, "")
+
+    @staticmethod
+    def _createPanelMessageActor(message: str):
+        actor = vtk.vtkTextActor()
+        actor.SetInput(message)
+        actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        actor.SetPosition(0.5, 0.5)
+        textProperty = actor.GetTextProperty()
+        textProperty.SetFontSize(14)
+        textProperty.SetColor(1.0, 1.0, 1.0)
+        textProperty.SetJustificationToCentered()
+        textProperty.SetVerticalJustificationToCentered()
+        return actor
+
+    def _showPanelMessage(self, viewName: str, message: str, layoutManager=None) -> bool:
+        """Write text on one panel. Returns whether it reached a renderer."""
+        self._panelMessages[viewName] = message
+        actor = self._panelAnnotationActors.get(viewName)
+        if actor is None:
+            actor = self._createPanelMessageActor(message)
+            self._panelAnnotationActors[viewName] = actor
+        else:
+            actor.SetInput(message)
+        sliceWidget = self._sliceWidgetOrNone(viewName, layoutManager)
+        if sliceWidget is None:
+            return False
+        renderer = self._sliceViewRenderer(sliceWidget)
+        placed = self._placeAnnotationActor(
+            renderer, actor, self._panelAnnotationRenderers.get(viewName)
+        )
+        if placed is not None:
+            self._panelAnnotationRenderers[viewName] = placed
+        return placed is not None
+
+    def _removePanelMessage(self, viewName: str) -> None:
+        self._panelMessages.pop(viewName, None)
+        actor = self._panelAnnotationActors.pop(viewName, None)
+        renderer = self._panelAnnotationRenderers.pop(viewName, None)
+        if actor is None or renderer is None:
+            return
+        try:
+            renderer.RemoveActor2D(actor)
+        except (RuntimeError, ValueError):
+            pass
+
+    def _removeAllPanelMessages(self) -> None:
+        for viewName in list(self._panelAnnotationActors):
+            self._removePanelMessage(viewName)
+        self._panelMessages.clear()
+
+    # ------------------------------------------------------------------
+    # Layers (SLIA-022)
+    #
+    # Each result layer lives in its own panel (ADR-0001 rule 3). Show, hide
+    # and opacity change only the slice composite node; no pixel of a result
+    # is changed, and the banner follows the presentation, not the layer.
+    # ------------------------------------------------------------------
+
+    def _layerRow(self, layer: str) -> int:
+        for row, (rowLayer, _label, _viewName) in enumerate(self.LAYER_ROWS):
+            if rowLayer == layer:
+                return row
+        raise ValueError(f"Unknown layer: {layer}")
+
+    def _layerLabel(self, layer: str) -> str:
+        return self.LAYER_ROWS[self._layerRow(layer)][1]
+
+    def layerState(self, layer: str) -> tuple[bool, float]:
+        self._layerRow(layer)
+        return self._layerVisible[layer], self._layerOpacity[layer]
+
+    def layerStatus(self, layer: str) -> str:
+        """The status text shown for one layer in the layer list."""
+        table = getattr(getattr(self, "ui", None), "layerTable", None)
+        if table is not None:
+            item = table.item(self._layerRow(layer), 1)
+            if item is not None:
+                return item.text()
+        return self._layerStatusText.get(layer, "")
+
+    def _setLayerStatus(self, layer: str, status: str, message: str) -> None:
+        text = _("{0}: {1}").format(status, message)
+        self._layerStatusText[layer] = text
+        table = getattr(getattr(self, "ui", None), "layerTable", None)
+        if table is None:
+            return
+        item = table.item(self._layerRow(layer), 1)
+        if item is None:
+            return
+        blocked = table.blockSignals(True)
+        item.setText(text)
+        item.setToolTip(text)
+        table.blockSignals(blocked)
+
+    def _setupLayerTable(self) -> None:
+        table = getattr(self.ui, "layerTable", None)
+        if table is None:
+            return
+        table.setColumnCount(2)
+        table.setRowCount(len(self.LAYER_ROWS))
+        table.setHorizontalHeaderLabels([_("Layer"), _("Status")])
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        blocked = table.blockSignals(True)
+        for row, (layer, label, _viewName) in enumerate(self.LAYER_ROWS):
+            layerItem = qt.QTableWidgetItem(label)
+            layerItem.setFlags(
+                qt.Qt.ItemIsUserCheckable | qt.Qt.ItemIsEnabled | qt.Qt.ItemIsSelectable
+            )
+            layerItem.setCheckState(
+                qt.Qt.Checked if self._layerVisible[layer] else qt.Qt.Unchecked
+            )
+            table.setItem(row, 0, layerItem)
+            statusItem = qt.QTableWidgetItem(self._layerStatusText[layer])
+            statusItem.setFlags(qt.Qt.ItemIsEnabled | qt.Qt.ItemIsSelectable)
+            table.setItem(row, 1, statusItem)
+        table.blockSignals(blocked)
+        table.resizeColumnToContents(0)
+        table.connect("itemChanged(QTableWidgetItem*)", self._onLayerItemChanged)
+        table.connect("currentCellChanged(int,int,int,int)", self._onLayerSelectionChanged)
+        table.setCurrentCell(0, 0)
+        slider = getattr(self.ui, "layerOpacitySlider", None)
+        if slider is not None:
+            slider.connect("valueChanged(int)", self._onLayerOpacitySliderChanged)
+
+    def _selectedLayer(self) -> str:
+        table = getattr(getattr(self, "ui", None), "layerTable", None)
+        row = -1 if table is None else int(table.currentRow())
+        if 0 <= row < len(self.LAYER_ROWS):
+            return self.LAYER_ROWS[row][0]
+        return self.LAYER_UC1
+
+    def _onLayerItemChanged(self, item=None) -> None:
+        if item is None or item.column() != 0:
+            return
+        row = item.row()
+        if not 0 <= row < len(self.LAYER_ROWS):
+            return
+        self.setLayerVisible(self.LAYER_ROWS[row][0], item.checkState() == qt.Qt.Checked)
+
+    def _onLayerSelectionChanged(self, *args) -> None:
+        self._syncOpacitySlider()
+
+    def _onLayerOpacitySliderChanged(self, value) -> None:
+        self.setLayerOpacity(self._selectedLayer(), float(value) / 100.0)
+
+    def _syncOpacitySlider(self) -> None:
+        slider = getattr(getattr(self, "ui", None), "layerOpacitySlider", None)
+        if slider is None:
+            return
+        blocked = slider.blockSignals(True)
+        slider.setValue(int(round(self._layerOpacity[self._selectedLayer()] * 100.0)))
+        slider.blockSignals(blocked)
+
+    def setLayerVisible(self, layer: str, visible: bool, layoutManager=None) -> None:
+        row = self._layerRow(layer)
+        self._layerVisible[layer] = bool(visible)
+        table = getattr(getattr(self, "ui", None), "layerTable", None)
+        item = None if table is None else table.item(row, 0)
+        if item is not None:
+            blocked = table.blockSignals(True)
+            item.setCheckState(qt.Qt.Checked if visible else qt.Qt.Unchecked)
+            table.blockSignals(blocked)
+        self._applyLayer(layer, layoutManager)
+
+    def setLayerOpacity(self, layer: str, opacity: float, layoutManager=None) -> None:
+        self._layerRow(layer)
+        self._layerOpacity[layer] = min(1.0, max(0.0, float(opacity)))
+        if self._selectedLayer() == layer:
+            self._syncOpacitySlider()
+        self._applyLayer(layer, layoutManager)
+
+    def _applyLayer(self, layer: str, layoutManager=None) -> None:
+        if layer == self.LAYER_UC1:
+            self._displayResultVolume(layoutManager=layoutManager)
+        else:
+            self._displayUc2Volume(layoutManager=layoutManager)
+
+    def _bindLayer(self, sliceWidget, nodeID: str, layer: str) -> bool:
+        """Bind one layer's node to its panel. Returns False when hidden.
+
+        Full opacity uses the background slot, exactly as before SLIA-022.
+        Lower opacity uses the foreground slot over an empty background, so the
+        layer fades to black. SLIA-024 fills that background with the same
+        cube's colour image; nothing else may be put there.
+        """
+        visible, opacity = self.layerState(layer)
+        sliceLogic = sliceWidget.sliceLogic()
+        composite = sliceLogic.GetSliceCompositeNode()
+        if not visible:
+            composite.SetBackgroundVolumeID(None)
+            composite.SetForegroundVolumeID(None)
+            composite.SetLabelVolumeID(None)
+            return False
+        if opacity >= 1.0:
+            if composite.GetBackgroundVolumeID() != nodeID:
+                composite.SetBackgroundVolumeID(nodeID)
+                sliceLogic.FitSliceToBackground()
+            composite.SetForegroundVolumeID(None)
+        else:
+            composite.SetBackgroundVolumeID(None)
+            composite.SetForegroundVolumeID(nodeID)
+            composite.SetForegroundOpacity(opacity)
+        composite.SetLabelVolumeID(None)
+        return True
+
+    # ------------------------------------------------------------------
+    # Enhanced Vascularization: the UC2 layer (SLIA-022)
+    # ------------------------------------------------------------------
+
+    def _staleUc2Status(self) -> str:
+        if self._lastUc2Simulated:
+            return self.SIMULATED_STATUS_PREFIX + self.UC2_STALE_STATUS
+        return self.UC2_STALE_STATUS
+
+    def _refreshUc2Presentation(self, caller=None, event=None, layoutManager=None) -> dict:
+        if self.logic is None or self._parameterNode is None:
+            return {"summaryStatus": "WARN", "summaryMessage": "No parameter node."}
+
+        connectorState = self.logic.connectorState(CONNECTOR_UC2)
+        self._recordUnobservedLinkDrop(CONNECTOR_UC2)
+        self._linkHasFreshData(CONNECTOR_UC2)
+        linkConnected = self._linkConnected(CONNECTOR_UC2)
+        report = self.logic.presentUc2(
+            self._parameterNode, allowSimulated=self._demoModeEnabled
+        )
+        simulated = report.get("dataOrigin") == RESULT_SOURCE_SIMULATED_ORIGIN
+        if report["summaryStatus"] == "PASS":
+            # As for UC1: the banner is in place before the map is bound, and a
+            # banner that cannot be drawn withholds the map.
+            if not self._updateUc2Banner(
+                simulated, report.get("simulationDetail"), layoutManager
+            ):
+                self.logic.clearUc2References(self._parameterNode)
+                self._clearUc2View(layoutManager)
+                self._uc2EverDisplayed = False
+                self._setLayerStatus(self.LAYER_UC2, "FAIL", self.BANNER_UNAVAILABLE_STATUS)
+                return dict(
+                    report,
+                    summaryStatus="FAIL",
+                    summaryMessage=self.BANNER_UNAVAILABLE_STATUS,
+                )
+            self._displayUc2Volume(layoutManager)
+            self._uc2EverDisplayed = True
+            self._lastUc2Simulated = simulated
+            message = report["summaryMessage"]
+            if simulated:
+                message = self.SIMULATED_STATUS_PREFIX + message
+            stalePresentation = self._linkDropped[CONNECTOR_UC2]
+            if linkConnected and not stalePresentation:
+                self._setLayerStatus(self.LAYER_UC2, "PASS", message)
+                self._setConnectionState(CONNECTOR_UC2, CONNECTION_DISPLAYING)
+            elif stalePresentation:
+                self._setLayerStatus(self.LAYER_UC2, "WARN", self._staleUc2Status())
+                self._setConnectionState(CONNECTOR_UC2, connectorState)
+            else:
+                self._setLayerStatus(self.LAYER_UC2, "PASS", message)
+                self._setConnectionState(CONNECTOR_UC2, connectorState)
+            return report
+
+        self.logic.clearUc2References(self._parameterNode)
+        self._clearUc2View(layoutManager)
+        self._uc2EverDisplayed = False
+        if report["summaryStatus"] == "FAIL":
+            if report.get("provenance") == "unrecognized":
+                invalidStatus = self.UC2_INVALID_PROVENANCE_STATUS
+            elif simulated:
+                invalidStatus = self.UC2_INVALID_SIMULATED_STATUS
+            else:
+                invalidStatus = self.UC2_INVALID_STATUS
+            self._setLayerStatus(
+                self.LAYER_UC2, "FAIL", f"{invalidStatus} {report['summaryMessage']}"
+            )
+            self._setConnectionState(
+                CONNECTOR_UC2,
+                CONNECTION_INVALID
+                if linkConnected and not self._linkDropped[CONNECTOR_UC2]
+                else connectorState,
+            )
+        else:
+            self._setLayerStatus(self.LAYER_UC2, "WARN", report["summaryMessage"])
+            self._setConnectionState(CONNECTOR_UC2, connectorState)
+        return report
+
+    def _clearUc2View(self, layoutManager=None) -> None:
+        self._removeUc2Banner()
+        vascularWidget = self._sliceWidgetOrNone(self.VASCULAR_VIEW_NAME, layoutManager)
+        if vascularWidget is None:
+            return
+        try:
+            self._clearSliceLayers(vascularWidget)
+            self._showPanelMessage(
+                self.VASCULAR_VIEW_NAME, self.UC2_WAITING_MESSAGE, layoutManager
+            )
+            vascularView = vascularWidget.sliceView()
+            if vascularView is not None:
+                vascularView.forceRender()
+        except RuntimeError:
+            return
+
+    def _displayUc2Volume(self, layoutManager=None) -> None:
+        if self._parameterNode is None:
+            return
+        try:
+            uc2Node = self._parameterNode.uc2Volume
+        except (KeyError, TypeError):
+            uc2Node = None
+        if uc2Node is None:
+            return
+        vascularWidget = self._sliceWidgetOrNone(self.VASCULAR_VIEW_NAME, layoutManager)
+        if vascularWidget is None:
+            return
+        if self._bindLayer(vascularWidget, uc2Node.GetID(), self.LAYER_UC2):
+            self._removePanelMessage(self.VASCULAR_VIEW_NAME)
+        else:
+            self._showPanelMessage(
+                self.VASCULAR_VIEW_NAME,
+                self.HIDDEN_LAYER_MESSAGE.format(layer=self._layerLabel(self.LAYER_UC2)),
+                layoutManager,
+            )
+        vascularView = vascularWidget.sliceView()
+        if vascularView is not None:
+            vascularView.forceRender()
+
+    def _updateUc2Banner(self, simulated: bool, detail=None, layoutManager=None) -> bool:
+        """Bring the UC2 panel's banner into agreement with the origin shown.
+
+        Returns False only when a banner is required on a panel that exists
+        and cannot be drawn.
+        """
+        if not simulated:
+            self._removeUc2Banner()
+            return True
+        vascularWidget = self._sliceWidgetOrNone(self.VASCULAR_VIEW_NAME, layoutManager)
+        if vascularWidget is None:
+            self._removeUc2Banner()
+            return True
+        renderer = self._sliceViewRenderer(vascularWidget)
+        if renderer is None:
+            self._removeUc2Banner()
+            return False
+
+        if self._uc2BannerActor is None:
+            self._uc2BannerActor = self._createBannerActor(
+                UC2_SIMULATED_BANNER_MESSAGE,
+                self.SIMULATED_BANNER_FONT_SIZE,
+                self.SIMULATED_BANNER_POSITION,
+                bold=True,
+            )
+        if not detail:
+            if self._uc2DetailActor is not None and self._uc2BannerRenderer is not None:
+                try:
+                    self._uc2BannerRenderer.RemoveActor2D(self._uc2DetailActor)
+                except (RuntimeError, ValueError):
+                    pass
+            self._uc2DetailActor = None
+        elif self._uc2DetailActor is None:
+            self._uc2DetailActor = self._createBannerActor(
+                detail,
+                self.SIMULATED_DETAIL_FONT_SIZE,
+                self.SIMULATED_DETAIL_POSITION,
+                bold=False,
+            )
+        else:
+            self._uc2DetailActor.SetInput(detail)
+
+        previousRenderer = self._uc2BannerRenderer
+        self._uc2BannerRenderer = self._placeAnnotationActor(
+            renderer, self._uc2BannerActor, previousRenderer
+        )
+        if self._uc2DetailActor is not None:
+            self._placeAnnotationActor(renderer, self._uc2DetailActor, previousRenderer)
+        return self._uc2BannerRenderer is not None
+
+    def _removeUc2Banner(self) -> None:
+        renderer = self._uc2BannerRenderer
+        actors = (self._uc2BannerActor, self._uc2DetailActor)
+        self._uc2BannerRenderer = None
+        self._uc2BannerActor = None
+        self._uc2DetailActor = None
+        if renderer is None:
+            return
+        for actor in actors:
+            if actor is None:
+                continue
+            try:
+                renderer.RemoveActor2D(actor)
+            except (RuntimeError, ValueError):
+                pass
+
+    # ------------------------------------------------------------------
+    # Capture (SLIA-022)
+    # ------------------------------------------------------------------
+
+    def _controlLinkConnected(self) -> bool:
+        return (
+            self.logic is not None
+            and self.logic.connectorState(CONNECTOR_CONTROL) == CONNECTION_RECEIVING
+        )
+
+    def _refreshCaptureControls(self) -> None:
+        if not hasattr(self, "ui") or self.logic is None:
+            return
+        button = getattr(self.ui, "captureButton", None)
+        if button is not None:
+            button.setEnabled(self._controlLinkConnected())
+        self._refreshCaptureState()
+
+    def _refreshCaptureState(self) -> None:
+        """Quote what the stand-in last said, under a word the operator reads."""
+        label = getattr(getattr(self, "ui", None), "captureStatusLabel", None)
+        if label is None or self.logic is None:
+            return
+        if not self._controlLinkConnected():
+            label.setText(self.CAPTURE_NEEDS_CONTROL_LINK_STATUS)
+            return
+        lines = []
+        status = self.logic.captureText(CAPTURE_STATUS_DEVICE_NAME)
+        if status is not None:
+            lines.append(
+                _("Stand-in: {0}").format(self.logic.describeCaptureMessage(status))
+            )
+        reply = self.logic.captureText(CAPTURE_REPLY_DEVICE_NAME)
+        if reply is not None:
+            lines.append(
+                _("Last answer: {0}").format(self.logic.describeCaptureMessage(reply))
+            )
+        label.setText("\n".join(lines) if lines else self.CAPTURE_NO_ANSWER_STATUS)
+
+    def _onCaptureClicked(self) -> None:
+        if self.logic is None:
+            return
+        self.logic.sendCaptureTrigger()
+        self._refreshCaptureControls()
+
+    # ------------------------------------------------------------------
+    # HS Cube band browser (SLIA-022)
+    #
+    # The cube is shown as received. Browsing moves the slice, and nothing is
+    # computed from the data.
+    # ------------------------------------------------------------------
+
+    def _refreshCubePresentation(self, caller=None, event=None, layoutManager=None) -> dict:
+        if self.logic is None or self._parameterNode is None:
+            return {"summaryStatus": "WARN", "summaryMessage": "No parameter node."}
+        cubeNode = self.logic.findCubeNode()
+        report = self.logic.validateCubeNode(cubeNode)
+        slider = getattr(self.ui, "bandSlider", None)
+        cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME, layoutManager)
+
+        if report["summaryStatus"] != "PASS":
+            self._parameterNode.parameterNode.SetNodeReferenceID("cubeSourceVolume", None)
+            self._cubeBandCount = 0
+            self._cubeWavelengths = None
+            self._cubeWavelengthReason = ""
+            if slider is not None:
+                blocked = slider.blockSignals(True)
+                slider.setRange(0, 0)
+                slider.setEnabled(False)
+                slider.blockSignals(blocked)
+            self._setCubeBand(0, layoutManager)
+            if cubeWidget is not None:
+                try:
+                    self._clearSliceLayers(cubeWidget)
+                    self._showPanelMessage(
+                        self.CUBE_VIEW_NAME,
+                        self.CUBE_WAITING_MESSAGE
+                        if report["summaryStatus"] == "WARN"
+                        else report["summaryMessage"],
+                        layoutManager,
+                    )
+                except RuntimeError:
+                    pass
+            return report
+
+        self._parameterNode.cubeSourceVolume = cubeNode
+        self._cubeBandCount = int(report["bandCount"])
+        self._cubeWavelengths = report.get("wavelengths")
+        self._cubeWavelengthReason = (
+            "" if self._cubeWavelengths is not None else report["summaryMessage"]
+        )
+        band = 0 if slider is None else min(int(slider.value), self._cubeBandCount - 1)
+        if slider is not None:
+            blocked = slider.blockSignals(True)
+            slider.setRange(0, self._cubeBandCount - 1)
+            slider.setValue(band)
+            slider.setEnabled(True)
+            slider.blockSignals(blocked)
+        if cubeWidget is not None:
+            try:
+                cubeLogic = cubeWidget.sliceLogic()
+                composite = cubeLogic.GetSliceCompositeNode()
+                if composite.GetBackgroundVolumeID() != cubeNode.GetID():
+                    composite.SetBackgroundVolumeID(cubeNode.GetID())
+                    composite.SetForegroundVolumeID(None)
+                    composite.SetLabelVolumeID(None)
+                    cubeLogic.FitSliceToBackground()
+                self._removePanelMessage(self.CUBE_VIEW_NAME)
+            except RuntimeError:
+                pass
+        self._setCubeBand(band, layoutManager)
+        return report
+
+    def _setCubeBand(self, band=0, layoutManager=None) -> None:
+        label = getattr(getattr(self, "ui", None), "bandValueLabel", None)
+        if self._cubeBandCount <= 0:
+            if label is not None:
+                label.setText(_("No HS cube received."))
+                label.setToolTip("")
+            return
+        lastBand = self._cubeBandCount - 1
+        band = max(0, min(int(band), lastBand))
+        slider = getattr(self.ui, "bandSlider", None)
+        if slider is not None and int(slider.value) != band:
+            blocked = slider.blockSignals(True)
+            slider.setValue(band)
+            slider.blockSignals(blocked)
+        if label is not None:
+            if self._cubeWavelengths is not None:
+                label.setText(
+                    _("Band {band} (0 to {last}): {wavelength} nm").format(
+                        band=band,
+                        last=lastBand,
+                        wavelength=f"{self._cubeWavelengths[band]:g}",
+                    )
+                )
+                label.setToolTip("")
+            else:
+                label.setText(
+                    _("Band {band} (0 to {last}): wavelength not available").format(
+                        band=band, last=lastBand
+                    )
+                )
+                label.setToolTip(self._cubeWavelengthReason)
+
+        cubeNode = None if self._parameterNode is None else self._parameterNode.cubeSourceVolume
+        cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME, layoutManager)
+        if cubeNode is None or cubeWidget is None:
+            return
+        try:
+            ijkToRas = vtk.vtkMatrix4x4()
+            cubeNode.GetIJKToRASMatrix(ijkToRas)
+            ras = ijkToRas.MultiplyPoint((0.0, 0.0, float(band), 1.0))
+            cubeWidget.mrmlSliceNode().JumpSliceByOffsetting(ras[0], ras[1], ras[2])
+            cubeView = cubeWidget.sliceView()
+            if cubeView is not None:
+                cubeView.forceRender()
+        except (AttributeError, RuntimeError):
+            return

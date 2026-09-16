@@ -1,4 +1,5 @@
 import contextlib
+import importlib
 import io
 import time
 import unittest
@@ -43,6 +44,10 @@ from .SLIAFlowParameterNode import (
     simulatedBannerMessage,
 )
 
+# The package re-exports the parameter-node class under the same name as its
+# module, so `from . import SLIAFlowParameterNode` would bind the class.
+parameterModule = importlib.import_module(".SLIAFlowParameterNode", __package__)
+
 
 class SLIAFlowTest(ScriptedLoadableModuleTest):
     """Focused regression tests for the SLIAFlow presentation boundary."""
@@ -75,6 +80,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         "_cameraRestartRequired",
         "_resultEverDisplayed",
         "_liveViewEverDisplayed",
+        "_uc2EverDisplayed",
         "_lastResultRefreshTime",
         "_pendingResultRefresh",
     )
@@ -101,7 +107,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         # Link history is deliberately preserved by production cleanup so a
         # retained image cannot become fresh merely because the module was
         # reopened. Each test still needs an isolated link session.
-        for role in (CONNECTOR_ACQUISITION, CONNECTOR_UC1):
+        for role in getattr(widget, "_linkDropped", {}):
             widget._linkDropped[role] = False
             widget._linkDropSnapshots[role] = None
 
@@ -114,7 +120,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         for name in self.WIDGET_STATE_FIELDS:
             setattr(widget, name, backup[name])
         widget._disconnectAllLinks()
-        for role in (CONNECTOR_ACQUISITION, CONNECTOR_UC1):
+        for role in widget._linkDropped:
             widget._linkDropped[role] = False
             widget._linkDropSnapshots[role] = None
         widget._refreshCameraControls()
@@ -215,7 +221,15 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         self.assertIsNotNone(parameters)
         self.assertEqual(parameters.liveSource, LIVE_SOURCE_LAPTOP)
         self.assertEqual(parameters.cameraIndex, 0)
-        self.assertEqual(parameters.resultMap, RESULT_MAP_TMD)
+        # SLIA-022: the delineation layer defaults to the one map the genuine
+        # UC1 runner sends, so a demonstrator session does not wait on UC1_TMD.
+        # The module's parameter node outlives setUp's scene clear and carries
+        # whatever an earlier test wrote, so the declared default is read from
+        # a freshly wrapped node.
+        freshParameters = parameterModule.SLIAFlowParameterNode(
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScriptedModuleNode")
+        )
+        self.assertEqual(freshParameters.resultMap, RESULT_MAP_MV_CLASS)
         self.assertEqual(parameters.resultClass, 1)
 
         liveSource = slicer.util.findChild(representation, "liveSourceSelector")
@@ -259,7 +273,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             LIVE_SOURCE_CHOICES,
         )
         self.assertEqual(cameraIndex.value, 0)
-        self.assertEqual(resultMap.currentText, RESULT_MAP_TMD)
+        self.assertEqual(resultMap.currentText, parameters.resultMap)
         self.assertEqual(
             [resultMap.itemText(index) for index in range(resultMap.count)],
             RESULT_MAP_CHOICES,
@@ -572,26 +586,39 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
         widget = self._moduleRepresentationAndWidget()[1]
         layoutRoot = ElementTree.fromstring(widget.CUSTOM_LAYOUT_DESCRIPTION)
-        self.assertEqual(layoutRoot.attrib["type"], "horizontal")
-        views = layoutRoot.findall(".//view")
-        self.assertEqual(len(views), 2)
+        # The WP5 demonstrator screen in docs/architecture/WP5_MS5_DEMO_PLAN.md:
+        # two rows of three named views.
+        self.assertEqual(layoutRoot.attrib["type"], "vertical")
+        rows = layoutRoot.findall("./item/layout")
         self.assertEqual(
-            [view.attrib["singletontag"] for view in views],
-            [widget.LIVE_VIEW_NAME, widget.RESULT_VIEW_NAME],
+            [row.attrib["type"] for row in rows], ["horizontal", "horizontal"]
         )
-        viewLabels = []
-        for view in views:
-            viewLabelProperty = view.find("property[@name='viewlabel']")
-            if viewLabelProperty is None:
-                raise AssertionError("A custom view is missing its view label property")
-            viewLabel = viewLabelProperty.text
-            if not isinstance(viewLabel, str):
-                self.fail("A custom view label is empty")
-            viewLabels.append(viewLabel)
-        self.assertEqual(
-            viewLabels,
-            [widget.LIVE_VIEW_LABEL, widget.RESULT_VIEW_LABEL],
-        )
+        expectedLabels = [
+            ["LiveView", "Stereoscopic", "HS Cube"],
+            ["Relative StO2", "Enhanced Vascularization", "Tumour Delineation"],
+        ]
+        observedLabels = []
+        singletonTags = []
+        for row in rows:
+            rowLabels = []
+            for view in row.findall("./item/view"):
+                viewLabelProperty = view.find("property[@name='viewlabel']")
+                if viewLabelProperty is None:
+                    raise AssertionError("A custom view is missing its view label property")
+                viewLabel = viewLabelProperty.text
+                if not isinstance(viewLabel, str):
+                    self.fail("A custom view label is empty")
+                rowLabels.append(viewLabel)
+                singletonTags.append(view.attrib["singletontag"])
+            observedLabels.append(rowLabels)
+        self.assertEqual(observedLabels, expectedLabels)
+        self.assertEqual(len(set(singletonTags)), 6)
+        # The pane-isolation guards are written against these two tags, so the
+        # live and delineation views keep them.
+        self.assertEqual(singletonTags[0], widget.LIVE_VIEW_NAME)
+        self.assertEqual(singletonTags[5], widget.RESULT_VIEW_NAME)
+        self.assertEqual(widget.LIVE_VIEW_LABEL, "LiveView")
+        self.assertEqual(widget.RESULT_VIEW_LABEL, "Tumour Delineation")
 
     def test_headlessPresentationFallback(self) -> None:
         if slicer.app.layoutManager() is not None:
@@ -2329,6 +2356,67 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         self.assertIn("not connected", widget.ui.resultStatusLabel.text.lower())
         self.assertNotIn("PASS", widget.ui.resultStatusLabel.text)
 
+    def test_lostPeerIsNoticedWithoutADisconnectedEvent(self) -> None:
+        """The one event a lost link cannot deliver is its own loss.
+
+        `igtlioConnector`'s receiver thread sets the state to WaitConnection
+        and only *queues* DisconnectedEvent, because it is not on the main
+        thread. The queue is drained by `ImportEventsFromEventBuffer`, reached
+        only from `PeriodicProcess`, and `CallConnectorTimerHander` skips every
+        connector whose state is not StateConnected. By the time the pump next
+        runs, the state has already left StateConnected, so the event that
+        announces the loss is stranded and never invoked. A stopped producer
+        therefore left the label reading `displaying` indefinitely, which is a
+        panel claiming a live link that is gone.
+
+        The connector's state is still truthful, so the panel polls it instead
+        of trusting an event that cannot arrive.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_TMD
+        self._receivedResultVolume(
+            RESULT_MAP_TMD,
+            self._validResultValues(RESULT_MAP_TMD),
+            RESULT_SOURCE_GENUINE_ORIGIN,
+        )
+        connector = widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeConnector()
+        )
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
+        self.assertEqual(widget._refreshResultPresentation()["summaryStatus"], "PASS")
+        self.assertEqual(widget.connectionState(CONNECTOR_UC1), CONNECTION_DISPLAYING)
+        displayedNodeID = widget._parameterNode.resultVolume.GetID()
+
+        # A poll of a link that is still up may not invent a loss.
+        widget._pollLinkStates()
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1),
+            CONNECTION_DISPLAYING,
+            "Polling a connected link reported it as lost",
+        )
+
+        # The peer goes away. The receiver thread has changed the state; no
+        # observer fires, exactly as in a real Slicer.
+        connector.state = widget.logic.CONNECTOR_STATE_WAIT_CONNECTION
+        widget._pollLinkStates()
+
+        self.assertEqual(
+            widget.connectionState(CONNECTOR_UC1),
+            CONNECTION_CONNECTING,
+            "A lost peer left the label claiming a live link",
+        )
+        self.assertEqual(
+            widget._parameterNode.resultVolume.GetID(),
+            displayedNodeID,
+            "Noticing the loss discarded the last valid result",
+        )
+        self.assertIn(
+            widget.RESULT_STALE_STATUS,
+            widget.ui.resultStatusLabel.text,
+            "A lost peer produced no stale-result wording",
+        )
+
     def test_nonConnectedConnectorDoesNotReportInvalid(self) -> None:
         """A non-connected connector is not an invalid live link."""
         _, widget = self._moduleRepresentationAndWidget()
@@ -2428,3 +2516,677 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             widget._parameterNode.resultVolume,
             "The trailing refresh did not present the data that had arrived",
         )
+
+    # ----------------------------------------------------------------------
+    # SLIA-022 - six-panel operator surface
+    #
+    # Names this card introduces are read through `parameterModule` or the
+    # widget inside each test, not imported at the top, so that against the
+    # code before the card every test fails on its own missing behaviour
+    # rather than the whole suite failing to import.
+    # ----------------------------------------------------------------------
+
+    # The UC2 banner headline, as the SLIA-022 card states it.
+    UC2_BANNER_MESSAGE = "SIMULATED ACQUISITION - NOT A CLINICAL RESULT"
+    # The recorded-case detail form of stratum_sim.contract.recordedCaseDetail.
+    UC2_SIMULATION_DETAIL = (
+        "real UC2 pipeline, recorded HSI case test (simulated acquisition)"
+    )
+    # Ports from the table in docs/architecture/WP5_MS5_DEMO_PLAN.md.
+    LINK_PORTS = {
+        "acquisition": 18944,
+        "uc1": 18945,
+        "uc2": 18946,
+        "hsCube": 18947,
+        "control": 18950,
+    }
+    LINK_STATE_LABELS = {
+        "acquisition": "acquisitionStateValueLabel",
+        "uc1": "uc1StateValueLabel",
+        "uc2": "uc2StateValueLabel",
+        "hsCube": "hsCubeStateValueLabel",
+        "control": "controlStateValueLabel",
+    }
+
+    class _FakeObservableConnector(_FakeConnector):
+        """A connector the widget can observe, and that records what it sends."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.observers = {}
+            self.nextTag = 0
+            self.registered = []
+            self.pushed = []
+
+        def AddObserver(self, event, callback, priority=0.0):
+            self.nextTag += 1
+            self.observers[self.nextTag] = (event, callback)
+            return self.nextTag
+
+        def RemoveObserver(self, tag):
+            self.observers.pop(tag, None)
+
+        def RegisterOutgoingMRMLNode(self, node, devType=None):
+            self.registered.append((node, devType))
+            return 1
+
+        def PushNode(self, node):
+            self.pushed.append((node, node.GetText(), int(node.GetMTime())))
+            return 1
+
+    class _FakeCompositeNode:
+        def __init__(self) -> None:
+            self.backgroundVolumeId = None
+            self.foregroundVolumeId = None
+            self.labelVolumeId = None
+            self.foregroundOpacity = 0.0
+
+        def SetBackgroundVolumeID(self, nodeId) -> None:
+            self.backgroundVolumeId = nodeId
+
+        def GetBackgroundVolumeID(self):
+            return self.backgroundVolumeId
+
+        def SetForegroundVolumeID(self, nodeId) -> None:
+            self.foregroundVolumeId = nodeId
+
+        def GetForegroundVolumeID(self):
+            return self.foregroundVolumeId
+
+        def SetLabelVolumeID(self, nodeId) -> None:
+            self.labelVolumeId = nodeId
+
+        def GetLabelVolumeID(self):
+            return self.labelVolumeId
+
+        def SetForegroundOpacity(self, opacity) -> None:
+            self.foregroundOpacity = float(opacity)
+
+        def GetForegroundOpacity(self):
+            return self.foregroundOpacity
+
+    class _FakeSliceLogic:
+        def __init__(self, compositeNode) -> None:
+            self.compositeNode = compositeNode
+
+        def GetSliceCompositeNode(self):
+            return self.compositeNode
+
+        def FitSliceToBackground(self) -> None:
+            pass
+
+    class _FakeSliceWidget:
+        def __init__(self, sliceLogic) -> None:
+            self.logic = sliceLogic
+
+        def sliceLogic(self):
+            return self.logic
+
+        def sliceView(self):
+            return None
+
+    class _FakeLayoutManager:
+        """Slice widgets whose composite nodes can be read back in any Slicer."""
+
+        def __init__(self, testCase, viewNames) -> None:
+            self.composites = {name: testCase._FakeCompositeNode() for name in viewNames}
+            self.widgets = {
+                name: testCase._FakeSliceWidget(testCase._FakeSliceLogic(composite))
+                for name, composite in self.composites.items()
+            }
+
+        def sliceWidget(self, viewName):
+            return self.widgets.get(viewName)
+
+    @staticmethod
+    def _validUc2Values():
+        # A deterministic test placeholder, not a pipeline image.
+        return np.array(
+            [[[[10, 20, 30], [40, 50, 60]], [[70, 80, 90], [100, 110, 120]]]],
+            dtype=np.uint8,
+        )
+
+    @classmethod
+    def _receivedUc2Volume(cls, values, origin, *, detail=None):
+        metadata = {
+            RESULT_SOURCE_ROLE_ATTRIBUTE: "bloodVesselMap",
+            RESULT_SOURCE_DEVICE_ATTRIBUTE: "UC2_BV",
+        }
+        if origin is not None:
+            metadata[RESULT_SOURCE_ORIGIN_ATTRIBUTE] = origin
+        if detail is not None:
+            metadata[RESULT_SOURCE_DETAIL_ATTRIBUTE] = detail
+        return cls._createReceivedVolume("UC2_BV", values, metadata)
+
+    def _fakeControlConnector(self, widget, state):
+        connector = widget.logic.getOrCreateConnector(
+            parameterModule.CONNECTOR_CONTROL,
+            connectorFactory=lambda role: self._FakeObservableConnector(),
+        )
+        connector.state = state
+        return connector
+
+    def test_reservedPanelIsBlackWithStatedReason(self) -> None:
+        """A panel with no producer is black and says what is missing, and where.
+
+        Black because nothing exists and black because something broke must
+        never look alike, so the reason is asserted on the renderer rather than
+        taken from the widget's own bookkeeping.
+        """
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            self.skipTest("Requires the maintained headful Slicer test target")
+
+        widget = self._moduleRepresentationAndWidget()[1]
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        previousLayout = int(layoutNode.GetViewArrangement())
+        try:
+            self.assertTrue(widget._activatePresentation())
+            for viewName, subject, port in (
+                (widget.STEREO_VIEW_NAME, "stereoscopic", "18948"),
+                (widget.STO2_VIEW_NAME, "sto2", "18949"),
+            ):
+                with self.subTest(view=viewName):
+                    sliceWidget = layoutManager.sliceWidget(viewName)
+                    self.assertIsNotNone(sliceWidget)
+                    compositeNode = sliceWidget.sliceLogic().GetSliceCompositeNode()
+                    self.assertIsNone(compositeNode.GetBackgroundVolumeID())
+                    self.assertIsNone(compositeNode.GetForegroundVolumeID())
+                    self.assertIsNone(compositeNode.GetLabelVolumeID())
+
+                    actor = widget._panelAnnotationActors.get(viewName)
+                    self.assertIsNotNone(actor, "The reserved panel carries no text")
+                    sliceWidget.mrmlSliceNode().Modified()
+                    self._waitForUi(
+                        lambda sliceWidget=sliceWidget, actor=actor: bool(
+                            widget._sliceViewRenderer(sliceWidget).HasViewProp(actor)
+                        ),
+                        f"the reserved-panel reason to reach {viewName}",
+                    )
+                    reason = actor.GetInput() or ""
+                    self.assertIn(port, reason)
+                    self.assertIn(subject, reason.lower())
+                    self.assertIn("reserved", reason.lower())
+        finally:
+            widget._deactivatePresentation(restore=True)
+            if int(layoutNode.GetViewArrangement()) != previousLayout:
+                layoutManager.setLayout(previousLayout)
+
+    def test_layersAreIndependentlyControlled(self) -> None:
+        """Showing, hiding or fading one layer never changes the other.
+
+        Opacity is display state: the layer moves between the background slot
+        and a faded foreground slot, and its pixels are never touched.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_MV_CLASS
+        self._createResultVolume(
+            RESULT_MAP_MV_CLASS, self._validResultValues(RESULT_MAP_MV_CLASS)
+        )
+        self._receivedUc2Volume(self._validUc2Values(), RESULT_SOURCE_GENUINE_ORIGIN)
+        uc1Layer = widget.LAYER_UC1
+        uc2Layer = widget.LAYER_UC2
+        layoutManager = self._FakeLayoutManager(
+            self, (widget.RESULT_VIEW_NAME, widget.VASCULAR_VIEW_NAME)
+        )
+        uc1Composite = layoutManager.composites[widget.RESULT_VIEW_NAME]
+        uc2Composite = layoutManager.composites[widget.VASCULAR_VIEW_NAME]
+        try:
+            self.assertEqual(widget._refreshResultPresentation()["summaryStatus"], "PASS")
+            self.assertEqual(widget._refreshUc2Presentation()["summaryStatus"], "PASS")
+            uc1NodeID = widget._parameterNode.resultVolume.GetID()
+            uc2NodeID = widget._parameterNode.uc2Volume.GetID()
+            widget._displayResultVolume(layoutManager=layoutManager)
+            widget._displayUc2Volume(layoutManager=layoutManager)
+            self.assertEqual(uc1Composite.GetBackgroundVolumeID(), uc1NodeID)
+            self.assertEqual(uc2Composite.GetBackgroundVolumeID(), uc2NodeID)
+
+            widget.setLayerOpacity(uc1Layer, 0.4, layoutManager=layoutManager)
+            self.assertIsNone(uc1Composite.GetBackgroundVolumeID())
+            self.assertEqual(uc1Composite.GetForegroundVolumeID(), uc1NodeID)
+            self.assertAlmostEqual(uc1Composite.GetForegroundOpacity(), 0.4, places=6)
+            self.assertEqual(uc2Composite.GetBackgroundVolumeID(), uc2NodeID)
+            self.assertIsNone(uc2Composite.GetForegroundVolumeID())
+
+            widget.setLayerVisible(uc2Layer, False, layoutManager=layoutManager)
+            self.assertIsNone(uc2Composite.GetBackgroundVolumeID())
+            self.assertIsNone(uc2Composite.GetForegroundVolumeID())
+            self.assertIn("hidden", widget.panelMessage(widget.VASCULAR_VIEW_NAME).lower())
+            self.assertEqual(uc1Composite.GetForegroundVolumeID(), uc1NodeID)
+            self.assertAlmostEqual(uc1Composite.GetForegroundOpacity(), 0.4, places=6)
+
+            visible, opacity = widget.layerState(uc1Layer)
+            self.assertTrue(visible)
+            self.assertAlmostEqual(opacity, 0.4, places=6)
+            visible, opacity = widget.layerState(uc2Layer)
+            self.assertFalse(visible)
+            self.assertAlmostEqual(opacity, 1.0, places=6)
+
+            widget.setLayerVisible(uc2Layer, True, layoutManager=layoutManager)
+            self.assertEqual(uc2Composite.GetBackgroundVolumeID(), uc2NodeID)
+            widget.setLayerOpacity(uc1Layer, 1.0, layoutManager=layoutManager)
+            self.assertEqual(uc1Composite.GetBackgroundVolumeID(), uc1NodeID)
+            self.assertIsNone(uc1Composite.GetForegroundVolumeID())
+            np.testing.assert_array_equal(
+                slicer.util.arrayFromVolume(widget._parameterNode.uc2Volume),
+                self._validUc2Values(),
+            )
+        finally:
+            for layer in (getattr(widget, "LAYER_UC1", None), getattr(widget, "LAYER_UC2", None)):
+                if layer is not None:
+                    widget.setLayerVisible(layer, True)
+                    widget.setLayerOpacity(layer, 1.0)
+
+    def test_uc2LayerObeysOriginGateAndPrecedence(self) -> None:
+        """UC2 gets every guard the UC1 result has, not a softer copy of them."""
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        uc2Layer = widget.LAYER_UC2
+        simulated = self._receivedUc2Volume(
+            self._validUc2Values(),
+            RESULT_SOURCE_SIMULATED_ORIGIN,
+            detail=self.UC2_SIMULATION_DETAIL,
+        )
+
+        withDemoModeOff = widget._refreshUc2Presentation()
+        self.assertEqual(withDemoModeOff["summaryStatus"], "WARN", withDemoModeOff)
+        self.assertIsNone(widget._parameterNode.uc2Volume)
+
+        layoutManager = slicer.app.layoutManager()
+        layoutNode = (
+            None if layoutManager is None else layoutManager.layoutLogic().GetLayoutNode()
+        )
+        previousLayout = None if layoutNode is None else int(layoutNode.GetViewArrangement())
+        try:
+            if layoutManager is not None:
+                self.assertTrue(widget._activatePresentation())
+            widget._demoModeEnabled = True
+            report = widget._refreshUc2Presentation()
+            self.assertEqual(report["summaryStatus"], "PASS", report)
+            self.assertEqual(report["dataOrigin"], RESULT_SOURCE_SIMULATED_ORIGIN)
+            self.assertEqual(report["simulationDetail"], self.UC2_SIMULATION_DETAIL)
+            self.assertIn("SIMULATED", widget.layerStatus(uc2Layer))
+            if layoutManager is not None:
+                self.assertIsNotNone(
+                    widget._uc2BannerActor,
+                    "A simulated UC2 map was displayed without its banner",
+                )
+                self.assertEqual(widget._uc2BannerActor.GetInput(), self.UC2_BANNER_MESSAGE)
+
+                # A banner that cannot be drawn withholds the map.
+                widget._sliceViewRenderer = lambda sliceWidget: None
+                try:
+                    withheld = widget._refreshUc2Presentation()
+                finally:
+                    del widget._sliceViewRenderer
+                self.assertEqual(withheld["summaryStatus"], "FAIL", withheld)
+                self.assertIsNone(widget._parameterNode.uc2Volume)
+                vascularWidget = layoutManager.sliceWidget(widget.VASCULAR_VIEW_NAME)
+                self.assertIsNone(
+                    vascularWidget.sliceLogic().GetSliceCompositeNode().GetBackgroundVolumeID(),
+                    "The simulated UC2 map was displayed without its banner",
+                )
+
+            genuine = self._receivedUc2Volume(
+                self._validUc2Values(), RESULT_SOURCE_GENUINE_ORIGIN
+            )
+            report = widget._refreshUc2Presentation()
+            self.assertEqual(report["summaryStatus"], "PASS", report)
+            self.assertEqual(report["dataOrigin"], RESULT_SOURCE_GENUINE_ORIGIN)
+            self.assertIsNone(widget._uc2BannerActor)
+            self.assertNotIn("SIMULATED", widget.layerStatus(uc2Layer))
+
+            slicer.mrmlScene.RemoveNode(genuine)
+            slicer.mrmlScene.RemoveNode(simulated)
+            for origin in (None, "mock"):
+                with self.subTest(origin=origin):
+                    unknown = self._receivedUc2Volume(self._validUc2Values(), origin)
+                    report = widget._refreshUc2Presentation()
+                    self.assertEqual(report["summaryStatus"], "FAIL", report)
+                    self.assertEqual(report.get("provenance"), "unrecognized", report)
+                    self.assertIsNone(widget._parameterNode.uc2Volume)
+                    slicer.mrmlScene.RemoveNode(unknown)
+        finally:
+            widget._resetDemoMode()
+            if layoutManager is not None:
+                widget._deactivatePresentation(restore=True)
+                if int(layoutNode.GetViewArrangement()) != previousLayout:
+                    layoutManager.setLayout(previousLayout)
+
+    def test_invalidUc2LayerLeavesPanelBlack(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        uc2Layer = widget.LAYER_UC2
+        layoutManager = self._FakeLayoutManager(self, (widget.VASCULAR_VIEW_NAME,))
+        composite = layoutManager.composites[widget.VASCULAR_VIEW_NAME]
+
+        missing = widget._refreshUc2Presentation(layoutManager=layoutManager)
+        self.assertEqual(missing["summaryStatus"], "WARN", missing)
+        self.assertIn("waiting", widget.layerStatus(uc2Layer).lower())
+        self.assertIsNone(composite.GetBackgroundVolumeID())
+
+        source = self._receivedUc2Volume(self._validUc2Values(), RESULT_SOURCE_GENUINE_ORIGIN)
+        self.assertEqual(
+            widget._refreshUc2Presentation(layoutManager=layoutManager)["summaryStatus"],
+            "PASS",
+        )
+        self.assertIsNotNone(composite.GetBackgroundVolumeID())
+
+        for values in (
+            np.zeros((1, 2, 2), dtype=np.uint8),
+            np.zeros((1, 2, 2, 3), dtype=np.float32),
+            np.zeros((1, 2, 2, 4), dtype=np.uint8),
+        ):
+            with self.subTest(shape=values.shape, dtype=str(values.dtype)):
+                slicer.mrmlScene.RemoveNode(source)
+                source = self._receivedUc2Volume(values, RESULT_SOURCE_GENUINE_ORIGIN)
+                report = widget._refreshUc2Presentation(layoutManager=layoutManager)
+                self.assertEqual(report["summaryStatus"], "FAIL", report)
+                self.assertIsNone(widget._parameterNode.uc2Volume)
+                self.assertIn("invalid", widget.layerStatus(uc2Layer).lower())
+                self.assertIsNone(composite.GetBackgroundVolumeID())
+                self.assertIsNone(composite.GetForegroundVolumeID())
+
+    def test_connectLinksStartsAndStopsEveryLink(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        self.assertEqual(set(parameterModule.CONNECTOR_ROLES), set(self.LINK_PORTS))
+        connectors = {
+            role: widget.logic.getOrCreateConnector(
+                role, connectorFactory=lambda role: self._FakeObservableConnector()
+            )
+            for role in self.LINK_PORTS
+        }
+        button = widget.ui.connectLinksButton
+
+        widget._onConnectLinksToggled(True)
+        for role, connector in connectors.items():
+            with self.subTest(role=role, step="connect"):
+                self.assertEqual(connector.client, (IGTL_HOST, self.LINK_PORTS[role]))
+                self.assertEqual(connector.startCount, 1)
+                label = getattr(widget.ui, self.LINK_STATE_LABELS[role])
+                self.assertEqual(label.text, CONNECTION_CONNECTING)
+        self.assertTrue(button.checked)
+
+        widget._onConnectLinksToggled(False)
+        for role, connector in connectors.items():
+            with self.subTest(role=role, step="disconnect"):
+                self.assertEqual(connector.stopCount, 1)
+                self.assertIsNone(widget.logic.connectorNode(role))
+                label = getattr(widget.ui, self.LINK_STATE_LABELS[role])
+                self.assertEqual(label.text, CONNECTION_DISCONNECTED)
+        self.assertFalse(button.checked)
+
+    def test_captureDisabledWithoutControlLink(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        button = widget.ui.captureButton
+        statusLabel = widget.ui.captureStatusLabel
+
+        widget._refreshCaptureControls()
+        self.assertFalse(button.enabled)
+        self.assertIn("18950", statusLabel.text)
+
+        connector = self._fakeControlConnector(widget, SLIAFlowLogic.CONNECTOR_STATE_OFF)
+        for state in (
+            SLIAFlowLogic.CONNECTOR_STATE_OFF,
+            SLIAFlowLogic.CONNECTOR_STATE_WAIT_CONNECTION,
+        ):
+            with self.subTest(state=state):
+                connector.state = state
+                widget._refreshCaptureControls()
+                self.assertFalse(button.enabled)
+                self.assertIn("18950", statusLabel.text)
+                widget._onCaptureClicked()
+                self.assertEqual(connector.pushed, [], "A trigger went out over a link that is down")
+
+        connector.state = SLIAFlowLogic.CONNECTOR_STATE_CONNECTED
+        widget._refreshCaptureControls()
+        self.assertTrue(button.enabled)
+        self.assertNotIn("18950", statusLabel.text)
+
+    def test_capturePressSendsOneTrigger(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        connector = self._fakeControlConnector(
+            widget, SLIAFlowLogic.CONNECTOR_STATE_CONNECTED
+        )
+
+        widget._onCaptureClicked()
+        widget._onCaptureClicked()
+
+        self.assertEqual(len(connector.pushed), 2, connector.pushed)
+        triggerNode = connector.pushed[0][0]
+        self.assertIs(connector.pushed[1][0], triggerNode)
+        self.assertTrue(triggerNode.IsA("vtkMRMLTextNode"))
+        # Device name and command from the control-channel table in
+        # tools/simulators/README.md.
+        self.assertEqual(triggerNode.GetName(), "CaptureTrigger")
+        self.assertEqual([text for _, text, _ in connector.pushed], ["CAPTURE", "CAPTURE"])
+        self.assertEqual(connector.registered, [(triggerNode, "STRING")])
+        self.assertFalse(triggerNode.GetSaveWithScene())
+        self.assertEqual(
+            connector.pushed[0][2],
+            connector.pushed[1][2],
+            "A press modified the trigger node, which a real connector sends again",
+        )
+
+    def test_captureStateReflectsStandInAnswers(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        self._fakeControlConnector(widget, SLIAFlowLogic.CONNECTOR_STATE_CONNECTED)
+        statusLabel = widget.ui.captureStatusLabel
+
+        def receive(deviceName, text):
+            node = slicer.mrmlScene.GetFirstNodeByName(deviceName)
+            if node is None:
+                node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTextNode", deviceName)
+            node.SetText(text)
+
+        # The wording is the stand-in's, from tools/simulators/README.md.
+        for deviceName, text, word in (
+            ("CaptureStatus", "IDLE", "idle"),
+            ("CaptureStatus", "CAPTURING capture=3 case=004-02 delay=5.9", "capturing"),
+            ("CaptureStatus", "READY capture=3 case=004-02 folder=C:\\cases\\004 02", "ready"),
+            ("CaptureReply", "IGNORED capture 3 already in progress", "ignored"),
+            ("CaptureReply", "REFUSED unknown command CAPTUR", "refused"),
+        ):
+            with self.subTest(text=text):
+                receive(deviceName, text)
+                widget._refreshCaptureState()
+                self.assertIn(word, statusLabel.text.lower())
+                self.assertIn(text, statusLabel.text)
+
+    def test_connectorEventsSurviveVtkStringDispatch(self) -> None:
+        """A connector event dispatched the way VTK dispatches it still routes.
+
+        VTK calls a Python observer with the event as a *string*
+        (`vtkPythonCommand.cxx`: `Py_BuildValue("(Ns)", obj2, eventname)`), and
+        `vtkCommand::GetStringFromEventId` has no case for the connector's
+        custom ids, so every one of them arrives as `"NoEvent"`. An event id
+        therefore cannot be recovered from the argument, and one callback
+        shared by six events cannot tell them apart. Each observed event gets
+        its own callback instead.
+
+        This is the manual step 7 defect: with the loss branch unreachable, a
+        stopped producer left the labels reading `displaying` indefinitely.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        connector = widget.logic.getOrCreateConnector(
+            CONNECTOR_UC1, connectorFactory=lambda role: self._FakeObservableConnector()
+        )
+        connector.state = widget.logic.CONNECTOR_STATE_CONNECTED
+        widget._observeConnector(CONNECTOR_UC1, connector)
+
+        callbacks = {event: callback for event, callback in connector.observers.values()}
+        self.assertIn(widget.logic.CONNECTOR_DISCONNECTED_EVENT, callbacks)
+        self.assertEqual(
+            len({id(callback) for callback in callbacks.values()}),
+            len(callbacks),
+            "Six events share one callback, so the event that fired is unknowable",
+        )
+
+        # A client that loses its peer keeps retrying, so the connector reports
+        # WaitConnection rather than Off.
+        connector.state = widget.logic.CONNECTOR_STATE_WAIT_CONNECTION
+        losses = []
+        originalHandler = widget._onLinkDisconnected
+
+        def recordLoss(role):
+            losses.append(role)
+            return originalHandler(role)
+
+        widget._onLinkDisconnected = recordLoss
+        try:
+            callbacks[widget.logic.CONNECTOR_DISCONNECTED_EVENT](connector, "NoEvent")
+        finally:
+            widget._onLinkDisconnected = originalHandler
+
+        self.assertEqual(
+            losses,
+            [CONNECTOR_UC1],
+            "A disconnection dispatched by VTK never reached the loss handler",
+        )
+        self.assertEqual(widget.connectionState(CONNECTOR_UC1), CONNECTION_CONNECTING)
+
+    def test_captureTriggerDeclaresItsWireEncoding(self) -> None:
+        """The trigger states an IANA encoding the receiver can actually decode.
+
+        `igtlioStringConverter::toIGTL` copies `vtkMRMLTextNode`'s encoding
+        number straight into the IGTL STRING encoding field, which carries an
+        IANA MIB number. The VTK default is `VTK_ENCODING_US_ASCII`, and that
+        constant is 1, not the IANA 3, so the value on the wire meant nothing:
+        in manual step 4 the stand-in refused the trigger with "Unsupported
+        encoding" and no capture ever started.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        connector = self._fakeControlConnector(
+            widget, SLIAFlowLogic.CONNECTOR_STATE_CONNECTED
+        )
+
+        widget._onCaptureClicked()
+
+        self.assertEqual(parameterModule.IGTL_ENCODING_US_ASCII, 3)
+        triggerNode = connector.pushed[0][0]
+        self.assertEqual(
+            triggerNode.GetEncoding(),
+            parameterModule.IGTL_ENCODING_US_ASCII,
+            "The trigger went out under an encoding number the receiver rejects",
+        )
+        # Set before the node was ever registered, so a press still only pushes.
+        self.assertEqual(connector.registered, [(triggerNode, "STRING")])
+
+    def test_liveViewPanelSaysWhatItIsWaitingFor(self) -> None:
+        """The LiveView panel is never black without saying why.
+
+        Manual step 2: every other panel carried its reason in the viewport,
+        and LiveView carried its waiting state only in the module's status
+        line, where a panel that is black because something broke looks exactly
+        the same.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        layoutManager = self._FakeLayoutManager(self, widget.VIEW_NAMES)
+
+        widget._clearLiveView(layoutManager=layoutManager)
+        waiting = widget.panelMessage(widget.LIVE_VIEW_NAME)
+        self.assertTrue(waiting, "The LiveView panel is black with nothing written on it")
+        self.assertIn("liveview", waiting.lower())
+
+        # A frame takes the panel, so the waiting text goes with it.
+        frame = np.zeros((1, 4, 6, 3), dtype=np.uint8)
+        frame[..., 1] = 200
+        widget._displayCameraFrame(frame, layoutManager=layoutManager)
+        self.assertEqual(widget.panelMessage(widget.LIVE_VIEW_NAME), "")
+
+    def test_bandBrowserReportsWavelength(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        wavelengthKey = WIRE_ATTRIBUTE_PREFIX + "SLIAFlow.WavelengthsNm"
+        # (bands, lines, samples), as HSCube travels; a test placeholder.
+        cube = np.arange(3 * 2 * 4, dtype=np.uint16).reshape(3, 2, 4)
+        cubeNode = self._createReceivedVolume(
+            "HSCube",
+            cube,
+            {
+                RESULT_SOURCE_DEVICE_ATTRIBUTE: "HSCube",
+                RESULT_SOURCE_ORIGIN_ATTRIBUTE: RESULT_SOURCE_SIMULATED_ORIGIN,
+                RESULT_SOURCE_DETAIL_ATTRIBUTE: "acquisition stand-in, recorded HSI case test (simulated acquisition)",
+                "SLIAFlow.WavelengthsNm": "440,445,450",
+            },
+        )
+
+        report = widget._refreshCubePresentation()
+        self.assertEqual(report["summaryStatus"], "PASS", report)
+        slider = widget.ui.bandSlider
+        self.assertEqual((slider.minimum, slider.maximum), (0, 2))
+        for band, wavelength in ((2, "450"), (0, "440"), (1, "445")):
+            with self.subTest(band=band):
+                widget._setCubeBand(band)
+                label = widget.ui.bandValueLabel.text
+                self.assertIn(f"Band {band}", label)
+                self.assertIn(f"{wavelength} nm", label)
+        np.testing.assert_array_equal(slicer.util.arrayFromVolume(cubeNode), cube)
+
+        # A wavelength that cannot be read is never guessed or stretched to fit.
+        for badList in ("440,445", "440,abc,450", None):
+            with self.subTest(wavelengths=badList):
+                if badList is None:
+                    cubeNode.RemoveAttribute(wavelengthKey)
+                else:
+                    cubeNode.SetAttribute(wavelengthKey, badList)
+                report = widget._refreshCubePresentation()
+                widget._setCubeBand(2)
+                label = widget.ui.bandValueLabel.text
+                self.assertIn("Band 2", label)
+                self.assertNotIn("nm", label)
+                self.assertIn("wavelength", report["summaryMessage"].lower())
+
+    def test_operatorControlsHaveStatedReasons(self) -> None:
+        representation, _ = self._moduleRepresentationAndWidget()
+        operatorSection = slicer.util.findChild(representation, "operatorGroupBox")
+        developerSection = slicer.util.findChild(representation, "developerCollapsibleButton")
+
+        interactive = []
+        for className in (
+            "QPushButton",
+            "QComboBox",
+            "QSpinBox",
+            "QCheckBox",
+            "QSlider",
+            "QTableWidget",
+        ):
+            interactive.extend(slicer.util.findChildren(operatorSection, className=className))
+        # Thirteen controls before SLIA-022, counted from SLIAFlow.ui at a45e5ac.
+        self.assertEqual(
+            sorted(control.objectName for control in interactive),
+            sorted(
+                (
+                    "liveSourceSelector",
+                    "startButton",
+                    "stopButton",
+                    "connectLinksButton",
+                    "captureButton",
+                    "demoModeCheckBox",
+                    "layerTable",
+                    "layerOpacitySlider",
+                    "bandSlider",
+                )
+            ),
+        )
+        for control in interactive:
+            with self.subTest(control=control.objectName):
+                self.assertTrue(control.toolTip.strip(), "An operator control gives no reason")
+
+        for name in (
+            "cameraIndexSpinBox",
+            "installCameraSupportButton",
+            "resultMapSelector",
+            "resultClassSpinBox",
+            "refreshResultButton",
+        ):
+            with self.subTest(developerControl=name):
+                self.assertIsNotNone(slicer.util.findChild(developerSection, name))

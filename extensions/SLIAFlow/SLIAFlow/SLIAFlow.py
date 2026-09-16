@@ -42,8 +42,8 @@ class SLIAFlow(ScriptedLoadableModule):
         self.parent.contributors = ["STRATUM project contributors"]
         self.parent.helpText = _(
             "SLIAFlow is the non-clinical 3D Slicer visualization component of "
-            "the STRATUM demonstrator. This module provides a two-pane "
-            "presentation shell but does not generate or interpret diagnostic "
+            "the STRATUM demonstrator. This module provides the six-panel WP5 "
+            "operator surface but does not generate or interpret diagnostic "
             "images."
         )
         self.parent.acknowledgementText = _(
