@@ -31,6 +31,7 @@ from .SLIAFlowParameterNode import (
     RESULT_MAP_MV_CLASS,
     RESULT_MAP_SVM_PROB,
     RESULT_MAP_TMD,
+    RESULT_SOURCE_CAPTURE_ATTRIBUTE,
     RESULT_SOURCE_DETAIL_ATTRIBUTE,
     RESULT_SOURCE_DEVICE_ATTRIBUTE,
     RESULT_SOURCE_GENUINE_ORIGIN,
@@ -40,6 +41,7 @@ from .SLIAFlowParameterNode import (
     SIMULATED_BANNER_MESSAGE,
     SIMULATED_BANNER_MESSAGE_REAL_PIPELINE,
     UC1_PORT,
+    UC1_RGB_DEVICE_NAME,
     WIRE_ATTRIBUTE_PREFIX,
     simulatedBannerMessage,
 )
@@ -1575,7 +1577,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         return volumeNode
 
     @classmethod
-    def _receivedResultVolume(cls, resultMap, values, origin, *, detail=None, prefixed=True):
+    def _receivedResultVolume(
+        cls, resultMap, values, origin, *, detail=None, prefixed=True, captureId=None
+    ):
         metadata = {
             RESULT_SOURCE_ROLE_ATTRIBUTE: resultMap,
             RESULT_SOURCE_DEVICE_ATTRIBUTE: RESULT_MAP_DEVICE_NAMES[resultMap],
@@ -1584,6 +1588,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             metadata[RESULT_SOURCE_ORIGIN_ATTRIBUTE] = origin
         if detail is not None:
             metadata[RESULT_SOURCE_DETAIL_ATTRIBUTE] = detail
+        if captureId is not None:
+            metadata[RESULT_SOURCE_CAPTURE_ATTRIBUTE] = captureId
         return cls._createReceivedVolume(
             RESULT_MAP_DEVICE_NAMES[resultMap], values, metadata, prefixed=prefixed
         )
@@ -3190,3 +3196,284 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         ):
             with self.subTest(developerControl=name):
                 self.assertIsNotNone(slicer.util.findChild(developerSection, name))
+
+    # ----------------------------------------------------------------------
+    # SLIA-024: the class map over its own cube's colour image
+    # ----------------------------------------------------------------------
+
+    # The wire detail the genuine UC1 runner puts on a recorded case, from
+    # contract.recordedCaseDetail in tools/simulators/stratum_sim/contract.py.
+    UC1_RECORDED_DETAIL = "real UC1 pipeline, recorded HSI case 004-02 (simulated acquisition)"
+    # An opaque per-run value, as contract.newCaptureId makes (ADR-0002).
+    UC1_CAPTURE_ID = "9c0e4b7a2f614d3c8e5a1b2c3d4e5f60"
+
+    @staticmethod
+    def _backgroundValues(lines=2, samples=2):
+        # A deterministic test placeholder, not a cube-derived image.
+        values = np.zeros((1, lines, samples, 3), dtype=np.uint8)
+        values[..., 0] = 90
+        values[..., 1] = 40
+        values[..., 2] = 30
+        return values
+
+    @classmethod
+    def _receivedUc1RgbVolume(cls, values, origin, *, detail=None, captureId=UC1_CAPTURE_ID):
+        metadata = {RESULT_SOURCE_DEVICE_ATTRIBUTE: UC1_RGB_DEVICE_NAME}
+        if origin is not None:
+            metadata[RESULT_SOURCE_ORIGIN_ATTRIBUTE] = origin
+        if detail is not None:
+            metadata[RESULT_SOURCE_DETAIL_ATTRIBUTE] = detail
+        if captureId is not None:
+            metadata[RESULT_SOURCE_CAPTURE_ATTRIBUTE] = captureId
+        return cls._createReceivedVolume(UC1_RGB_DEVICE_NAME, values, metadata)
+
+    def _presentClassMapWithFakeView(self, widget, *, origin=RESULT_SOURCE_GENUINE_ORIGIN,
+                                     detail=None, captureId=UC1_CAPTURE_ID):
+        """Present a received class map and bind it to a readable fake panel."""
+        widget.initializeParameterNode()
+        widget._parameterNode.resultMap = RESULT_MAP_MV_CLASS
+        self._receivedResultVolume(
+            RESULT_MAP_MV_CLASS,
+            self._validResultValues(RESULT_MAP_MV_CLASS),
+            origin,
+            detail=detail,
+            captureId=captureId,
+        )
+        layoutManager = self._FakeLayoutManager(self, (widget.RESULT_VIEW_NAME,))
+        report = widget._refreshResultPresentation()
+        self.assertEqual(report["summaryStatus"], "PASS")
+        widget._displayResultVolume(layoutManager=layoutManager)
+        return layoutManager.composites[widget.RESULT_VIEW_NAME], layoutManager
+
+    def _assertMapShownAlone(self, widget, composite) -> None:
+        resultNode = widget._parameterNode.resultVolume
+        self.assertIsNotNone(resultNode, "The map itself must still be displayed")
+        self.assertIsNone(widget._parameterNode.resultBackgroundVolume)
+        self.assertEqual(composite.GetBackgroundVolumeID(), resultNode.GetID())
+        self.assertIsNone(composite.GetForegroundVolumeID())
+
+    def test_backgroundIsCompositedUnderClassMap(self) -> None:
+        """A background of the map's size and provenance sits under the map.
+
+        Opacity only moves the foreground: the background slot keeps the image
+        at every value, and neither image's pixels change.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        background = self._backgroundValues()
+        self._receivedUc1RgbVolume(background, RESULT_SOURCE_GENUINE_ORIGIN)
+        uc1Layer = widget.LAYER_UC1
+        try:
+            composite, layoutManager = self._presentClassMapWithFakeView(widget)
+            resultNode = widget._parameterNode.resultVolume
+            backgroundNode = widget._parameterNode.resultBackgroundVolume
+            self.assertIsNotNone(backgroundNode)
+            self.assertEqual(composite.GetBackgroundVolumeID(), backgroundNode.GetID())
+            self.assertEqual(composite.GetForegroundVolumeID(), resultNode.GetID())
+            self.assertAlmostEqual(composite.GetForegroundOpacity(), 1.0, places=6)
+            self.assertIn("composited", widget.resultBackgroundStatus().lower())
+
+            for opacity in (0.0, 0.35, 1.0):
+                with self.subTest(opacity=opacity):
+                    widget.setLayerOpacity(uc1Layer, opacity, layoutManager=layoutManager)
+                    self.assertEqual(composite.GetBackgroundVolumeID(), backgroundNode.GetID())
+                    self.assertEqual(composite.GetForegroundVolumeID(), resultNode.GetID())
+                    self.assertAlmostEqual(composite.GetForegroundOpacity(), opacity, places=6)
+
+            np.testing.assert_array_equal(slicer.util.arrayFromVolume(backgroundNode), background)
+            np.testing.assert_array_equal(
+                slicer.util.arrayFromVolume(resultNode),
+                self._validResultValues(RESULT_MAP_MV_CLASS),
+            )
+        finally:
+            widget.setLayerVisible(uc1Layer, True)
+            widget.setLayerOpacity(uc1Layer, 1.0)
+
+    def test_mismatchedBackgroundIsNotComposited(self) -> None:
+        """Different dimensions: the map is shown alone and the status says why.
+
+        Nothing is resampled to make the two fit. A size mismatch is refused,
+        never repaired.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        mismatched = self._backgroundValues(lines=3, samples=2)
+        sourceNode = self._receivedUc1RgbVolume(mismatched, RESULT_SOURCE_GENUINE_ORIGIN)
+
+        composite, _layoutManager = self._presentClassMapWithFakeView(widget)
+
+        self._assertMapShownAlone(widget, composite)
+        status = widget.resultBackgroundStatus().lower()
+        self.assertIn("not composited", status)
+        self.assertIn("2 x 3", status)
+        self.assertIn("2 x 2", status)
+        np.testing.assert_array_equal(slicer.util.arrayFromVolume(sourceNode), mismatched)
+
+    def test_backgroundWithDifferentProvenanceIsNotComposited(self) -> None:
+        """A background that does not carry the map's provenance is not used."""
+        _, widget = self._moduleRepresentationAndWidget()
+        cases = (
+            ("simulated background under a genuine map",
+             RESULT_SOURCE_GENUINE_ORIGIN, None, RESULT_SOURCE_SIMULATED_ORIGIN, None),
+            ("another capture's detail",
+             RESULT_SOURCE_SIMULATED_ORIGIN, self.UC1_RECORDED_DETAIL,
+             RESULT_SOURCE_SIMULATED_ORIGIN,
+             "real UC1 pipeline, recorded HSI case 008-01 (simulated acquisition)"),
+            ("no origin at all",
+             RESULT_SOURCE_GENUINE_ORIGIN, None, None, None),
+        )
+        previousDemoMode = widget._demoModeEnabled
+        try:
+            for description, mapOrigin, mapDetail, backgroundOrigin, backgroundDetail in cases:
+                with self.subTest(description):
+                    slicer.mrmlScene.Clear()
+                    widget._demoModeEnabled = mapOrigin == RESULT_SOURCE_SIMULATED_ORIGIN
+                    self._receivedUc1RgbVolume(
+                        self._backgroundValues(), backgroundOrigin, detail=backgroundDetail
+                    )
+                    composite, _layoutManager = self._presentClassMapWithFakeView(
+                        widget, origin=mapOrigin, detail=mapDetail
+                    )
+                    self._assertMapShownAlone(widget, composite)
+                    self.assertIn("provenance", widget.resultBackgroundStatus().lower())
+        finally:
+            widget._demoModeEnabled = previousDemoMode
+            widget._removeSimulatedBanner()
+
+    def test_backgroundFromAnotherCaptureIsNotComposited(self) -> None:
+        """Same device, origin, detail and size, but not the map's capture.
+
+        This is a UC1_RGB retained from an earlier run under a map from a later
+        run - the stand-in on the same case, or a runner that refused the bands.
+        Every other check passes, so only the capture ID can refuse it.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        cases = (
+            ("another run's capture ID", self.UC1_CAPTURE_ID, "earlier-run"),
+            ("a map without a capture ID", None, self.UC1_CAPTURE_ID),
+            ("a background without a capture ID", self.UC1_CAPTURE_ID, None),
+            ("neither carries one", None, None),
+        )
+        previousDemoMode = widget._demoModeEnabled
+        try:
+            for description, mapCaptureId, backgroundCaptureId in cases:
+                with self.subTest(description):
+                    slicer.mrmlScene.Clear()
+                    # Closing the scene withdraws the demo-mode opt-in.
+                    widget._demoModeEnabled = True
+                    self._receivedUc1RgbVolume(
+                        self._backgroundValues(),
+                        RESULT_SOURCE_SIMULATED_ORIGIN,
+                        detail=self.UC1_RECORDED_DETAIL,
+                        captureId=backgroundCaptureId,
+                    )
+                    composite, _layoutManager = self._presentClassMapWithFakeView(
+                        widget,
+                        origin=RESULT_SOURCE_SIMULATED_ORIGIN,
+                        detail=self.UC1_RECORDED_DETAIL,
+                        captureId=mapCaptureId,
+                    )
+                    self._assertMapShownAlone(widget, composite)
+                    self.assertIn("capture", widget.resultBackgroundStatus().lower())
+        finally:
+            widget._demoModeEnabled = previousDemoMode
+            widget._removeSimulatedBanner()
+
+    def test_laterMapOnlyRunDoesNotReuseTheEarlierBackground(self) -> None:
+        """A map-only run after a map-plus-background run is shown alone.
+
+        The connector reuses one node per device name and sets each incoming
+        metadata key on it; it never removes a key a later message omits. So run
+        A's UC1_RGB stays in the scene, and run B's map arrives on the node that
+        held run A's map. Run B carries its own capture ID (ADR-0002), which
+        overwrites run A's on that node, and the retained background no longer
+        matches, although origin, detail and size all still do.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        self._receivedUc1RgbVolume(self._backgroundValues(), RESULT_SOURCE_GENUINE_ORIGIN)
+        composite, layoutManager = self._presentClassMapWithFakeView(widget)
+        self.assertIsNotNone(widget._parameterNode.resultBackgroundVolume)
+
+        mapNode = widget._parameterNode.resultSourceVolume
+        mapNode.SetAttribute(
+            WIRE_ATTRIBUTE_PREFIX + RESULT_SOURCE_CAPTURE_ATTRIBUTE, "run-b-capture"
+        )
+        report = widget._refreshResultPresentation()
+        self.assertEqual(report["summaryStatus"], "PASS")
+        widget._displayResultVolume(layoutManager=layoutManager)
+
+        self.assertIs(widget._parameterNode.resultSourceVolume, mapNode)
+        self._assertMapShownAlone(widget, composite)
+        self.assertIn("capture", widget.resultBackgroundStatus().lower())
+
+    def test_backgroundMatchingTheMapsCaptureIsChosen(self) -> None:
+        """Among several UC1_RGB nodes, the map's own capture is composited.
+
+        The other node is valid in every other respect, and is tried both before
+        and after the matching one, so neither first-found nor last-found can pass.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        stale = self._backgroundValues()
+        own = self._backgroundValues()
+        own[..., 0] = 200
+        for staleFirst in (True, False):
+            with self.subTest(staleFirst=staleFirst):
+                slicer.mrmlScene.Clear()
+                arrivals = [(stale, "earlier-run"), (own, self.UC1_CAPTURE_ID)]
+                if not staleFirst:
+                    arrivals.reverse()
+                nodes = {
+                    captureId: self._receivedUc1RgbVolume(
+                        values, RESULT_SOURCE_GENUINE_ORIGIN, captureId=captureId
+                    )
+                    for values, captureId in arrivals
+                }
+
+                composite, _layoutManager = self._presentClassMapWithFakeView(widget)
+
+                backgroundNode = widget._parameterNode.resultBackgroundVolume
+                self.assertIsNotNone(backgroundNode)
+                self.assertEqual(
+                    widget._parameterNode.resultBackgroundSourceVolume.GetID(),
+                    nodes[self.UC1_CAPTURE_ID].GetID(),
+                )
+                self.assertEqual(composite.GetBackgroundVolumeID(), backgroundNode.GetID())
+                np.testing.assert_array_equal(slicer.util.arrayFromVolume(backgroundNode), own)
+
+    def test_cameraNodeIsNeverAnOverlayBackground(self) -> None:
+        """No camera image is ever put under a result, for any result role.
+
+        The laptop camera volume and a received LiveView frame are both RGB
+        images of exactly the right size, and both are named UC1_RGB here, so
+        only the rule itself can keep them out.
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        cameraNode = widget.logic.getOrCreateLiveVolume(widget._parameterNode)
+        slicer.util.updateVolumeFromArray(cameraNode, self._backgroundValues())
+        cameraNode.SetName(UC1_RGB_DEVICE_NAME)
+        liveViewNode = self._createReceivedVolume(
+            UC1_RGB_DEVICE_NAME,
+            self._backgroundValues(),
+            {
+                RESULT_SOURCE_DEVICE_ATTRIBUTE: LIVE_VIEW_DEVICE_NAME,
+                RESULT_SOURCE_ORIGIN_ATTRIBUTE: RESULT_SOURCE_GENUINE_ORIGIN,
+            },
+        )
+        self.assertEqual(widget.logic.findResultBackgroundSources(), [])
+
+        for resultMap in RESULT_MAP_CHOICES:
+            with self.subTest(resultMap=resultMap):
+                widget._parameterNode.resultMap = resultMap
+                source = self._createResultVolume(resultMap, self._validResultValues(resultMap))
+                layoutManager = self._FakeLayoutManager(self, (widget.RESULT_VIEW_NAME,))
+                try:
+                    self.assertEqual(widget._refreshResultPresentation()["summaryStatus"], "PASS")
+                    widget._displayResultVolume(layoutManager=layoutManager)
+                    composite = layoutManager.composites[widget.RESULT_VIEW_NAME]
+                    self.assertIsNone(widget._parameterNode.resultBackgroundVolume)
+                    for boundID in (
+                        composite.GetBackgroundVolumeID(),
+                        composite.GetForegroundVolumeID(),
+                    ):
+                        self.assertNotIn(boundID, (cameraNode.GetID(), liveViewNode.GetID()))
+                finally:
+                    slicer.mrmlScene.RemoveNode(source)

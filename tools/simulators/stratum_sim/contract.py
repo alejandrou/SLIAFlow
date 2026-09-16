@@ -10,6 +10,7 @@ never materialises the cube.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -30,6 +31,13 @@ METADATA_RESULT_MAP_KEY = "SLIAFlow.ResultMap"
 METADATA_DEVICE_NAME_KEY = "SLIAFlow.DeviceName"
 METADATA_DATA_ORIGIN_KEY = "SLIAFlow.DataOrigin"
 METADATA_SIMULATION_DETAIL_KEY = "SLIAFlow.SimulationDetail"
+# Carried by every UC1 map, and by `UC1_RGB` when it is sent (ADR-0002). One
+# opaque value per classification of one cube: SLIAFlow composites the two only
+# when they carry the same one, so a background retained from another run cannot
+# match. It is required on maps sent without a background too, because the
+# connector never removes an attribute a later message omits: a map without one
+# would keep the previous run's ID on its reused node.
+METADATA_CAPTURE_ID_KEY = "SLIAFlow.CaptureId"
 # Carried by `HSCube` only. The band browser needs each band's wavelength, and
 # the folder is where Mode A's algorithms read the same capture from disk.
 METADATA_WAVELENGTHS_KEY = "SLIAFlow.WavelengthsNm"
@@ -74,6 +82,11 @@ UC1_MAP_DEVICE_NAMES = {
 }
 
 UC1_MAP_FIELD_NAMES = tuple(UC1_MAP_DEVICE_NAMES)
+
+# Three bands of the cube UC1 classified, sent beside `UC1_MV_CLASS` on the same
+# connection (SLIA-024, ADR-0001). One producer, one cube, one connection is what
+# makes "same capture" a property of the transport rather than an assumption.
+UC1_RGB_DEVICE_NAME = "UC1_RGB"
 
 
 @dataclass(frozen=True)
@@ -214,17 +227,63 @@ def hsCubeMetadata(
     }
 
 
-def resultMapMetadata(mapName: str, dataOrigin: str, simulationDetail: str = "") -> dict[str, str]:
-    """Provenance for one UC1 result map, for the producers SLIA-012 and -013 add."""
-    if mapName not in UC1_MAP_DEVICE_NAMES:
-        raise ValueError(
-            f"Unknown result map {mapName!r}. Known maps: {', '.join(UC1_MAP_FIELD_NAMES)}."
-        )
+def _assertKnownOrigin(dataOrigin: str) -> None:
     if dataOrigin not in (DATA_ORIGIN_SIMULATED, DATA_ORIGIN_EXTERNAL_GENUINE):
         raise ValueError(
             f"Unknown data origin {dataOrigin!r}. "
             f"Use {DATA_ORIGIN_SIMULATED!r} or {DATA_ORIGIN_EXTERNAL_GENUINE!r}."
         )
+
+
+def newCaptureId() -> str:
+    """One opaque ID for one classification of one cube (ADR-0002).
+
+    Never reuse one for another cube or another classification. Resending a
+    result already computed reuses its ID.
+    """
+    return uuid.uuid4().hex
+
+
+def _assertCaptureId(captureId: str) -> None:
+    if not isinstance(captureId, str) or not captureId.strip():
+        raise ValueError(
+            f"A UC1 capture ID must be a non-empty string, not {captureId!r}. "
+            "Make one per classification with newCaptureId()."
+        )
+
+
+def uc1RgbMetadata(
+    dataOrigin: str, simulationDetail: str = "", *, captureId: str
+) -> dict[str, str]:
+    """Provenance for the cube-derived colour image sent beside a UC1 map.
+
+    It carries no `SLIAFlow.ResultMap`: it is a background for a result, not a
+    result, and a result role would make it discoverable as one. Its origin,
+    detail and capture ID are the map's, because SLIAFlow composites the two
+    only when they agree.
+    """
+    _assertKnownOrigin(dataOrigin)
+    _assertCaptureId(captureId)
+    metadata = {
+        METADATA_DEVICE_NAME_KEY: UC1_RGB_DEVICE_NAME,
+        METADATA_DATA_ORIGIN_KEY: dataOrigin,
+    }
+    if simulationDetail:
+        metadata[METADATA_SIMULATION_DETAIL_KEY] = simulationDetail
+    metadata[METADATA_CAPTURE_ID_KEY] = captureId
+    return metadata
+
+
+def resultMapMetadata(
+    mapName: str, dataOrigin: str, simulationDetail: str = "", *, captureId: str
+) -> dict[str, str]:
+    """Provenance for one UC1 result map, for the producers SLIA-012 and -013 add."""
+    if mapName not in UC1_MAP_DEVICE_NAMES:
+        raise ValueError(
+            f"Unknown result map {mapName!r}. Known maps: {', '.join(UC1_MAP_FIELD_NAMES)}."
+        )
+    _assertKnownOrigin(dataOrigin)
+    _assertCaptureId(captureId)
 
     metadata = {
         METADATA_RESULT_MAP_KEY: mapName,
@@ -233,4 +292,5 @@ def resultMapMetadata(mapName: str, dataOrigin: str, simulationDetail: str = "")
     }
     if simulationDetail:
         metadata[METADATA_SIMULATION_DETAIL_KEY] = simulationDetail
+    metadata[METADATA_CAPTURE_ID_KEY] = captureId
     return metadata

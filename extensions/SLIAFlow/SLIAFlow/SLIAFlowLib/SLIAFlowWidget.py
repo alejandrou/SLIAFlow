@@ -183,6 +183,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         "package installation error."
     )
     RESULT_WAITING_STATUS = _("Waiting for genuine UC1 result.")
+    RESULT_BACKGROUND_NONE_STATUS = _("None")
     SIMULATED_STATUS_PREFIX = _("SIMULATED: ")
     DEMO_MODE_ACTIVE_STATUS = _(
         "Demo mode is on. An externally produced simulated result may be "
@@ -363,6 +364,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._deactivatePresentation(restore=True)
         if self.logic is not None and self._parameterNode is not None:
             self.logic.clearResultReferences(self._parameterNode)
+            self.logic.clearResultBackgroundReferences(self._parameterNode)
         self.setParameterNode(None)
         self.removeObservers()
 
@@ -1240,6 +1242,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 simulated, report.get("simulationDetail")
             ):
                 self.logic.clearResultReferences(self._parameterNode)
+                self._clearResultBackground()
                 self._clearResultView()
                 self._setResultStatus("FAIL", self.BANNER_UNAVAILABLE_STATUS)
                 return dict(
@@ -1247,6 +1250,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     summaryStatus="FAIL",
                     summaryMessage=self.BANNER_UNAVAILABLE_STATUS,
                 )
+            # The background is decided after the map passed and before the
+            # flush, so the first frame of a map that has a background already
+            # shows it. Every outcome but a composite leaves the map as it was.
+            backgroundReport = self.logic.presentResultBackground(self._parameterNode)
+            self._setResultBackgroundStatus(backgroundReport["summaryMessage"])
             # The single flush of the view. _displayResultVolume renders once
             # the banner state and the volume state already agree, so neither
             # can be painted without the other.
@@ -1277,6 +1285,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._setConnectionState(CONNECTOR_UC1, connectorState)
         else:
             self.logic.clearResultReferences(self._parameterNode)
+            self._clearResultBackground()
             self._clearResultView()
             self._resultEverDisplayed = False
             if report["summaryStatus"] == "FAIL":
@@ -1303,6 +1312,21 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._setResultStatus("WARN", report["summaryMessage"])
                 self._setConnectionState(CONNECTOR_UC1, connectorState)
         return report
+
+    def resultBackgroundStatus(self) -> str:
+        """The background line the operator reads under the result source."""
+        label = getattr(getattr(self, "ui", None), "resultBackgroundValueLabel", None)
+        return "" if label is None else label.text
+
+    def _setResultBackgroundStatus(self, message: str) -> None:
+        label = getattr(getattr(self, "ui", None), "resultBackgroundValueLabel", None)
+        if label is not None:
+            label.setText(message)
+
+    def _clearResultBackground(self) -> None:
+        if self.logic is not None and self._parameterNode is not None:
+            self.logic.clearResultBackgroundReferences(self._parameterNode)
+        self._setResultBackgroundStatus(self.RESULT_BACKGROUND_NONE_STATUS)
 
     def _clearResultView(self, layoutManager=None) -> None:
         if layoutManager is None:
@@ -1333,7 +1357,12 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if resultWidget is None:
             return
         self._removeWaitingAnnotation()
-        if self._bindLayer(resultWidget, resultNode.GetID(), self.LAYER_UC1):
+        try:
+            backgroundNode = self._parameterNode.resultBackgroundVolume
+        except (KeyError, TypeError):
+            backgroundNode = None
+        backgroundID = None if backgroundNode is None else backgroundNode.GetID()
+        if self._bindLayer(resultWidget, resultNode.GetID(), self.LAYER_UC1, backgroundID):
             self._removePanelMessage(self.RESULT_VIEW_NAME)
         else:
             self._showPanelMessage(
@@ -1903,13 +1932,20 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         else:
             self._displayUc2Volume(layoutManager=layoutManager)
 
-    def _bindLayer(self, sliceWidget, nodeID: str, layer: str) -> bool:
+    def _bindLayer(
+        self, sliceWidget, nodeID: str, layer: str, backgroundID: str | None = None
+    ) -> bool:
         """Bind one layer's node to its panel. Returns False when hidden.
 
-        Full opacity uses the background slot, exactly as before SLIA-022.
-        Lower opacity uses the foreground slot over an empty background, so the
-        layer fades to black. SLIA-024 fills that background with the same
-        cube's colour image; nothing else may be put there.
+        With no background, full opacity uses the background slot, exactly as
+        before SLIA-022, and lower opacity uses the foreground slot over an
+        empty background, so the layer fades to black.
+
+        With a background - only ever the same cube's colour image, which the
+        logic has already matched to the map by provenance and size (SLIA-024)
+        - the background slot holds that image and the layer is always the
+        foreground, at the layer's opacity: 0 shows the image alone and 1 the
+        map alone.
         """
         visible, opacity = self.layerState(layer)
         sliceLogic = sliceWidget.sliceLogic()
@@ -1919,7 +1955,13 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             composite.SetForegroundVolumeID(None)
             composite.SetLabelVolumeID(None)
             return False
-        if opacity >= 1.0:
+        if backgroundID is not None:
+            if composite.GetBackgroundVolumeID() != backgroundID:
+                composite.SetBackgroundVolumeID(backgroundID)
+                sliceLogic.FitSliceToBackground()
+            composite.SetForegroundVolumeID(nodeID)
+            composite.SetForegroundOpacity(opacity)
+        elif opacity >= 1.0:
             if composite.GetBackgroundVolumeID() != nodeID:
                 composite.SetBackgroundVolumeID(nodeID)
                 sliceLogic.FitSliceToBackground()

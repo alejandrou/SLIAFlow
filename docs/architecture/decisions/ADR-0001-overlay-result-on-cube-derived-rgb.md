@@ -6,6 +6,7 @@ date: 2026-09-11
 accepted: 2026-09-15
 related_tasks: SLIA-022, SLIA-024, SLIA-021
 supersedes:
+superseded_in_part_by: ADR-0002
 ---
 
 # ADR-0001 - Overlay algorithm results on a cube-derived RGB, never on the laptop camera
@@ -15,6 +16,9 @@ supersedes:
 Accepted by the project owner on 2026-09-15, when activating `SLIA-022`.
 
 Proposed on 2026-09-11. Accepting it unblocked `SLIA-022` and `SLIA-024`.
+
+Superseded in part by `ADR-0002`, accepted 2026-09-16: the side-by-side
+presentation in rule 4 and the first Validation bullet. Every other rule stands.
 
 Applied at acceptance: rule 3 is why a result is composited only over a
 background from its own producer. `UC2_BV` therefore has its own panel and is
@@ -71,6 +75,8 @@ exactly such an image.
    dimensions, they are **not** composited and are shown side by side with an
    explicit status. SLIAFlow does not attempt to make two mismatched images
    agree.
+   *(The side-by-side presentation is superseded by `ADR-0002`: the map is
+   shown alone with an explicit status. The rest of this rule stands.)*
 5. Orientation is out of this decision's scope and stays as it is. Both images
    travel with the identity `ijk_to_world_matrix` and LPS that
    `igtl_transport.buildImageMessage` already sends, so both are rotated
@@ -150,7 +156,8 @@ a blended image cannot be validated as a class map at all.
 
 - An automated test asserts that a result and a background of different
   dimensions are not composited and produce the side-by-side presentation with an
-  explicit status.
+  explicit status. *(Superseded by `ADR-0002`: the test asserts that the map is
+  displayed alone and the status names both sizes.)*
 - An automated test asserts that the laptop camera node is never accepted as an
   overlay background for any result role.
 - An automated test asserts that the existing banner, demo-mode and precedence

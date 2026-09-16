@@ -35,14 +35,23 @@ RESULT_MAP_DEVICE_NAMES = {
     RESULT_MAP_KNN_PROB: "UC1_KNN_PROB",
 }
 
+# The colour image of the cube UC1 classified, sent on the UC1 connection beside
+# UC1_MV_CLASS (SLIA-024, ADR-0001). It is a background for that map and never a
+# result, so it carries no SLIAFlow.ResultMap role.
+UC1_RGB_DEVICE_NAME = "UC1_RGB"
+
 RESULT_SOURCE_ROLE_ATTRIBUTE = "SLIAFlow.ResultMap"
 RESULT_SOURCE_ORIGIN_ATTRIBUTE = "SLIAFlow.DataOrigin"
 RESULT_SOURCE_DEVICE_ATTRIBUTE = "SLIAFlow.DeviceName"
 RESULT_SOURCE_GENUINE_ORIGIN = "external-genuine"
 RESULT_SOURCE_SIMULATED_ORIGIN = "simulated"
 RESULT_SOURCE_DETAIL_ATTRIBUTE = "SLIAFlow.SimulationDetail"
+# One opaque value per classification of one cube, on UC1_RGB and the map it
+# accompanies (ADR-0002). A background is composited only under the map that
+# carries the same one.
+RESULT_SOURCE_CAPTURE_ATTRIBUTE = "SLIAFlow.CaptureId"
 
-# The four provenance keys, in the order the contract document lists them.
+# The provenance keys, in the order the contract document lists them.
 # Translation, discovery and the origin gate all walk this one tuple, so a key
 # added to the contract cannot be handled in one place and forgotten in
 # another.
@@ -51,6 +60,7 @@ RESULT_SOURCE_ATTRIBUTES = (
     RESULT_SOURCE_DEVICE_ATTRIBUTE,
     RESULT_SOURCE_ORIGIN_ATTRIBUTE,
     RESULT_SOURCE_DETAIL_ATTRIBUTE,
+    RESULT_SOURCE_CAPTURE_ATTRIBUTE,
 )
 
 # Only these two origins exist. Absent, empty or anything else is invalid and
@@ -180,6 +190,8 @@ class SLIAFlowParameterNode:
     liveSourceVolume: slicer.vtkMRMLVolumeNode
     resultSourceVolume: slicer.vtkMRMLVolumeNode
     resultVolume: slicer.vtkMRMLScalarVolumeNode
+    resultBackgroundSourceVolume: slicer.vtkMRMLVolumeNode
+    resultBackgroundVolume: slicer.vtkMRMLVectorVolumeNode
     uc2SourceVolume: slicer.vtkMRMLVolumeNode
     uc2Volume: slicer.vtkMRMLVectorVolumeNode
     cubeSourceVolume: slicer.vtkMRMLVolumeNode

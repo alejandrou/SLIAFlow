@@ -85,7 +85,7 @@ tests, and the link-loss step must pass a manual run before the card leaves
 manual verification. The layer list keeps each result in its own panel: `ADR-0001`, accepted
 on 2026-09-15, composites a result only over a background from its own
 producer, so `UC2_BV` is never drawn over `UC1_RGB`. The UC1 overlay itself is
-`SLIA-024`. The UC2 panel cannot be exercised by hand until `SLIA-021` delivers
+`SLIA-024`, implemented on 2026-09-16 (see Workstream C). The UC2 panel cannot be exercised by hand until `SLIA-021` delivers
 its producer.
 
 Six views, which is the union of the two reference images:
@@ -263,6 +263,20 @@ demonstrate and test the producer side on its own.
 
 ## Workstream C - make the UC1 result visible
 
+**Status, 2026-09-16:** implemented under `SLIA-024`, automated tests passing,
+manual verification pending. The runner resolves 710, 540 and 480 nm against the
+header's own wavelengths (tolerance 2.5 nm; on recorded case `004-02` they resolve
+exactly to indices 54, 20 and 8), scales each band by fixed reflectance
+(`round(clip(reflectance, 0, 1) * 255)`, no per-image stretch) and sends
+`UC1_RGB` before `UC1_MV_CLASS` in every cycle, with the map's provenance. A
+header that cannot supply the bands stops `UC1_RGB`, never the map. Two changes
+from the bullets below, both in `ADR-0002`: a size mismatch shows the
+map **alone**, not side by side, because the delineation view is one panel; and
+every UC1 map carries one `SLIAFlow.CaptureId` per run, shared by `UC1_RGB`,
+because review found that a `UC1_RGB` retained from an earlier run passes every
+other check. SLIAFlow also
+refuses a background whose provenance differs from the map's.
+
 **Plainly:** close the loop. Camera → capture → cube → UC1 → result on screen.
 That is the thing to show.
 
@@ -274,7 +288,8 @@ That is the thing to show.
 - The delineation panel shows the map over that photograph, with opacity.
 - **One safeguard, one line:** if the two images are not the same size, they are
   not overlaid and are shown side by side. No capture identifiers, no extra
-  protocol.
+  protocol. *(Superseded by `ADR-0002`: the map is shown alone, and one
+  capture ID ties the two images together.)*
 
 The background is the cube-derived photograph, **not the laptop camera**: the
 camera is pointed somewhere else, and overlaying there would paint the tumour

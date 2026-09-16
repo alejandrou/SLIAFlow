@@ -44,7 +44,7 @@ from pathlib import Path
 
 import numpy
 
-from . import bmp, config, contract, envi, igtl_transport, tissue, uc1_maps
+from . import bmp, config, contract, envi, igtl_transport, spectra, tissue, uc1_maps
 
 # The palette inverse is SLIA-012's forward table read backwards. It is imported
 # rather than restated so the two directions cannot drift apart.
@@ -117,6 +117,22 @@ PATH_TOO_LONG_MARKER = "Path too long"
 # How many offending pixels an unmapped-colour report names before it stops.
 REPORTED_OFFENDER_LIMIT = 5
 
+# `UC1_RGB`, the background the class map is composited over (SLIA-024).
+#
+# It is a viewing aid assembled from three bands of the cube UC1 classified, not
+# a colour-accurate rendering and not the microscope's own view. The targets are
+# red, green and blue in that order. On the recorded database grid, 440 to 900 nm
+# in 5 nm steps, they fall exactly on band indices 54, 20 and 8.
+RGB_DEVICE_NAME = contract.UC1_RGB_DEVICE_NAME
+RGB_TARGET_WAVELENGTHS_NM = (710.0, 540.0, 480.0)
+# Half the recorded grid's step. A nearest band further away than this belongs
+# to a different grid, and the image is refused rather than assembled from it.
+RGB_BAND_TOLERANCE_NM = 2.5
+# The calibrated cube is `100 * reflectance`. Reflectance 0 is black and 1 is
+# full scale for every capture; there is no per-image stretch, so two captures
+# of the same tissue are shown on the same scale.
+RGB_FULL_SCALE_CALIBRATED = 100.0
+
 
 class Uc1RunnerError(RuntimeError):
     """The genuine UC1 run could not be completed or trusted."""
@@ -148,6 +164,10 @@ class Uc1PaletteError(Uc1RunnerError):
 
 class Uc1ModelMismatchError(Uc1RunnerError):
     """The dataset and the staged SVM model disagree about the band count."""
+
+
+class Uc1RgbBandError(Uc1RunnerError):
+    """The header cannot say which bands make the colour background."""
 
 
 @dataclass(frozen=True)
@@ -523,20 +543,162 @@ def simulationDetailForDataset(dataset: contract.DatasetRef) -> str:
     return SIMULATION_DETAIL_PHANTOM if phantomRecord.is_file() else SIMULATION_DETAIL
 
 
+@dataclass(frozen=True)
+class RgbBand:
+    """One requested wavelength and the header band it resolved to."""
+
+    targetNm: float
+    index: int
+    wavelengthNm: float
+
+    @property
+    def missNm(self) -> float:
+        return abs(self.wavelengthNm - self.targetNm)
+
+
+def resolveRgbBands(dataset: contract.DatasetRef) -> tuple[RgbBand, ...]:
+    """Resolve the red, green and blue targets against the header's own wavelengths.
+
+    Bands are chosen by wavelength, never by a remembered index: an index is only
+    right on the grid it was read from. A header with no wavelength list, or one
+    whose nearest band misses a target by more than the tolerance, is refused.
+    """
+    wavelengths = numpy.asarray(dataset.wavelengthsNm, dtype=numpy.float64)
+    if wavelengths.size and not numpy.all(numpy.isfinite(wavelengths)):
+        # A NaN would be picked by argmin and would pass the tolerance check,
+        # because every comparison with NaN is false.
+        raise Uc1RgbBandError(
+            f"{dataset.folder} lists a wavelength that is not finite, so the bands for "
+            f"{RGB_DEVICE_NAME} cannot be chosen from it."
+        )
+    if wavelengths.size == 0:
+        raise Uc1RgbBandError(
+            f"{dataset.folder} has no wavelength list in its header, so the bands for "
+            f"{RGB_DEVICE_NAME} cannot be chosen. No band index is assumed in its place."
+        )
+    if wavelengths.size != dataset.bands:
+        raise Uc1RgbBandError(
+            f"{dataset.folder} declares {dataset.bands} bands but lists {wavelengths.size} "
+            f"wavelengths, so no band can be trusted for {RGB_DEVICE_NAME}."
+        )
+
+    bands = []
+    for target in RGB_TARGET_WAVELENGTHS_NM:
+        index = int(numpy.argmin(numpy.abs(wavelengths - target)))
+        band = RgbBand(target, index, float(wavelengths[index]))
+        if band.missNm > RGB_BAND_TOLERANCE_NM:
+            raise Uc1RgbBandError(
+                f"The nearest band to {target:g} nm in {dataset.folder} is index {index} at "
+                f"{band.wavelengthNm:g} nm, {band.missNm:.2f} nm away; the tolerance is "
+                f"{RGB_BAND_TOLERANCE_NM:g} nm. {RGB_DEVICE_NAME} is not assembled from a "
+                "band it was not asked for."
+            )
+        bands.append(band)
+    return tuple(bands)
+
+
+def describeRgbBands(bands: tuple[RgbBand, ...]) -> str:
+    """Report which band every requested wavelength resolved to, and the miss."""
+    return "; ".join(
+        f"{band.targetNm:g} nm -> index {band.index} at {band.wavelengthNm:g} nm "
+        f"(miss {band.missNm:.2f} nm)"
+        for band in bands
+    )
+
+
+def _readBand(path: Path, dataset: contract.DatasetRef, index: int) -> numpy.ndarray:
+    """Read one band of a BSQ file without reading the other bands."""
+    bandBytes = dataset.lines * dataset.samples * envi.BYTES_PER_SAMPLE
+    expectedBytes = dataset.bands * bandBytes
+    actualBytes = path.stat().st_size
+    if actualBytes != expectedBytes:
+        raise envi.DatasetReadError(
+            f"{path} is {actualBytes} bytes but the header describes {expectedBytes}."
+        )
+    return numpy.fromfile(
+        path, dtype="<u2", count=dataset.lines * dataset.samples, offset=index * bandBytes
+    ).reshape(dataset.lines, dataset.samples)
+
+
+def loadRgbBackground(
+    dataset: contract.DatasetRef, bands: tuple[RgbBand, ...]
+) -> numpy.ndarray:
+    """Assemble `UC1_RGB` as a (1, lines, samples, 3) uint8 image.
+
+    Each band is calibrated exactly as UC1 calibrates it, then mapped with the
+    fixed scale `round(clip(value / 100, 0, 1) * 255)`. The (k, j, i) layout is
+    the class map's, so for one cube the two images have the same dimensions.
+    """
+    channels = []
+    for band in bands:
+        raw, white, dark = (
+            _readBand(dataset.folder / fileName, dataset, band.index)
+            for fileName in (
+                envi.RAW_DATA_FILE_NAME,
+                envi.WHITE_REFERENCE_FILE_NAME,
+                envi.DARK_REFERENCE_FILE_NAME,
+            )
+        )
+        calibrated = spectra.calibrate(raw, dark, white)
+        reflectance = numpy.clip(calibrated / RGB_FULL_SCALE_CALIBRATED, 0.0, 1.0)
+        channels.append(numpy.round(reflectance * 255.0).astype(numpy.uint8))
+    return numpy.stack(channels, axis=-1)[numpy.newaxis, ...]
+
+
+def prepareRgbBackground(dataset: contract.DatasetRef) -> numpy.ndarray | None:
+    """Resolve and assemble the background, or say why there is none.
+
+    A refusal is reported and returns None: the class map is still sent, and the
+    consumer shows it alone, which is exactly what it does before a background
+    arrives.
+    """
+    try:
+        bands = resolveRgbBands(dataset)
+        background = loadRgbBackground(dataset, bands)
+    except (Uc1RgbBandError, envi.DatasetReadError, OSError) as error:
+        print(
+            f"WARNING: {RGB_DEVICE_NAME} will not be sent; UC1_MV_CLASS is sent alone. {error}",
+            file=sys.stderr,
+        )
+        return None
+    print(f"{RGB_DEVICE_NAME} bands: {describeRgbBands(bands)}")
+    return background
+
+
 def mapMessages(
     maps: contract.Uc1Maps,
     simulationDetail: str = SIMULATION_DETAIL,
+    background: numpy.ndarray | None = None,
+    captureId: str | None = None,
 ) -> Iterator[tuple[numpy.ndarray, str, dict[str, str]]]:
     """Yield the maps this producer actually produced, with full provenance.
 
     An absent map is skipped rather than substituted, so a real-UC1 session
     sends `UC1_MV_CLASS` and no other UC1 device name.
+
+    A background, when there is one, is yielded first and with the map's origin
+    and detail, so a cycle that shows the map has already delivered the image it
+    is composited over. Both carry `captureId`, which is what lets SLIAFlow tell
+    this background from one retained from another run. The map carries it with
+    or without a background. `streamMaps` passes its run's ID; without one, this
+    call makes a new one, which is never shared with another classification.
     """
+    if captureId is None:
+        captureId = contract.newCaptureId()
+    if background is not None:
+        yield (
+            background,
+            RGB_DEVICE_NAME,
+            contract.uc1RgbMetadata(
+                contract.DATA_ORIGIN_SIMULATED, simulationDetail, captureId=captureId
+            ),
+        )
     for mapName in maps.presentMapNames():
         metadata = contract.resultMapMetadata(
             mapName,
             contract.DATA_ORIGIN_SIMULATED,
             simulationDetail=simulationDetail,
+            captureId=captureId,
         )
         yield (
             getattr(maps, mapName),
@@ -549,9 +711,13 @@ def sendMaps(
     server: igtl_transport.ImageStreamServer,
     maps: contract.Uc1Maps,
     simulationDetail: str = SIMULATION_DETAIL,
+    background: numpy.ndarray | None = None,
+    captureId: str | None = None,
 ) -> bool:
     """Send every produced map, re-checking the class map before each send."""
-    for image, deviceName, metadata in mapMessages(maps, simulationDetail):
+    for image, deviceName, metadata in mapMessages(
+        maps, simulationDetail, background, captureId
+    ):
         uc1_maps.validateMajorityVotingMap(maps.majorityVotingMap)
         if not server.sendImage(image, deviceName, metadata):
             return False
@@ -579,12 +745,25 @@ def streamMaps(
     if intervalSec < 0.0:
         raise ValueError(f"intervalSec must not be negative, not {intervalSec}.")
 
+    # Before the GPU run, so a refusal is read before a minute of compute.
+    background = prepareRgbBackground(dataset)
     maps = classifier.classify(dataset)
     uc1_maps.validateMajorityVotingMap(maps.majorityVotingMap)
     print(f"Recovered majorityVotingMap: {describeClassMap(maps.majorityVotingMap)}")
     warning = uniformClassWarning(maps.majorityVotingMap)
     if warning:
         print(warning, file=sys.stderr)
+    if background is not None and background.shape[:3] != maps.majorityVotingMap.shape:
+        # By construction this cannot happen for one cube. If it does, the two
+        # images are not of one geometry and the background is not sent.
+        print(
+            f"WARNING: {RGB_DEVICE_NAME} has shape {background.shape[:3]} but the class map "
+            f"has {maps.majorityVotingMap.shape}; {RGB_DEVICE_NAME} will not be sent.",
+            file=sys.stderr,
+        )
+        background = None
+    # The pipeline ran once, so every cycle resends one capture under one ID.
+    captureId = contract.newCaptureId()
     completedCycles = 0
 
     with (
@@ -596,7 +775,9 @@ def streamMaps(
             "Waiting for an OpenIGTLink client. Press Ctrl-C to stop."
         )
         while not interrupt.requested and (cycles == 0 or completedCycles < cycles):
-            if server.isConnected and sendMaps(server, maps, simulationDetail):
+            if server.isConnected and sendMaps(
+                server, maps, simulationDetail, background, captureId
+            ):
                 completedCycles += 1
                 print(CYCLE_BANNER.format(cycle=completedCycles, detail=simulationDetail))
             if cycles == 0 or completedCycles < cycles:
@@ -774,7 +955,11 @@ __all__ = [
     "EXECUTABLE_NAME",
     "LOCK_FILE_NAME",
     "PATH_TOO_LONG_MARKER",
+    "RGB_BAND_TOLERANCE_NM",
+    "RGB_DEVICE_NAME",
+    "RGB_TARGET_WAVELENGTHS_NM",
     "RGB_TO_CLASS",
+    "RgbBand",
     "SIMULATION_DETAIL",
     "SIMULATION_DETAIL_PHANTOM",
     "ProcessResult",
@@ -786,18 +971,23 @@ __all__ = [
     "Uc1OutputMissingError",
     "Uc1PaletteError",
     "Uc1ProcessFailedError",
+    "Uc1RgbBandError",
     "Uc1RunnerError",
     "Uc1StaleOutputError",
     "buildArgumentParser",
     "defaultBuildRoot",
+    "describeRgbBands",
     "describeClassMap",
+    "loadRgbBackground",
     "main",
     "mapMessages",
     "simulationDetailForDataset",
     "parseChannelFile",
     "prepareOutputDirectories",
+    "prepareRgbBackground",
     "readChannels",
     "recoverClassMap",
+    "resolveRgbBands",
     "runSubprocess",
     "sendMaps",
     "streamMaps",

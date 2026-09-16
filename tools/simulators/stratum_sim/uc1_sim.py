@@ -30,22 +30,37 @@ CYCLE_BANNER = "SIMULATED UC1 OUTPUT cycle {cycle}: arithmetic stand-in, not a c
 
 def mapMessages(
     maps: contract.Uc1Maps,
+    captureId: str | None = None,
 ) -> Iterator[tuple[numpy.ndarray, str, dict[str, str]]]:
-    """Yield each map, device name and complete simulated wire metadata."""
+    """Yield each map, device name and complete simulated wire metadata.
+
+    The stand-in sends no background, but every map still carries a capture ID
+    (ADR-0002): the connector keeps the attributes of a reused node, so a map
+    without one would inherit an earlier run's ID and could be composited over
+    that run's `UC1_RGB`. `streamMaps` passes its run's ID; without one, this
+    call makes a new one.
+    """
+    if captureId is None:
+        captureId = contract.newCaptureId()
     for mapName in contract.UC1_MAP_FIELD_NAMES:
         image = getattr(maps, mapName)
         metadata = contract.resultMapMetadata(
             mapName,
             contract.DATA_ORIGIN_SIMULATED,
             simulationDetail=SIMULATION_DETAIL,
+            captureId=captureId,
         )
         yield image, metadata[contract.METADATA_DEVICE_NAME_KEY], metadata
 
 
-def sendMaps(server: igtl_transport.ImageStreamServer, maps: contract.Uc1Maps) -> bool:
+def sendMaps(
+    server: igtl_transport.ImageStreamServer,
+    maps: contract.Uc1Maps,
+    captureId: str | None = None,
+) -> bool:
     """Send all five maps, validating the complete collection before each send."""
     uc1_maps.validateMaps(maps)
-    for image, deviceName, metadata in mapMessages(maps):
+    for image, deviceName, metadata in mapMessages(maps, captureId):
         # Keep this immediately before every send. A future producer may mutate
         # one map while preparing another message; no invalid map may cross the
         # wire merely because an earlier map was valid.
@@ -77,6 +92,8 @@ def streamMaps(
 
     maps = classifier.classify(dataset)
     uc1_maps.validateMaps(maps)
+    # One classification, so every cycle resends one result under one ID.
+    captureId = contract.newCaptureId()
     completedCycles = 0
     noticeSent = False
 
@@ -92,7 +109,7 @@ def streamMaps(
             if server.isConnected:
                 if sendNotice and not noticeSent:
                     noticeSent = sendSimulationNotice(server)
-                if sendMaps(server, maps):
+                if sendMaps(server, maps, captureId):
                     completedCycles += 1
                     print(CYCLE_BANNER.format(cycle=completedCycles))
             if cycles == 0 or completedCycles < cycles:

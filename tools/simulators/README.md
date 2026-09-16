@@ -293,6 +293,11 @@ all five contract maps on `127.0.0.1:18945`. It is a fixed arithmetic rule with
 hand-chosen constants, not a classifier; its output is synthetic and
 non-clinical.
 
+It sends no `UC1_RGB`, but all five maps carry one `SLIAFlow.CaptureId`, a
+random value made once per run. The connector never removes a metadata key a
+later message omits, so maps without one would keep an earlier run's ID and
+could be put over that run's `UC1_RGB`.
+
 Create a dataset without leaving the acquisition server running:
 
 ```powershell
@@ -317,7 +322,8 @@ In a second shell, inspect one message for each device name:
 The client prints the `(1, lines, samples[, components])` shape, scalar type,
 header version and every metadata key. The five devices are `UC1_TMD`,
 `UC1_MV_CLASS`, `UC1_MV_PROB`, `UC1_SVM_PROB` and `UC1_KNN_PROB`. Every map
-message must report header version 2 and all four provenance keys. An empty
+message must report header version 2 and all five provenance keys, one
+`SLIAFlow.CaptureId` value shared by every message of the run. An empty
 metadata dictionary means the sender used pyigtl header version 1 and the
 provenance was lost.
 
@@ -385,6 +391,24 @@ then discards them, so a real-UC1 session sends `UC1_MV_CLASS` alone and leaves
 the rest absent rather than substituting zeros. Never run `uc1` and `uc1-real`
 together: five maps from two different boxes in one session would imply UC1
 produced all five.
+
+**It also sends `UC1_RGB`, the map's background (`SLIA-024`).** Before the GPU
+run the runner resolves 710, 540 and 480 nm against the dataset header's own
+wavelength list and prints which band each resolved to and by how much it missed.
+It reads only those three bands, calibrates them as UC1 does, and scales each by
+fixed reflectance, `round(clip(reflectance, 0, 1) * 255)`, with no per-image
+stretch. The result is a `(1, lines, samples, 3)` `uint8` image sent as `UC1_RGB`
+immediately before `UC1_MV_CLASS` in every cycle, with the same origin and
+simulation detail and no `SLIAFlow.ResultMap` role. Both messages carry one
+`SLIAFlow.CaptureId`, a random value made once per run, so SLIAFlow never puts a
+map over a `UC1_RGB` left over from another run. The map carries it when
+`UC1_RGB` is refused, too. It is a viewing aid made of
+three bands, not a colour-accurate photograph and not the microscope's view.
+
+`UC1_RGB` is refused, and `UC1_MV_CLASS` is sent alone, when the header lists no
+wavelengths, lists one that is not finite, lists a different number of them than
+it has bands, or has no band within 2.5 nm of a target. The refusal is printed to stderr as a `WARNING`. A
+band index is never assumed in place of a wavelength.
 
 The pipeline is real and the acquisition is simulated, so the output is still
 marked `simulated` on the wire. `SLIAFlow.SimulationDetail` names what the cube
