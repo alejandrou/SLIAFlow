@@ -224,6 +224,54 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # far below the point where an operator would read a dead label as live,
     # and the poll is three attribute reads per link.
     LINK_STATE_POLL_INTERVAL_SEC = 1.0
+    # How long a link may sit in `connecting` before the panel says what should
+    # be listening. A producer that is already listening connects on the first
+    # connector attempt, well inside a second on 127.0.0.1, so three seconds
+    # (three polls) does not flash the text during a normal connect.
+    LINK_WAITING_GRACE_SEC = 3.0
+    # The panel names ports and commands only. It never claims that a producer
+    # is running, and it never starts one: the producers stand where the real
+    # acquisition and UC1 components will stand. -NoSlicer because the reader
+    # is already in a Slicer; without it the session starts a second one.
+    SESSION_COMMAND = (
+        "scripts\\development\\run-end-to-end-session.ps1 -Case <case> -NoSlicer"
+    )
+    LINK_WAITING_NAMES = {
+        CONNECTOR_ACQUISITION: _("LiveView"),
+        CONNECTOR_UC1: _("UC1"),
+        CONNECTOR_UC2: _("UC2"),
+        CONNECTOR_HS_CUBE: _("HS Cube"),
+        CONNECTOR_CONTROL: _("Control"),
+    }
+    LINK_WAITING_PREFIX = _(
+        "{link}: connecting - nothing is listening on {host}:{port}."
+    )
+    LINK_WAITING_REASONS = {
+        CONNECTOR_ACQUISITION: _(
+            "Start {command}; its acquisition stand-in serves this port."
+        ).format(command=SESSION_COMMAND),
+        CONNECTOR_HS_CUBE: _(
+            "Start {command}; its acquisition stand-in serves this port."
+        ).format(command=SESSION_COMMAND),
+        CONNECTOR_CONTROL: _(
+            "Start {command}; its acquisition stand-in serves this port."
+        ).format(command=SESSION_COMMAND),
+        CONNECTOR_UC1: _(
+            "Start {command}; its UC1 runner listens only after the first "
+            "capture reports READY, so this link waits until after the first "
+            "capture."
+        ).format(command=SESSION_COMMAND),
+        CONNECTOR_UC2: _(
+            "No UC2 producer exists yet (SLIA-021), so this link is expected to "
+            "stay unconnected."
+        ),
+    }
+    CAMERA_CONTENTION_WARNING = _(
+        "The laptop camera is running. The acquisition stand-in opens the same "
+        "camera (index 0) for LiveView and exits when it cannot, so its ports "
+        "never listen. Stop the camera, or choose the network stream, before "
+        "starting the session."
+    )
     BANNER_UNAVAILABLE_STATUS = _(
         "The SIMULATED banner could not be drawn, so the simulated result was "
         "withheld."
@@ -306,6 +354,12 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Runs while any link is up. See _pollLinkStates for why a panel that
         # observes six connector events still has to read the state itself.
         self._linkStateTimer = None
+        # When each link entered `connecting`, or None when it is not waiting.
+        # Read against LINK_WAITING_GRACE_SEC; see linkWaitingText.
+        self._linkWaitingSince: dict[str, float | None] = dict.fromkeys(
+            CONNECTOR_ROLES, None
+        )
+        self._linkWaitingLabel = None
 
     def setup(self) -> None:
         super().setup()
@@ -351,6 +405,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if demoModeCheckBox is not None:
             demoModeCheckBox.connect("toggled(bool)", self._onDemoModeToggled)
         self._resetDemoMode()
+        self._createLinkWaitingLabel()
         self.initializeParameterNode()
         self._setCameraSupportState(self.logic.openCVAvailable())
         self._setResultStatus("WARN", self.RESULT_WAITING_STATUS)
@@ -503,6 +558,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._cameraSupportAvailable and cameraSelected and not cameraActive
         )
         self.ui.stopButton.setEnabled(cameraActive)
+        self._refreshLinkWaitingText()
 
     def _setCameraSupportState(self, available: bool) -> None:
         if self._cameraRestartRequired:
@@ -699,6 +755,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._connectLink(role)
             else:
                 self._disconnectLink(role)
+        if checked and self._cameraContendsWithStandIn():
+            # A warning, not a refusal: the links may be meant for producers
+            # that do not use this laptop's camera.
+            logging.warning(self.CAMERA_CONTENTION_WARNING)
         self._refreshConnectionControls()
 
     def _disconnectAllLinks(self) -> None:
@@ -711,6 +771,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._removeConnectorObservers(role)
             self.logic.stopConnector(role)
             self._connectionStates[role] = CONNECTION_DISCONNECTED
+            self._linkWaitingSince[role] = None
             if hadSession and role in self._linkDropped:
                 self._linkDropped[role] = True
                 self._rememberLinkDrop(role)
@@ -886,6 +947,9 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 self._onLinkDisconnected(role)
                 continue
             self._setConnectionState(role, state)
+        # The waiting text is a function of elapsed time, so the poll is what
+        # makes it appear once the grace period has passed.
+        self._refreshLinkWaitingText()
 
     def _startLinkStatePolling(self) -> None:
         if self._linkStateTimer is not None:
@@ -1083,6 +1147,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         newState = state or CONNECTION_DISCONNECTED
         changed = self._connectionStates.get(role) != newState
         self._connectionStates[role] = newState
+        if newState != CONNECTION_CONNECTING:
+            self._linkWaitingSince[role] = None
+        elif self._linkWaitingSince.get(role) is None:
+            self._linkWaitingSince[role] = time.monotonic()
         # Rebuilding the controls is useful when the state changes, or when
         # the connector was removed while the label stayed the same. Avoid
         # doing it for every validation refresh that reasserts the same state.
@@ -1114,7 +1182,69 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             label = getattr(self.ui, valueLabel, None)
             if label is not None:
                 label.setText(self.connectionState(role))
+        self._refreshLinkWaitingText()
         self._refreshCaptureControls()
+
+    def _createLinkWaitingLabel(self) -> None:
+        """Add the line that says why links are waiting, under Status.
+
+        It is kept apart from the per-link state labels, whose text is the
+        `connecting`/`receiving`/`disconnected` vocabulary and nothing else.
+        """
+        statusGroupBox = getattr(self.ui, "statusGroupBox", None)
+        if statusGroupBox is None or statusGroupBox.layout() is None:
+            return
+        label = qt.QLabel()
+        label.objectName = "linkWaitingLabel"
+        label.wordWrap = True
+        label.visible = False
+        statusGroupBox.layout().addWidget(label)
+        self._linkWaitingLabel = label
+
+    def _cameraContendsWithStandIn(self) -> bool:
+        """Whether this Slicer holds the camera the acquisition stand-in opens."""
+        return (
+            self.logic is not None
+            and self._liveSource() == LIVE_SOURCE_LAPTOP
+            and self.logic.cameraActive
+            and any(
+                self.logic.connectorNode(role) is not None for role in CONNECTOR_ROLES
+            )
+        )
+
+    def linkWaitingText(self, role: str) -> str:
+        """What should serve a link that has waited past the grace period.
+
+        Empty while the link is not `connecting`, or has only just started to.
+        """
+        since = self._linkWaitingSince.get(role)
+        if since is None or time.monotonic() - since < self.LINK_WAITING_GRACE_SEC:
+            return ""
+        host, port = self.logic.CONNECTOR_ENDPOINTS[role]
+        prefix = self.LINK_WAITING_PREFIX.format(
+            link=self.LINK_WAITING_NAMES[role], host=host, port=port
+        )
+        return prefix + " " + self.LINK_WAITING_REASONS[role]
+
+    def linkWaitingLabelText(self) -> str:
+        return "" if self._linkWaitingLabel is None else self._linkWaitingLabel.text
+
+    def _refreshLinkWaitingText(self) -> None:
+        label = self._linkWaitingLabel
+        if label is None or self.logic is None:
+            return
+        lines = []
+        if self._cameraContendsWithStandIn():
+            lines.append(self.CAMERA_CONTENTION_WARNING)
+        lines.extend(
+            text
+            for text in (self.linkWaitingText(role) for role in CONNECTOR_ROLES)
+            if text
+        )
+        text = "\n".join(lines)
+        if label.text != text:
+            label.setText(text)
+        label.setVisible(bool(text))
 
     def _displayLiveViewNode(self, layoutManager=None) -> dict:
         """Bind the received LiveView node to the left pane, and nowhere else.
