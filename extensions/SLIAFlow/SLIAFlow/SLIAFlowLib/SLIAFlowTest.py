@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import slicer
+import vtk
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleTest
 from vtk.util.numpy_support import vtk_to_numpy
 
@@ -2926,6 +2927,155 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 label = getattr(widget.ui, self.LINK_STATE_LABELS[role])
                 self.assertEqual(label.text, CONNECTION_DISCONNECTED)
         self.assertFalse(button.checked)
+
+    # ----------------------------------------------------------------------
+    # SLIA-026: waiting links say why, and the laptop camera is upright
+    # ----------------------------------------------------------------------
+
+    UPRIGHT_LIVE_DIRECTIONS = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
+
+    @staticmethod
+    def _ijkToRasDirections(volumeNode):
+        matrix = vtk.vtkMatrix4x4()
+        volumeNode.GetIJKToRASDirectionMatrix(matrix)
+        return tuple(
+            tuple(matrix.GetElement(row, column) for column in range(3))
+            for row in range(3)
+        )
+
+    def _connectFakeLinks(self, widget) -> dict:
+        connectors = {
+            role: widget.logic.getOrCreateConnector(
+                role, connectorFactory=lambda role: self._FakeObservableConnector()
+            )
+            for role in self.LINK_PORTS
+        }
+        widget._onConnectLinksToggled(True)
+        return connectors
+
+    @staticmethod
+    def _expireLinkWaitingGrace(widget) -> None:
+        past = time.monotonic() - 10.0 * widget.LINK_WAITING_GRACE_SEC
+        for role in list(widget._linkWaitingSince):
+            if widget._linkWaitingSince[role] is not None:
+                widget._linkWaitingSince[role] = past
+        widget._pollLinkStates()
+
+    def test_liveVolumeIsDisplayedUpright(self) -> None:
+        """The camera volume carries the geometry the OpenIGTLink stream carries.
+
+        OpenCV row 0 is the top of the picture. With identity directions an
+        Axial slice draws i right to left and j bottom to top, which shows the
+        frame rotated 180 degrees. diag(-1, -1, 1) draws both the right way.
+        """
+        logic = SLIAFlowLogic()
+        parameterNode = logic.getParameterNode()
+
+        created = logic.getOrCreateLiveVolume(parameterNode)
+        self.assertEqual(self._ijkToRasDirections(created), self.UPRIGHT_LIVE_DIRECTIONS)
+
+        # A node left in the scene by an earlier version is corrected on reuse.
+        created.SetIJKToRASDirections(1, 0, 0, 0, 1, 0, 0, 0, 1)
+        reused = logic.getOrCreateLiveVolume(parameterNode)
+        self.assertIs(reused, created)
+        self.assertEqual(self._ijkToRasDirections(reused), self.UPRIGHT_LIVE_DIRECTIONS)
+
+        # A frame update keeps the geometry.
+        frame = np.zeros((1, 4, 6, 3), dtype=np.uint8)
+        slicer.util.updateVolumeFromArray(reused, frame)
+        self.assertEqual(
+            self._ijkToRasDirections(logic.getOrCreateLiveVolume(parameterNode)),
+            self.UPRIGHT_LIVE_DIRECTIONS,
+        )
+
+    def test_waitingLinkNamesItsProducer(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        connectors = self._connectFakeLinks(widget)
+
+        # Inside the grace period a normal connect shows nothing extra.
+        for role in self.LINK_PORTS:
+            with self.subTest(role=role, step="grace"):
+                self.assertEqual(widget.linkWaitingText(role), "")
+
+        self._expireLinkWaitingGrace(widget)
+        for role in ("acquisition", "hsCube", "control"):
+            with self.subTest(role=role, step="waiting"):
+                text = widget.linkWaitingText(role)
+                self.assertIn(f"{IGTL_HOST}:{self.LINK_PORTS[role]}", text)
+                self.assertIn("run-end-to-end-session.ps1 -Case", text)
+                self.assertIn(text, widget.linkWaitingLabelText())
+                # The state vocabulary is untouched.
+                label = getattr(widget.ui, self.LINK_STATE_LABELS[role])
+                self.assertEqual(label.text, CONNECTION_CONNECTING)
+
+        # A link that connects drops its waiting text.
+        connectors["acquisition"].state = 2
+        widget._pollLinkStates()
+        self.assertEqual(widget.linkWaitingText("acquisition"), "")
+        self.assertEqual(
+            getattr(widget.ui, self.LINK_STATE_LABELS["acquisition"]).text,
+            CONNECTION_RECEIVING,
+        )
+        self.assertIn("18947", widget.linkWaitingLabelText())
+
+        widget._onConnectLinksToggled(False)
+        for role in self.LINK_PORTS:
+            with self.subTest(role=role, step="disconnected"):
+                self.assertEqual(widget.linkWaitingText(role), "")
+        self.assertEqual(widget.linkWaitingLabelText(), "")
+
+    def test_uc1AndUc2WaitingTextExplainsTheirProducers(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        self._connectFakeLinks(widget)
+        self._expireLinkWaitingGrace(widget)
+
+        uc1 = widget.linkWaitingText("uc1")
+        self.assertIn(f"{IGTL_HOST}:{self.LINK_PORTS['uc1']}", uc1)
+        self.assertIn("after the first capture", uc1)
+
+        uc2 = widget.linkWaitingText("uc2")
+        self.assertIn(f"{IGTL_HOST}:{self.LINK_PORTS['uc2']}", uc2)
+        self.assertIn("No UC2 producer exists yet", uc2)
+        self.assertIn("SLIA-021", uc2)
+        self.assertNotIn("run-end-to-end-session", uc2)
+
+    def test_connectLinksWarnsWhileTheLaptopCameraHoldsIt(self) -> None:
+        class FakeTimer:
+            def stop(self) -> None:
+                pass
+
+        class FakeCapture:
+            def release(self) -> None:
+                pass
+
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        widget._parameterNode.liveSource = LIVE_SOURCE_LAPTOP
+
+        self._connectFakeLinks(widget)
+        self.assertNotIn(widget.CAMERA_CONTENTION_WARNING, widget.linkWaitingLabelText())
+        widget._onConnectLinksToggled(False)
+
+        widget.logic._cameraCapture = FakeCapture()
+        widget.logic._cameraTimer = FakeTimer()
+        try:
+            self._connectFakeLinks(widget)
+            # A warning only: every link still started.
+            for role in self.LINK_PORTS:
+                with self.subTest(role=role):
+                    self.assertIsNotNone(widget.logic.connectorNode(role))
+            self.assertIn("camera", widget.CAMERA_CONTENTION_WARNING.lower())
+            self.assertIn(widget.CAMERA_CONTENTION_WARNING, widget.linkWaitingLabelText())
+
+            widget._onStopCamera()
+            self.assertNotIn(
+                widget.CAMERA_CONTENTION_WARNING, widget.linkWaitingLabelText()
+            )
+        finally:
+            widget.logic.stopCamera()
+            widget._onConnectLinksToggled(False)
 
     def test_captureDisabledWithoutControlLink(self) -> None:
         _, widget = self._moduleRepresentationAndWidget()

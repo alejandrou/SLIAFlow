@@ -72,6 +72,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     CAMERA_HEIGHT_PX = 480
     CAMERA_TIMER_INTERVAL_MS = 66
     LIVE_VOLUME_NAME = "SLIAFlow Laptop Camera"
+    # Row-major IJK-to-RAS directions. See _applyLiveVolumeGeometry.
+    LIVE_VOLUME_DIRECTIONS = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
     RESULT_VOLUME_NAME = "SLIAFlow UC1 Result"
     SIMULATED_RESULT_VOLUME_NAME = "SLIAFlow UC1 Result (SIMULATED)"
     SIMULATION_DETAIL_MAX_CHARS = 80
@@ -366,6 +368,28 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
                 pass
 
     @staticmethod
+    def _applyLiveVolumeGeometry(liveNode) -> None:
+        """Give the camera volume the directions the OpenIGTLink stream has.
+
+        OpenCV row 0 is the top of the picture. An Axial slice draws +R to the
+        screen left and +A to the screen top, so identity directions show the
+        frame rotated 180 degrees. The stand-in sends an identity LPS matrix,
+        which Slicer turns into RAS directions diag(-1, -1, 1); the same
+        directions here draw i left to right and j top to bottom, upright and
+        unmirrored. Set only when different, because this runs for every frame.
+        """
+        directions = SLIAFlowLogic.LIVE_VOLUME_DIRECTIONS
+        current = vtk.vtkMatrix4x4()
+        liveNode.GetIJKToRASDirectionMatrix(current)
+        if all(
+            current.GetElement(row, column) == directions[row][column]
+            for row in range(3)
+            for column in range(3)
+        ):
+            return
+        liveNode.SetIJKToRASDirections(*(value for line in directions for value in line))
+
+    @staticmethod
     def getOrCreateLiveVolume(parameterNode):
         try:
             liveNode = parameterNode.liveVolume
@@ -373,6 +397,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             parameterNode.parameterNode.SetNodeReferenceID("liveVolume", None)
             liveNode = None
         if liveNode is not None and liveNode.IsA("vtkMRMLVectorVolumeNode"):
+            # A node created before SLIA-026 still has identity directions.
+            SLIAFlowLogic._applyLiveVolumeGeometry(liveNode)
             return liveNode
 
         liveNode = slicer.mrmlScene.AddNewNodeByClass(
@@ -381,6 +407,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         )
         liveNode.SetAttribute("SLIAFlow.Owner", "LaptopCamera")
         liveNode.SetSaveWithScene(False)
+        SLIAFlowLogic._applyLiveVolumeGeometry(liveNode)
         liveNode.CreateDefaultDisplayNodes()
         parameterNode.liveVolume = liveNode
         return liveNode
