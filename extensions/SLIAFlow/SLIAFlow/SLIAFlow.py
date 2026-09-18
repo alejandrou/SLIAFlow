@@ -1,24 +1,6 @@
 """SLIAFlow scripted-module entry point."""
 
 from SLIAFlowLib import (
-    LIVE_SOURCE_CHOICES,
-    LIVE_SOURCE_IGTL,
-    LIVE_SOURCE_LAPTOP,
-    RESULT_MAP_CHOICES,
-    RESULT_MAP_DEVICE_NAMES,
-    RESULT_MAP_KNN_PROB,
-    RESULT_MAP_MV_CLASS,
-    RESULT_MAP_MV_PROB,
-    RESULT_MAP_SVM_PROB,
-    RESULT_MAP_TMD,
-    RESULT_SOURCE_DETAIL_ATTRIBUTE,
-    RESULT_SOURCE_DEVICE_ATTRIBUTE,
-    RESULT_SOURCE_GENUINE_ORIGIN,
-    RESULT_SOURCE_ORIGIN_ATTRIBUTE,
-    RESULT_SOURCE_ROLE_ATTRIBUTE,
-    RESULT_SOURCE_SIMULATED_ORIGIN,
-    SIMULATED_BANNER_MESSAGE,
-    ResultMapDescriptor,
     SLIAFlowLogic,
     SLIAFlowParameterNode,
     SLIAFlowTest,
@@ -43,7 +25,9 @@ class SLIAFlow(ScriptedLoadableModule):
         self.parent.helpText = _(
             "SLIAFlow is the non-clinical 3D Slicer visualization component of "
             "the STRATUM demonstrator. This module provides the six-panel WP5 "
-            "operator surface but does not generate or interpret diagnostic "
+            "operator surface. On Capture it runs the prebuilt UC1 pipeline on a "
+            "recorded public HSI case, with a simulated acquisition, and shows "
+            "its output images as written. It does not interpret diagnostic "
             "images."
         )
         self.parent.acknowledgementText = _(
@@ -53,24 +37,6 @@ class SLIAFlow(ScriptedLoadableModule):
 
 
 __all__ = [
-    "LIVE_SOURCE_CHOICES",
-    "LIVE_SOURCE_IGTL",
-    "LIVE_SOURCE_LAPTOP",
-    "RESULT_MAP_CHOICES",
-    "RESULT_MAP_DEVICE_NAMES",
-    "RESULT_MAP_KNN_PROB",
-    "RESULT_MAP_MV_CLASS",
-    "RESULT_MAP_MV_PROB",
-    "RESULT_MAP_SVM_PROB",
-    "RESULT_MAP_TMD",
-    "RESULT_SOURCE_DETAIL_ATTRIBUTE",
-    "RESULT_SOURCE_DEVICE_ATTRIBUTE",
-    "RESULT_SOURCE_GENUINE_ORIGIN",
-    "RESULT_SOURCE_ORIGIN_ATTRIBUTE",
-    "RESULT_SOURCE_ROLE_ATTRIBUTE",
-    "RESULT_SOURCE_SIMULATED_ORIGIN",
-    "ResultMapDescriptor",
-    "SIMULATED_BANNER_MESSAGE",
     "SLIAFlow",
     "SLIAFlowLogic",
     "SLIAFlowParameterNode",

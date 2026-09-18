@@ -38,8 +38,13 @@ fallback. nvcc 12.9 accepts this MSVC, so `-allow-unsupported-compiler` must
 ```
 
 The script captures the toolchain, stages the sources, pre-creates the output
-directories, builds, checks the expected warnings, and asserts the staged tree
-still hashes identically to `workspace/components/`.
+directories, builds two binaries, checks each one's expected warnings, and
+asserts the staged tree still hashes identically to `workspace/components/`.
+
+| Binary | Command line | Used by |
+| --- | --- | --- |
+| `stratum.opt.exe` | GUIDE section 3.1-B release | `tools/simulators` UC1 runner |
+| `stratum.opt.intermediate.exe` | the same, plus `-lineinfo -DPROFILE_MODE -DINTERMEDIATE_OUTPUT` (GUIDE 3.1-B intermediate) | SLIAFlow, inside Slicer (`SLIA-027`) |
 
 ### Staging layout
 
@@ -54,6 +59,7 @@ build/uc1/UC1/
     output/rgb/               pre-created; the binary will not create it
     output/<dataset>/         pre-created per run; likewise
     stratum.opt.exe
+    stratum.opt.intermediate.exe
 ```
 
 The binary is never built or run in place: `main.cu` writes its output into the
@@ -89,9 +95,11 @@ variable (`SM=90`), so this needs no edit to vendored source.
 
 ### Expected warnings
 
-Two warnings appear on every build of this source. They are not silenced, and
-the vendored source is not edited to remove them. Their **absence** is the
-surprise, and the build script reports it as one.
+Each binary has its own expected-warnings list in `build-uc1.ps1`. Measured on
+2026-09-17, both command lines emit exactly the same two warnings. They are not
+silenced, and the vendored source is not edited to remove them. Their
+**absence**, or any other warning, is the surprise, and the build script fails
+on it.
 
 | Warning | Where |
 | --- | --- |
@@ -118,6 +126,33 @@ Reference values from the proven build:
 Modifying vendored UC1 source is out of scope for this project. If a build ever
 requires a source edit, that is a roadmap-boundary decision for the project
 owner, not a silent fix.
+
+## The intermediate build SLIAFlow runs
+
+`stratum.opt.intermediate.exe` takes the case folder as its only argument and
+must run from `gpu_single_bsq/source`. Besides `imageRGB.bmp` and the three
+`output/rgb/*.txt` channel files it writes per-stage images into
+`output/<case>/`:
+
+| File | Writer (`BitmapWriter.cpp`) | Shown by SLIAFlow |
+| --- | --- | --- |
+| `pca.bmp` | `savePCAOutputAsBMP` -> `writeBMP` | yes |
+| `svm.bmp` | `writeKNNBMP` | yes |
+| `knn.bmp` | `writeKNNBMP` | yes |
+| `kmeans.bmp` | `writeKmeansBMP` | yes |
+| `imageRGB.bmp` | `writeMatrixRGB` -> `writeBMP` | yes |
+| `CalibratedImage_BIP.bmp` | `saveBIPtoBMP` | no: rows are written without padding |
+
+All five shown images are 24-bit bottom-up BMPs of `samples x lines` with rows
+padded to four bytes. Their `bfSize` header field is `54 + 3 * w * h`, which
+leaves out the padding, so it is wrong whenever the width is not a multiple of
+four; SLIAFlow checks the actual file length instead.
+
+Measured on 2026-09-17 on `004-02` (345 x 389), run from a terminal: exit 0,
+2.40 s wall, `Time simulation ---> 719.150 ms`, K-means 18 iterations. The five
+shown files were 403,058 bytes (`54 + 389 * (3 * 345 + 1)`, `bfSize` 402,669);
+`CalibratedImage_BIP.bmp` was 402,669 bytes, one byte per row short. The same
+case run from Slicer through SLIAFlow's `QProcess` took 2.05 s.
 
 ## Running
 

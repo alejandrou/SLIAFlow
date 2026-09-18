@@ -4,10 +4,16 @@
 
 .DESCRIPTION
     Copies the vendored `gpu_single_bsq/source/` and `svm_model/` trees into the
-    already-ignored `build/uc1/UC1/`, builds them with the GUIDE section 3.1-B
-    release command line retargeted at `sm_120`, and then asserts by SHA-256
-    that every staged source file is still byte-identical to its
+    already-ignored `build/uc1/UC1/`, builds two binaries from them with the
+    GUIDE section 3.1-B command lines retargeted at `sm_120`, and then asserts by
+    SHA-256 that every staged source file is still byte-identical to its
     `workspace/components/` original.
+
+    - `stratum.opt.exe`, the release build, used by the standalone Python
+      runner.
+    - `stratum.opt.intermediate.exe`, the intermediate build
+      (`-lineinfo -DPROFILE_MODE -DINTERMEDIATE_OUTPUT`), which SLIAFlow runs
+      inside Slicer and whose per-stage BMPs it displays (SLIA-027, ADR-0003).
 
     Three things about this build are deliberate and must not be "fixed".
 
@@ -20,11 +26,10 @@
     `nvcc` is invoked directly rather than through `make`. The Makefile's
     `FLAGS` carries the POSIX-only `-ldl`, which does not link on Windows.
 
-    Two compiler warnings are expected on every build: `#550-D` for
-    `num_th_last_block` in `functions_cuda.cu`, and `C4068` for the unknown
-    `unroll` pragma in `matrixlib.cpp`. They are not silenced and the vendored
-    source is not edited to remove them. Their absence is the surprise, and it
-    is reported as one.
+    Each binary has its own list of expected compiler warnings, because the
+    two command lines compile different code. They are not silenced and the
+    vendored source is not edited to remove them. An absent expected warning is
+    a surprise, and it is reported as one.
 
 .PARAMETER Clean
     Delete the staged build root before staging. Removes previous run outputs
@@ -52,24 +57,44 @@ $stagedSource = Join-Path $stagedRoot "gpu_single_bsq\source"
 $stagedModel = Join-Path $stagedRoot "svm_model"
 $stagedRgbOutput = Join-Path $stagedSource "output\rgb"
 
-$executableName = "stratum.opt.exe"
-$stagedExecutable = Join-Path $stagedSource $executableName
 
 # The GPU this build targets. `sm_120` compiles and executes natively on the
 # RTX 5050, so there is no PTX-JIT fallback; the second -gencode emits PTX only
 # so the binary survives a future GPU change.
 $computeCapability = "120"
 
-# Files the build produces inside the staged source tree. They have no
-# `workspace/components/` original, so the hash assertion expects them.
-$buildProductPatterns = @("output\*", "$executableName", "stratum.opt.exp", "stratum.opt.lib", ".uc1-runner.lock")
-
-# Compiler diagnostics the vendored source is known to emit. Their absence
-# means the toolchain changed, not that the code improved.
-$expectedWarnings = @(
-    @{ Code = "#550-D"; Where = "functions_cuda.cu line 63, num_th_last_block set but never used" },
-    @{ Code = "C4068"; Where = "matrixlib.cpp lines 205, 221, 293, unknown pragma unroll" }
+# The binaries this script builds. `Flags` is appended to the GUIDE section
+# 3.1-B release command line; for the intermediate build that is exactly the
+# difference GUIDE 3.1-B shows between the two. `ExpectedWarnings` are the
+# compiler diagnostics that command line is known to emit. Their absence means
+# the toolchain changed, not that the code improved.
+$binaries = @(
+    [PSCustomObject]@{
+        Name = "stratum.opt.exe"
+        Flags = ""
+        ExpectedWarnings = @(
+            @{ Code = "#550-D"; Where = "functions_cuda.cu line 63, num_th_last_block set but never used" },
+            @{ Code = "C4068"; Where = "matrixlib.cpp lines 205, 221, 293, unknown pragma unroll" }
+        )
+    },
+    [PSCustomObject]@{
+        Name = "stratum.opt.intermediate.exe"
+        Flags = "-lineinfo -DPROFILE_MODE -DINTERMEDIATE_OUTPUT"
+        ExpectedWarnings = @(
+            @{ Code = "#550-D"; Where = "functions_cuda.cu line 63, num_th_last_block set but never used" },
+            @{ Code = "C4068"; Where = "matrixlib.cpp lines 205, 221, 293, unknown pragma unroll" }
+        )
+    }
 )
+
+# Files the build produces inside the staged source tree. They have no
+# `workspace/components/` original, so the hash assertion expects them. Each
+# binary brings its import library and export file.
+$buildProductPatterns = @("output\*", ".uc1-runner.lock")
+foreach ($binary in $binaries) {
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($binary.Name)
+    $buildProductPatterns += @($binary.Name, "$stem.exp", "$stem.lib")
+}
 
 function Stop-WithError {
     param([string]$Message)
@@ -213,23 +238,22 @@ New-Item -ItemType Directory -Path $stagedRgbOutput -Force | Out-Null
 Write-Host "Pre-created $stagedRgbOutput"
 Write-Host ""
 
-$buildOutput = @()
-if ($SkipBuild) {
-    Write-Host "-- Build skipped (-SkipBuild) --"
-    Write-Host ""
-} else {
-    $vcVarsPath = Get-VcVarsPath
-    Write-Host "-- Building --"
-    Write-Host "vcvars64: $vcVarsPath"
+function Invoke-Uc1Build {
+    param([string]$VcVarsPath, [PSCustomObject]$Binary)
 
-    # The GUIDE section 3.1-B release command line, transcribed. The only
-    # changes are the architecture and the additional PTX-emitting -gencode.
+    $stagedExecutable = Join-Path $stagedSource $Binary.Name
+    Write-Host "-- Building $($Binary.Name) --"
+
+    # The GUIDE section 3.1-B command line, transcribed. The only changes are
+    # the architecture and the additional PTX-emitting -gencode.
     # `-allow-unsupported-compiler` is deliberately absent: nvcc 12.9 accepts
     # this MSVC, and adding it would suppress a real diagnostic on a future
     # toolchain.
+    $outputFlags = "-lcublas -O3"
+    if ($Binary.Flags) { $outputFlags += " $($Binary.Flags)" }
     $commandLines = @(
         "@echo off",
-        "call `"$vcVarsPath`" >nul",
+        "call `"$VcVarsPath`" >nul",
         "if errorlevel 1 exit /b 1",
         "cd /d `"$stagedSource`"",
         "if errorlevel 1 exit /b 1",
@@ -243,11 +267,12 @@ if ($SkipBuild) {
         "     -gencode arch=compute_$computeCapability,code=compute_$computeCapability ^",
         "     -std=c++17 ^",
         "     -DOPTIMIZE_KMEANS=1 -DPCA_PD=1 ^",
-        "     -lcublas -O3 -o $executableName",
+        "     $outputFlags -o $($Binary.Name)",
         "exit /b %errorlevel%"
     )
 
-    $batchPath = Join-Path $stagedRoot "build-uc1-generated.cmd"
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($Binary.Name)
+    $batchPath = Join-Path $stagedRoot "build-$stem-generated.cmd"
     Set-Content -LiteralPath $batchPath -Value $commandLines -Encoding ASCII
 
     $buildOutput = & cmd.exe /c "`"$batchPath`"" 2>&1 | ForEach-Object { $_.ToString() }
@@ -256,7 +281,7 @@ if ($SkipBuild) {
     Write-Host ""
 
     if ($buildExitCode -ne 0) {
-        Stop-WithError "nvcc exited with code $buildExitCode. The staged sources were not modified; fix the toolchain, not the vendored source."
+        Stop-WithError "nvcc exited with code $buildExitCode building $($Binary.Name). The staged sources were not modified; fix the toolchain, not the vendored source."
     }
     if (-not (Test-Path -LiteralPath $stagedExecutable -PathType Leaf)) {
         Stop-WithError "nvcc reported success but $stagedExecutable was not produced."
@@ -264,17 +289,17 @@ if ($SkipBuild) {
 
     $executableSize = (Get-Item -LiteralPath $stagedExecutable).Length
 
-    # The requirement is "only the two expected warnings may appear", so both
-    # halves are enforced and both fail the build. A missing expected warning
-    # means the toolchain or the source changed; an unexpected one means this
-    # binary is not the one the evidence on the task card describes. Reporting
-    # either in yellow and exiting 0 would leave the contract unchecked, which
-    # is the same as not having it.
-    Write-Host "-- Warnings --"
+    # The requirement is "only this binary's expected warnings may appear", so
+    # both halves are enforced and both fail the build. A missing expected
+    # warning means the toolchain or the source changed; an unexpected one means
+    # this binary is not the one the evidence on the task card describes.
+    # Reporting either in yellow and exiting 0 would leave the contract
+    # unchecked, which is the same as not having it.
+    Write-Host "-- Warnings: $($Binary.Name) --"
     $joinedOutput = $buildOutput -join "`n"
     $warningFailures = @()
 
-    foreach ($warning in $expectedWarnings) {
+    foreach ($warning in $Binary.ExpectedWarnings) {
         if ($joinedOutput -like "*$($warning.Code)*") {
             Write-Host "  present  $($warning.Code)  ($($warning.Where))"
         } else {
@@ -287,7 +312,7 @@ if ($SkipBuild) {
     # `warning #550-D:` from nvcc and `warning C4068:` from MSVC. Anything that
     # is not one of the expected codes is unexpected by construction, so a new
     # diagnostic cannot slip through by being unlisted.
-    $expectedCodes = $expectedWarnings | ForEach-Object { $_.Code }
+    $expectedCodes = $Binary.ExpectedWarnings | ForEach-Object { $_.Code }
     $unexpected = @{}
     foreach ($line in $buildOutput) {
         if ($line -notmatch 'warning\s+(#[0-9]+-[A-Z]|C[0-9]+)') { continue }
@@ -307,11 +332,23 @@ if ($SkipBuild) {
         Write-Host "  The vendored source is not to be silenced or 'fixed' to clear this." -ForegroundColor Red
         Write-Host "  Investigate the toolchain, then re-record the expected set on the task" -ForegroundColor Red
         Write-Host "  card if it has genuinely changed." -ForegroundColor Red
-        Stop-WithError ("The build warning contract failed: " + ($warningFailures -join "; ") + ".")
+        Stop-WithError ("The build warning contract for $($Binary.Name) failed: " + ($warningFailures -join "; ") + ".")
     }
     Write-Host ""
     Write-Host "Produced $stagedExecutable ($executableSize bytes)."
     Write-Host ""
+}
+
+if ($SkipBuild) {
+    Write-Host "-- Build skipped (-SkipBuild) --"
+    Write-Host ""
+} else {
+    $vcVarsPath = Get-VcVarsPath
+    Write-Host "vcvars64: $vcVarsPath"
+    Write-Host ""
+    foreach ($binary in $binaries) {
+        Invoke-Uc1Build -VcVarsPath $vcVarsPath -Binary $binary
+    }
 }
 
 # The compliance property - "no changes to vendored UC1 source" - is re-tested
@@ -342,4 +379,5 @@ Write-Host "  All staged files are byte-identical to workspace\components." -For
 Write-Host ""
 Write-Host "Run the pipeline with:"
 Write-Host "  .\.venv\Scripts\python.exe -m stratum_sim uc1-real <dataset folder> --classify-only"
+Write-Host "SLIAFlow runs stratum.opt.intermediate.exe itself when Capture is pressed."
 exit 0

@@ -6,7 +6,7 @@ date: 2026-09-11
 accepted: 2026-09-15
 related_tasks: SLIA-022, SLIA-024, SLIA-021
 supersedes:
-superseded_in_part_by: ADR-0002
+superseded_in_part_by: ADR-0002, ADR-0003
 ---
 
 # ADR-0001 - Overlay algorithm results on a cube-derived RGB, never on the laptop camera
@@ -16,6 +16,10 @@ superseded_in_part_by: ADR-0002
 Accepted by the project owner on 2026-09-15, when activating `SLIA-022`.
 
 Proposed on 2026-09-11. Accepting it unblocked `SLIA-022` and `SLIA-024`.
+
+Superseded in part by `ADR-0003`, accepted 2026-09-17: rules 1-3, the
+demo-mode opt-in and genuine-over-simulated precedence under Consequences, and
+the Validation bullets that test them. SLIAFlow no longer composites results.
 
 Superseded in part by `ADR-0002`, accepted 2026-09-16: the side-by-side
 presentation in rule 4 and the first Validation bullet. Every other rule stands.

@@ -121,35 +121,35 @@ rows of three:
 | --- | --- | --- |
 | **Relative StO2** | **Enhanced Vascularization** | **Tumour Delineation** |
 
-- **LiveView** shows the laptop camera or the received `LiveView` stream,
-  whichever the live-source selector names. Only one process may hold the camera.
-  With no image yet it is black and says what it is waiting for in the panel, as
-  every other panel does.
-- **Stereoscopic** and **Relative StO2** are black and carry their reason on
-  screen: no producer yet, and ports 18948 and 18949 reserved. SLIAFlow never
-  connects to either port.
-- **HS Cube** shows the received `HSCube` as received, with a band slider that
-  shows each band's index and wavelength. A wavelength that cannot be read from
-  `SLIAFlow.WavelengthsNm` is reported as unavailable, never guessed.
-- **Enhanced Vascularization** shows a validated `UC2_BV` map; **Tumour
-  Delineation** shows the validated UC1 result. Each is a layer in the layer
-  list, with show, hide and opacity, and each keeps the full safety gate:
-  recognised provenance, genuine over simulated, demo mode and a banner for
-  simulated data, and a black panel with a status for missing or invalid data.
-- One **Connect links** toggle starts or stops the five links: 18944, 18945,
-  18946, 18947 and 18950. Each link has one state label. A link whose peer goes
-  away is noticed by reading the connector's state once a second: the connector
-  queues the event that announces a lost link and then stops pumping the queue
-  that would deliver it, so the event never arrives.
-- **Capture** sends one `CaptureTrigger` per press over the control link, is
-  disabled with its reason while that link is down, and quotes the stand-in's
-  `CaptureStatus` and `CaptureReply`.
-- Camera index, camera-support install, the UC1 role selector, the result class
-  and a manual refresh are in a collapsed Developer section.
+Since `SLIA-027`
+(`docs/architecture/decisions/ADR-0003-integrated-capture-and-uc1-in-slicer.md`)
+the panels behave as follows, with no OpenIGTLink link in the module:
 
-Defaults: live source `Laptop Camera`, camera index `0`, delineation role
-`majorityVotingMap` (the map the genuine UC1 runner sends), every layer shown at
-full opacity, demo mode off and never persisted.
+- **LiveView** shows the laptop camera, which stands in for the acquisition
+  system's LiveView. With no image yet it is black and says what it is waiting
+  for.
+- **Stereoscopic** and **Relative StO2** are black and carry their reason on
+  screen: no producer yet, and ports 18948 and 18949 reserved.
+- **HS Cube** is black and says the cube is not displayed: UC1 reads the
+  recorded case from disk.
+- **Enhanced Vascularization** is black and says no UC2 producer exists yet
+  (`SLIA-021`).
+- **Tumour Delineation** shows one of the five UC1 output images, chosen under
+  **Delineation output**, on its own. Before the first result it is black and
+  says it is waiting for a capture.
+- **Capture** freezes LiveView, saves the frame under `workspace/captures`, picks
+  a recorded case from a shuffled pool, runs
+  `stratum.opt.intermediate.exe` in the background with a 60 s timeout, and
+  resumes LiveView when the run ends. It is enabled only while the camera runs
+  and no capture is in progress.
+- Camera index and camera-support install are in a collapsed Developer section,
+  with the current result's file, case and capture ID.
+
+Defaults: camera index `0`, delineation output `imageRGB.bmp`.
+
+The earlier design below - links, a live-source selector, demo mode, layers,
+and a UC1 map composited over `UC1_RGB` - is superseded by ADR-0003 and kept as
+the record of why it was built.
 
 The live and result images were originally placed in separate views, on the
 grounds that the laptop RGB image and HSI-derived maps are not registered.
@@ -177,6 +177,9 @@ called. The layer opacity moves the map over the image: 0 shows the image alone
 and 1 the map alone.
 
 ## OpenIGTLink contract
+
+Since `SLIA-027` SLIAFlow creates no connector and the operator workflow uses
+none of the device names below (ADR-0003). They are kept for `SLIA-030`.
 
 The networking tasks use these device names and data shapes:
 
