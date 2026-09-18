@@ -6,11 +6,17 @@ date: 2026-09-16
 accepted: 2026-09-16
 related_tasks: SLIA-024
 supersedes: ADR-0001 (rule 4 in part, and the first Validation bullet)
+superseded_by: ADR-0003
 ---
 
 # ADR-0002 - Enforce UC1 background capture identity, and show a mismatched map alone
 
 ## Status
+
+Superseded in full by `ADR-0003`, accepted 2026-09-17: SLIAFlow no longer
+composites a background, so there is no capture identity to enforce between two
+images. The rule of one opaque capture ID per classification is kept in
+substance by `ADR-0003` decision 5.
 
 Accepted by the project owner on 2026-09-16, during `SLIA-024`.
 
