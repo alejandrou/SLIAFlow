@@ -1,5 +1,93 @@
 # SLIAFlow UC1 image contract
 
+> **Since `SLIA-027` the operator workflow uses the in-Slicer contract in the
+> next section** (`docs/architecture/decisions/ADR-0003-integrated-capture-and-uc1-in-slicer.md`).
+> The sections after it describe the earlier OpenIGTLink contract - result
+> roles, wire metadata, ports 18944, 18945, 18947 and 18950, demo mode,
+> precedence, banners and the `UC1_RGB` background. The module no longer
+> implements them; they are kept as the record of that design and for
+> `SLIA-030`.
+
+## SLIA-027 in-Slicer UC1 outputs
+
+SLIAFlow runs `stratum.opt.intermediate.exe` on one recorded case per Capture
+and shows five of the images it writes, by exact file name:
+
+| File | Stage |
+| --- | --- |
+| `pca.bmp` | PCA |
+| `svm.bmp` | SVM |
+| `knn.bmp` | KNN filtering |
+| `kmeans.bmp` | K-means |
+| `imageRGB.bmp` | majority-voting map, the default selection |
+
+`CalibratedImage_BIP.bmp` is never read: `saveBIPtoBMP` writes it without row
+padding.
+
+A sixth entry, `gtMap`, is not a UC1 output: it is the recorded case's own
+labelling, read from the case folder as one `bil` band of uint16. Its class
+IDs are the indices of `FOUR_COLORS_MAP` in `BitmapWriter.hpp`, the table
+`writeKNNBMP` paints `svm.bmp` and `knn.bmp` from, so those two outputs and
+the ground truth carry one legend:
+
+| Class ID | Meaning | `FOUR_COLORS_MAP` |
+| --- | --- | --- |
+| 0 | Pixel Not Labeled | white, shown transparent |
+| 1 | Normal Tissue | green |
+| 2 | Tumor Tissue | red |
+| 3 | Hypervascularized Tissue | blue |
+| 4 | Background | black |
+
+`kmeans.bmp` is painted from `COLOR_MAP` with arbitrary cluster numbers and
+`pca.bmp` is not a classification, so neither shares this legend. `gtMap` is
+loaded as a `vtkMRMLLabelMapVolumeNode` rather than a colour image, so it sits
+on the Label layer over an output instead of replacing it.
+
+### Validation
+
+A run's outputs are accepted together or not at all. Each file must:
+
+- exist in `build/uc1/UC1/gpu_single_bsq/source/output/<case>/`;
+- be no older than the build lock's timestamp, taken immediately before the
+  process started (outputs are cleared before every run);
+- start with `BM`, have its pixels at byte 54, a 40-byte info header, one plane,
+  24 bits per pixel and no compression;
+- be `samples x lines` of the case, with a positive (bottom-up) height;
+- be exactly `54 + lines * (3 * samples + padding)` bytes long. `bfSize` and
+  `biSizeImage` are not read: UC1 writes `bfSize` without the padding.
+
+The run itself fails on a nonzero exit, a crash, failure to start, a
+`Path too long` line on either stream, or the 60 s timeout. Before it starts,
+the executable, the SVM model file sizes, a free lock and path lengths under 128
+characters are required.
+
+A case is used only when its `raw`, `darkReference` and `whiteReference`
+headers agree, declare uint16 BSQ little-endian data with no header offset and
+93 bands, its data files have the declared size, and its `gtMap.hdr` carries the
+`HSI Human Brain Database` marker.
+
+### Presentation and provenance
+
+Each image is decoded losslessly (rows reversed to top-first, BGR to RGB) into a
+module-owned `vtkMRMLVectorVolumeNode` with IJK-to-RAS directions
+`diag(-1, -1, 1)`, the same upright directions as LiveView, and shown alone in
+Tumour Delineation. Nothing is resampled, recoloured, thresholded or composited.
+The nodes are not saved with the scene and are removed on scene close and module
+exit.
+
+| Attribute | Value |
+| --- | --- |
+| `SLIAFlow.Owner` | `Uc1Output` |
+| `SLIAFlow.OutputFile` | the file name |
+| `SLIAFlow.RecordedCase` | the case folder name |
+| `SLIAFlow.DataOrigin` | `simulated` |
+| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` |
+| `SLIAFlow.CaptureId` | one `uuid4().hex` per Capture, shared by its five outputs, never reused |
+
+While a Capture is processing, and after one fails, the previous result stays
+on screen with `PREVIOUS RESULT - not from the current capture` at the top of
+the view and in the result status.
+
 This document defines the non-clinical producer/consumer boundary used by the
 SLIAFlow result pane. SLIAFlow consumes image data already present in the MRML
 scene; it does not calculate, normalize, infer, or clinically interpret UC1

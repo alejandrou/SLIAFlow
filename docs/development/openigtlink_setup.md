@@ -1,5 +1,12 @@
 # Building the SlicerOpenIGTLink dependency
 
+> **Not used by the operator workflow since `SLIA-027`.** SLIAFlow now captures
+> and runs UC1 inside Slicer and creates no OpenIGTLink connector
+> (`docs/architecture/decisions/ADR-0003-integrated-capture-and-uc1-in-slicer.md`).
+> Ports 18944, 18945, 18946, 18947 and 18950 and their messages are not used by
+> the module. This page is kept because links return for external hardware or
+> UC2 in `SLIA-030`.
+
 SLIAFlow will carry `LiveView` frames and UC1 image maps over OpenIGTLink as
 independent TCP/IP streams. That transport comes from the official
 SlicerOpenIGTLink extension, which is built here as a separate, pinned
