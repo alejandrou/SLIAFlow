@@ -8,7 +8,7 @@ from slicer.parameterNodeWrapper import (
     parameterNodeWrapper,
 )
 
-from .SLIAFlowCasePool import GROUND_TRUTH_FILE_NAME
+from .SLIAFlowCube import GROUND_TRUTH_FILE_NAME
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES
 
 # The Tumour Delineation panel shows one UC1 output image at a time, chosen by

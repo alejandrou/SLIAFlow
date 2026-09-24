@@ -44,7 +44,11 @@ provenance vocabulary rather than reusing it unchanged.
 | Genuine UC2 (C) | `workspace/components/blood_vessels_enhancement` | Built and already run on real cases `007-01`, `008-01`, `008-02`, `010-03` |
 | Stand-ins and transport | `tools/simulators/stratum_sim/` | 110 tests, pyigtl 0.3.4 |
 | Laptop camera in Slicer | SLIAFlow, `SLIA-005` | Verified |
-| Recorded data | `input/bin/bin/` | 61 cases, 93 bands, 6.7 GB, gitignored |
+| Recorded data | `input/reference_hsi_brain_db/020-01/`, `input/archive_hsi_brain_db_93_bands/` | Since `SLIA-031`: one reference case read by SLIAFlow, the other 60 archived; 93 bands, gitignored |
+| IUMA LCTF capture | `input/002-04/` | `ADR-0004`'s reference cube, float32, 109 bands; read from `SLIA-032` on |
+
+The case paths quoted below (`input/bin/bin/...`) are those of their date;
+`SLIA-031` moved the cases on 2026-09-24 (`input/README.txt`).
 
 ### What was measured about the recorded data
 

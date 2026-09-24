@@ -779,7 +779,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     #
     # Every image and case folder below is a test fixture that stands for no
     # imagery, written to a temporary directory the test deletes. No test reads
-    # input/bin/bin or the staged UC1 build.
+    # input/ or the staged UC1 build.
     # ----------------------------------------------------------------------
 
     # The five images the intermediate build writes and SLIAFlow shows, from the
@@ -799,8 +799,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     }
     # envi.RECORDED_DATASET_MARKER, carried by a recorded case's gtMap.hdr.
     RECORDED_DATASET_MARKER = "HSI Human Brain Database"
-    # This card: the deferred case, the run timeout and the wording.
-    DEFERRED_CASE = "058-02"
+    # SLIA-027: the run timeout and the wording.
     UC1_RUN_TIMEOUT_SEC = 60
     STALE_RESULT_LINE = "PREVIOUS RESULT - not from the current capture"
     STALE_STATUS_FRAGMENT = "not from the current capture"
@@ -862,7 +861,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             if f"{stem}.dat" not in omit:
                 size = samples * lines * bands * 2 if dataBytes is None else dataBytes
                 (folder / f"{stem}.dat").write_bytes(b"\0" * size)
-        classes = self._helperModule("SLIAFlowCasePool").GROUND_TRUTH_CLASSES
+        classes = self._helperModule("SLIAFlowCube").GROUND_TRUTH_CLASSES
         groundTruth = "ENVI\ndescription = {test fixture"
         if marker:
             groundTruth += f", {self.RECORDED_DATASET_MARKER}"
@@ -884,8 +883,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         if "gtMap" not in omit:
             if groundTruthLabels is None:
                 # One pixel of each class and the rest unlabelled, which is
-                # the shape of a recorded case: across the 61 cases in
-                # input/bin/bin, 0.0% to 16.2% of pixels carry a class.
+                # the shape of a recorded case: across the 61 cases of the
+                # HSI Human Brain Database, 0.0% to 16.2% of pixels carry a class.
                 labels = np.zeros(lines * samples, dtype="<u2")
                 for index, (classId, _name, _colour) in enumerate(classes):
                     if index < labels.size:
@@ -899,7 +898,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         """A repository-shaped placeholder tree: markers, input cases, staged build."""
         (root / "AGENTS.md").write_text("test fixture\n", encoding="ascii")
         (root / "extensions" / "SLIAFlow").mkdir(parents=True)
-        inputRoot = root / "input" / "bin" / "bin"
+        inputRoot = root / "input" / "reference_hsi_brain_db"
         inputRoot.mkdir(parents=True)
         for name in caseNames:
             self._writeFixtureCase(inputRoot, name, **caseOptions)
@@ -1069,7 +1068,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         import shutil
         import tempfile
 
-        root = Path(tempfile.mkdtemp(prefix="sliaflow-test-fixture-"))
+        # A short prefix: UC1 keeps at most 127 characters of a path, and the
+        # fixture cube lies at input/reference_hsi_brain_db/<case> under this.
+        root = Path(tempfile.mkdtemp(prefix="slia-fx-"))
         try:
             yield root
         finally:
@@ -1077,9 +1078,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def _startRun(self, fixture, caseName="004-02", **runOptions):
         """Start a Uc1Run on a fixture case with a fake process."""
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         uc1Run = self._helperModule("SLIAFlowUc1Run")
-        case = casePool.loadRecordedCase(fixture["inputRoot"] / caseName)
+        case = cubeModule.loadRecordedCase(fixture["inputRoot"] / caseName)
         build = uc1Run.Uc1Build(fixture["buildRoot"])
         factory, processes = self._fakeProcessFactory()
         results = []
@@ -1141,8 +1142,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                     reader.decodeUc1Bmp(data, samples, lines)
                 self.assertIn(f"{samples} x {lines}", str(raised.exception))
 
-    # --- Case pool --------------------------------------------------------
-
     # ------------------------------------------------------------------
     # The recorded case's own ground truth
     # ------------------------------------------------------------------
@@ -1156,9 +1155,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         result would be read against a different legend from the one the
         classifier drew, so the two are pinned together here.
         """
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         self.assertEqual(
-            casePool.GROUND_TRUTH_CLASSES,
+            cubeModule.GROUND_TRUTH_CLASSES,
             (
                 (0, "Pixel Not Labeled", (255, 255, 255)),
                 (1, "Normal Tissue", (0, 255, 0)),
@@ -1168,8 +1167,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             ),
             "FOUR_COLORS_MAP in BitmapWriter.hpp and the Class ID legend in gtMap.hdr",
         )
-        self.assertEqual(casePool.UNLABELLED_CLASS_ID, 0)
-        self.assertEqual(casePool.HIGHEST_GROUND_TRUTH_CLASS_ID, 4)
+        self.assertEqual(cubeModule.UNLABELLED_CLASS_ID, 0)
+        self.assertEqual(cubeModule.HIGHEST_GROUND_TRUTH_CLASS_ID, 4)
 
     def test_groundTruthIsReadTopRowFirst(self) -> None:
         """readGroundTruth returns (lines, samples) with row 0 at the top.
@@ -1178,14 +1177,14 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         a decoded output the same way round, so no flip is needed for the two to
         line up. A flip here would put the labels on the wrong tissue.
         """
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
-            inputRoot = root / "input" / "bin" / "bin"
+            inputRoot = root / "input" / "reference_hsi_brain_db"
             labels = [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0]
             self._writeFixtureCase(inputRoot, "004-02", samples=4, lines=3,
                                    groundTruthLabels=labels)
-            case = casePool.loadRecordedCase(inputRoot / "004-02")
-            groundTruth = casePool.readGroundTruth(case)
+            case = cubeModule.loadRecordedCase(inputRoot / "004-02")
+            groundTruth = cubeModule.readGroundTruth(case)
             self.assertEqual(groundTruth.shape, (case.lines, case.samples))
             self.assertEqual(groundTruth.dtype, np.dtype("uint16"))
             self.assertEqual(groundTruth[0].tolist(), [1, 2, 3, 4])
@@ -1193,7 +1192,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def test_groundTruthIsRefusedRatherThanReshaped(self) -> None:
         """A gtMap that does not describe this case is refused, not fitted to it."""
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         rejections = {
             # gtMap.hdr carries the marker loadRecordedCase needs, so it is
             # removed after the case loads rather than never written.
@@ -1219,38 +1218,38 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         for reason, (options, removeAfterLoad, message) in rejections.items():
             with self.subTest(reason=reason):
                 with self._fixtureDirectory() as root:
-                    inputRoot = root / "input" / "bin" / "bin"
+                    inputRoot = root / "input" / "reference_hsi_brain_db"
                     # loadRecordedCase reads only raw/dark/white and the marker,
                     # so the case still loads and only readGroundTruth refuses.
                     folder = self._writeFixtureCase(inputRoot, "004-02", samples=4, lines=3,
                                                     **options)
-                    case = casePool.loadRecordedCase(folder)
+                    case = cubeModule.loadRecordedCase(folder)
                     if removeAfterLoad is not None:
                         (folder / removeAfterLoad).unlink()
-                    with self.assertRaises(casePool.IncompatibleCaseError) as raised:
-                        casePool.readGroundTruth(case)
+                    with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
+                        cubeModule.readGroundTruth(case)
                     self.assertIn(message, str(raised.exception))
 
     def test_groundTruthReadingDoesNotWriteToInput(self) -> None:
         """Reading a ground truth leaves the case folder byte for byte as it was."""
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
-            inputRoot = root / "input" / "bin" / "bin"
+            inputRoot = root / "input" / "reference_hsi_brain_db"
             self._writeFixtureCase(inputRoot, "004-02", samples=4, lines=3)
             folder = inputRoot / "004-02"
             before = {path.name: (path.stat().st_size, path.read_bytes())
                       for path in sorted(folder.iterdir())}
-            case = casePool.loadRecordedCase(folder)
-            casePool.readGroundTruth(case)
+            case = cubeModule.loadRecordedCase(folder)
+            cubeModule.readGroundTruth(case)
             after = {path.name: (path.stat().st_size, path.read_bytes())
                      for path in sorted(folder.iterdir())}
             self.assertEqual(before, after)
 
     def test_groundTruthIsASelectableViewAlongsideTheOutputs(self) -> None:
         """gtMap is a sixth entry in Delineation output, after the five outputs."""
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         self.assertEqual(parameterModule.GROUND_TRUTH_VIEW_NAME,
-                         casePool.GROUND_TRUTH_FILE_NAME)
+                         cubeModule.GROUND_TRUTH_FILE_NAME)
         self.assertEqual(
             parameterModule.RESULT_VIEW_NAMES,
             (*self.UC1_OUTPUT_FILE_NAMES, "gtMap"),
@@ -1259,44 +1258,14 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         # ground truth laid over one.
         self.assertIn(parameterModule.DEFAULT_RESULT_OUTPUT, self.UC1_OUTPUT_FILE_NAMES)
 
-    def test_casePoolExcludesDeferredCases(self) -> None:
-        casePool = self._helperModule("SLIAFlowCasePool")
-        self.assertEqual(tuple(casePool.DEFERRED_CASES), (self.DEFERRED_CASE,))
+    # --- The configured cube (SLIA-031, ADR-0004 decision 1) ---------------
+
+    def test_cubeFolderRejectsIncompatibleContents(self) -> None:
+        """A cube folder UC1 would misread is refused, each time with a reason."""
+        cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
-            inputRoot = root / "input"
-            for name in ("004-02", self.DEFERRED_CASE, "020-01"):
-                self._writeFixtureCase(inputRoot, name)
-            import random
-
-            pool = casePool.CasePool(inputRoot, rng=random.Random(3))
-            drawn = [pool.nextCase().name for _ in range(6)]
-            self.assertNotIn(self.DEFERRED_CASE, drawn)
-            self.assertEqual(sorted(set(drawn)), ["004-02", "020-01"])
-            self.assertIn(self.DEFERRED_CASE, pool.rejected)
-
-    def test_casePoolUsesEachCaseOnceThenReshuffles(self) -> None:
-        import random
-
-        casePool = self._helperModule("SLIAFlowCasePool")
-        names = ["004-02", "005-01", "007-01", "008-01"]
-        with self._fixtureDirectory() as root:
-            for name in names:
-                self._writeFixtureCase(root, name)
-            orders = set()
-            for seed in range(6):
-                pool = casePool.CasePool(root, rng=random.Random(seed))
-                drawn = [pool.nextCase().name for _ in range(3 * len(names))]
-                for cycle in range(3):
-                    cycleNames = drawn[cycle * len(names):(cycle + 1) * len(names)]
-                    self.assertEqual(sorted(cycleNames), names,
-                                     f"seed {seed}: a case repeated before the pool was used up")
-                orders.add(tuple(drawn[: len(names)]))
-            self.assertGreater(len(orders), 1, "The pool is never shuffled")
-
-    def test_casePoolRejectsIncompatibleFolders(self) -> None:
-        casePool = self._helperModule("SLIAFlowCasePool")
-        with self._fixtureDirectory() as root:
-            self._writeFixtureCase(root, "good")
+            good = cubeModule.loadRecordedCase(self._writeFixtureCase(root, "good"))
+            self.assertEqual((good.samples, good.lines, good.bands), (4, 3, self.UC1_MODEL_BAND_COUNT))
             defects = {
                 "missing-header": dict(omit=("darkReference.hdr",)),
                 "missing-data": dict(omit=("whiteReference.dat",)),
@@ -1310,28 +1279,18 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 "not-recorded": dict(marker=False),
             }
             for name, options in defects.items():
-                self._writeFixtureCase(root, name, **options)
-            for name in defects:
                 with self.subTest(defect=name):
-                    with self.assertRaises(casePool.IncompatibleCaseError):
-                        casePool.loadRecordedCase(root / name)
-            cases, rejected = casePool.discoverCases(root)
-            self.assertEqual([case.name for case in cases], ["good"])
-            self.assertEqual(set(rejected), set(defects))
-            for name, reason in rejected.items():
-                self.assertTrue(reason.strip(), f"{name} was rejected without a reason")
-            good = cases[0]
-            self.assertEqual((good.samples, good.lines, good.bands), (4, 3, self.UC1_MODEL_BAND_COUNT))
+                    folder = self._writeFixtureCase(root, name, **options)
+                    with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
+                        cubeModule.loadRecordedCase(folder)
+                    self.assertTrue(str(raised.exception).strip(),
+                                    f"{name} was refused without a reason")
+            with self.assertRaises(cubeModule.IncompatibleCaseError):
+                cubeModule.loadRecordedCase(root / "absent")
 
-            empty = root / "empty"
-            empty.mkdir()
-            with self.assertRaises(casePool.NoCompatibleCaseError):
-                casePool.CasePool(empty).nextCase()
-
-    def test_casePoolDoesNotWriteToInput(self) -> None:
-        import random
-
-        casePool = self._helperModule("SLIAFlowCasePool")
+    def test_cubeReadingDoesNotWriteToInput(self) -> None:
+        """Describing, reading and re-checking a cube leaves input/ as it was."""
+        cubeModule = self._helperModule("SLIAFlowCube")
 
         def snapshot(root):
             return sorted(
@@ -1341,15 +1300,166 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             )
 
         with self._fixtureDirectory() as root:
-            for name in ("004-02", "005-01"):
-                self._writeFixtureCase(root, name)
-            self._writeFixtureCase(root, "broken", dataBytes=3)
+            folder = self._writeFixtureCase(root, "004-02")
+            broken = self._writeFixtureCase(root, "broken", dataBytes=3)
             before = snapshot(root)
-            pool = casePool.CasePool(root, rng=random.Random(1))
-            for _ in range(5):
-                pool.nextCase()
-            casePool.discoverCases(root)
+            case = cubeModule.loadRecordedCase(folder)
+            cubeModule.readCube(case)
+            cubeModule.readGroundTruth(case)
+            cubeModule.assertCaseUnchanged(case)
+            with self.assertRaises(cubeModule.IncompatibleCaseError):
+                cubeModule.loadRecordedCase(broken)
             self.assertEqual(snapshot(root), before)
+
+    def test_moduleHasNoCasePool(self) -> None:
+        """One configured cube: no pool, no shuffling, no deferred-case list."""
+        with self.assertRaises(ModuleNotFoundError):
+            self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
+        for name in ("CasePool", "discoverCases", "DEFERRED_CASES", "DEFERRED_REASON",
+                     "NoCompatibleCaseError", "random"):
+            self.assertFalse(hasattr(cubeModule, name), f"SLIAFlowCube still has {name}")
+        logic = SLIAFlowLogic()
+        for name in ("casePool", "inputRoot", "INPUT_RELATIVE_PATH"):
+            self.assertFalse(hasattr(logic, name), f"SLIAFlowLogic still has {name}")
+
+    def test_captureUsesTheConfiguredCube(self) -> None:
+        """Every Capture runs UC1 on the one configured cube folder, and no other.
+
+        The default is the reference case the project owner chose at the
+        specification of SLIA-031: input/reference_hsi_brain_db/020-01.
+        """
+        with self._captureSession() as session:
+            widget = session["widget"]
+            root = session["root"]
+            reference = self._writeFixtureCase(root / "input" / "reference_hsi_brain_db", "020-01")
+            archive = root / "input" / "archive_hsi_brain_db_93_bands" / "bin"
+            archived = self._writeFixtureCase(archive, "053-01")
+            self._writeFixtureCase(archive, "056-01")
+
+            widget.logic.cubeFolder = None
+            self.assertEqual(widget.logic.cubeFolder,
+                             root / "input" / "reference_hsi_brain_db" / "020-01")
+            self._startFakeCamera(session)
+            for configured in (reference, reference, archived, archived):
+                if configured == archived:
+                    widget.logic.cubeFolder = archived
+                self._showFrame(session, 40)
+                widget._onCaptureClicked()
+                case, _ = self._finishCapture(session)
+                self.assertEqual(case.folder, configured.resolve())
+                self.assertEqual(session["processes"][-1].arguments, [str(configured.resolve())])
+            self.assertEqual(len(session["processes"]), 4)
+
+    def test_configuredCubeIsRefusedWithItsReason(self) -> None:
+        """A cube folder that cannot be used ends the Capture, naming it and why."""
+        with self._captureSession() as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            configured = session["cube"]
+            missing = session["root"] / "input" / "reference_hsi_brain_db" / "absent"
+            for label, prepare, folder, reason in (
+                ("missing", lambda: None, missing, "is not a folder"),
+                ("inconsistent",
+                 lambda: (configured / "raw.dat").write_bytes(b"\0" * 10),
+                 configured, "raw.dat is 10 bytes"),
+            ):
+                with self.subTest(defect=label):
+                    prepare()
+                    widget.logic.cubeFolder = folder
+                    self._showFrame(session, 50)
+                    widget._onCaptureClicked()
+                    status = widget.ui.statusLabel.text
+                    self.assertIn(str(folder), status)
+                    self.assertIn(reason, status)
+                    self.assertEqual(session["processes"], [], "UC1 started on a refused cube")
+                    self.assertIsNone(widget.logic.currentRun)
+                    self.assertFalse(widget.captureInProgress)
+                    self.assertFalse(widget.liveViewFrozen, "LiveView stayed frozen")
+
+    def test_cubeRefusalReasonsAreTranslated(self) -> None:
+        """The reason a cube is refused is translated, not only the sentence around it.
+
+        The status bar shows the reason after the translated "The configured
+        cube ... cannot be used" prefix, so an untranslated reason would still
+        reach the operator in English. Every refusal the module raises is
+        checked in the source, and a sample of them is checked at run time.
+        """
+        import ast
+        from unittest import mock
+
+        import slicer.i18n
+
+        marker = "[translated] "
+
+        def translate(context, text):
+            return marker + text
+
+        cubeModule = self._helperModule("SLIAFlowCube")
+        tree = ast.parse(Path(cubeModule.__file__).read_text(encoding="utf-8"))
+        raises, untranslated = 0, []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                    and getattr(node.exc.func, "id", None) == "IncompatibleCaseError"):
+                continue
+            raises += 1
+            message = node.exc.args[0] if node.exc.args else None
+            if (isinstance(message, ast.Call) and isinstance(message.func, ast.Attribute)
+                    and message.func.attr == "format"):
+                message = message.func.value
+            if not (isinstance(message, ast.Call) and getattr(message.func, "id", None) == "_"):
+                untranslated.append(node.lineno)
+        self.assertGreater(raises, 0)
+        self.assertEqual(untranslated, [], "Refusals raised without _() at these lines")
+
+        messages = {}
+        with mock.patch.object(slicer.i18n, "translate", translate), \
+                self._fixtureDirectory() as root:
+            for name, options in (("missing-header", dict(omit=("darkReference.hdr",))),
+                                  ("wrong-bands", dict(bands=92)),
+                                  ("wrong-data-size", dict(dataBytes=10)),
+                                  ("not-recorded", dict(marker=False))):
+                with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
+                    cubeModule.loadRecordedCase(self._writeFixtureCase(root, name, **options))
+                messages[name] = str(raised.exception)
+            with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
+                cubeModule.loadRecordedCase(root / "absent")
+            messages["absent"] = str(raised.exception)
+
+            folder = self._writeFixtureCase(root, "changed")
+            case = cubeModule.loadRecordedCase(folder)
+            self._writeFixtureCase(root, "changed", samples=5)
+            with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
+                cubeModule.assertCaseUnchanged(case)
+            messages["changed on disk"] = str(raised.exception)
+            with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
+                cubeModule.readCube(case)
+            messages["cube resized"] = str(raised.exception)
+            (folder / "gtMap").unlink()
+            with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
+                cubeModule.readGroundTruth(cubeModule.loadRecordedCase(folder))
+            messages["ground truth missing"] = str(raised.exception)
+
+        for label, message in messages.items():
+            with self.subTest(refusal=label):
+                self.assertTrue(message.startswith(marker), f"Not translated: {message!r}")
+
+    def test_runEnvironmentChangeRestoresTheDefaultCube(self) -> None:
+        """A cube folder chosen in one run environment does not carry into the next."""
+        logic = SLIAFlowLogic()
+        with self._fixtureDirectory() as first, self._fixtureDirectory() as second:
+            try:
+                logic.setRunEnvironment(repositoryRoot=first)
+                logic.cubeFolder = first / "input" / "elsewhere"
+                logic.setRunEnvironment(repositoryRoot=second)
+                self.assertEqual(logic.cubeFolder, second / logic.CUBE_RELATIVE_PATH)
+                logic.cubeFolder = second / "input" / "elsewhere"
+                logic.setRunEnvironment()
+                self.assertEqual(logic.cubeFolder,
+                                 logic.repositoryRoot / logic.CUBE_RELATIVE_PATH)
+            finally:
+                logic.cubeFolder = None
+                logic.setRunEnvironment()
 
     # --- UC1 run ----------------------------------------------------------
 
@@ -1408,13 +1518,13 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def test_uc1PreRunChecksRefuseBeforeStarting(self) -> None:
         uc1Run = self._helperModule("SLIAFlowUc1Run")
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root)
 
             def refused(expectedFragment, caseName="004-02", inputRoot=None):
                 folder = (inputRoot or fixture["inputRoot"]) / caseName
-                case = casePool.loadRecordedCase(folder)
+                case = cubeModule.loadRecordedCase(folder)
                 factory, processes = self._fakeProcessFactory()
                 run = uc1Run.Uc1Run(uc1Run.Uc1Build(fixture["buildRoot"]), case, lambda result: None,
                                     processFactory=factory)
@@ -1479,10 +1589,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             build.releaseLock()
 
     def test_caseChangedOnDiskIsRefusedRatherThanRunOn(self) -> None:
-        """The case is re-read immediately before the run, not trusted from the pool.
+        """The case is re-read immediately before the run, not trusted from Capture.
 
-        The pool describes a case when it refills, which can be several
-        captures and many minutes earlier. The folder lies outside the
+        Capture describes the configured cube, then reads its pixels for the
+        HS Cube panel before the run starts. The folder lies outside the
         repository and nothing here owns it, so it can be edited or truncated
         in between, and UC1 reads the sizes from the headers without checking
         what it got. The run is refused rather than moved to another case: a
@@ -1685,10 +1795,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         import os
 
         uc1Run = self._helperModule("SLIAFlowUc1Run")
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root)
-            case = casePool.loadRecordedCase(fixture["inputRoot"] / "004-02")
+            case = cubeModule.loadRecordedCase(fixture["inputRoot"] / "004-02")
             build = uc1Run.Uc1Build(fixture["buildRoot"])
             outputDirectory = build.caseOutputDirectory(case.name)
             runStart = time.time() - 60.0
@@ -1779,24 +1889,32 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         return frame
 
     @contextlib.contextmanager
-    def _captureSession(self, caseNames=("004-02", "005-01", "007-01")):
-        """The module widget wired to a fixture repository, a fake camera and fake UC1."""
+    def _captureSession(self, caseName="004-02"):
+        """The module widget wired to a fixture repository, a fake camera and fake UC1.
+
+        The configured cube is the fixture case `caseName`. With `None` no case
+        is written, so the configured folder does not exist.
+        """
         _, widget = self._moduleRepresentationAndWidget()
         widget.initializeParameterNode()
         with self._fixtureDirectory() as root:
+            caseNames = () if caseName is None else (caseName,)
             fixture = self._makeFixtureRepository(root, caseNames=caseNames)
             factory, processes = self._fakeProcessFactory()
             widget.logic.setRunEnvironment(repositoryRoot=root, processFactory=factory)
+            cube = fixture["inputRoot"] / (caseName or "004-02")
+            widget.logic.cubeFolder = cube
             capture = self._FakeCameraCapture()
             timer = self._FakeCameraTimer()
             session = dict(fixture, widget=widget, processes=processes, capture=capture,
-                           timer=timer)
+                           timer=timer, cube=cube)
             try:
                 yield session
             finally:
                 widget._cancelCapture()
                 widget._stopCamera(clearLiveView=True)
                 widget.logic.removeOutputNodes()
+                widget.logic.cubeFolder = None
                 widget.logic.setRunEnvironment(repositoryRoot=None, processFactory=None)
 
     def _startFakeCamera(self, session) -> None:
@@ -1968,7 +2086,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertEqual(len(session["processes"]), 2)
 
     def test_outputVolumeIsUprightUnmirroredAndPixelIdentical(self) -> None:
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2123,7 +2241,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.skipTest("Requires the maintained headful Slicer test target")
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             try:
                 self.assertTrue(widget._activatePresentation())
@@ -2135,12 +2253,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 self._finishCapture(session, seed=1)
                 firstFieldOfView = tuple(sliceNode.GetFieldOfView())
 
-                # A wider case, found when the pool refills after its only case.
-                self._writeFixtureCase(session["inputRoot"], "005-01", samples=12, lines=5)
+                # The configured cube is replaced on disk by a wider one.
+                self._writeFixtureCase(session["inputRoot"], "004-02", samples=12, lines=5)
                 self._showFrame(session, 31)
                 widget._onCaptureClicked()
                 case, _ = self._finishCapture(session, seed=2)
-                self.assertEqual(case.name, "005-01")
+                self.assertEqual((case.samples, case.lines), (12, 5))
                 shownFieldOfView = tuple(sliceNode.GetFieldOfView())
 
                 resultWidget.sliceLogic().FitSliceToBackground()
@@ -2167,7 +2285,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.skipTest("Requires the maintained headful Slicer test target")
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             try:
                 self.assertTrue(widget._activatePresentation())
@@ -2268,12 +2386,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             return marker + text
 
         uc1Run = self._helperModule("SLIAFlowUc1Run")
-        casePool = self._helperModule("SLIAFlowCasePool")
+        cubeModule = self._helperModule("SLIAFlowCube")
         messages = {}
         with mock.patch.object(slicer.i18n, "translate", translate), \
                 self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root)
-            case = casePool.loadRecordedCase(fixture["inputRoot"] / "004-02")
+            case = cubeModule.loadRecordedCase(fixture["inputRoot"] / "004-02")
 
             def refusal(label):
                 run, *_ = self._startRun(fixture)
@@ -2328,13 +2446,15 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 self.assertTrue(message.startswith(marker), f"Not translated: {message!r}")
 
         with mock.patch.object(slicer.i18n, "translate", translate), \
-                self._captureSession(caseNames=()) as session:
+                self._captureSession(caseName=None) as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
             widget._onCaptureClicked()
-            with self.subTest(failure="no compatible case"):
-                self.assertIn(marker + "No compatible recorded case", widget.ui.statusLabel.text)
+            with self.subTest(failure="configured cube refused"):
+                status = widget.ui.statusLabel.text
+                self.assertIn(marker + "The configured cube", status)
+                self.assertIn(marker + f"{widget.logic.cubeFolder} is not a folder", status)
 
     # --- Panel ------------------------------------------------------------
 
@@ -2458,7 +2578,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def test_volumeNamesAreTheImageAndNothingElse(self) -> None:
         """A panel labels a volume by name, so the name is the file it holds."""
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2483,7 +2603,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         it is displayed as the run's input, with the run's own provenance. Its
         third axis is the band, which is what makes the panel scrollable.
         """
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2519,8 +2639,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         underneath. Class 0 is most of the image and is not a class, so it is
         given zero opacity in the colour table rather than painted white.
         """
-        casePool = self._helperModule("SLIAFlowCasePool")
-        with self._captureSession(caseNames=("004-02",)) as session:
+        cubeModule = self._helperModule("SLIAFlowCube")
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2548,8 +2668,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 colorNode = node.GetDisplayNode().GetColorNode()
                 self.assertIsNotNone(colorNode, "The gtMap classes have no colour table")
                 self.assertEqual(colorNode.GetNumberOfColors(),
-                                 len(casePool.GROUND_TRUTH_CLASSES))
-                for classId, className, (red, green, blue) in casePool.GROUND_TRUTH_CLASSES:
+                                 len(cubeModule.GROUND_TRUTH_CLASSES))
+                for classId, className, (red, green, blue) in cubeModule.GROUND_TRUTH_CLASSES:
                     colour = [0.0] * 4
                     colorNode.GetColor(classId, colour)
                     self.assertEqual(colorNode.GetColorName(classId), className)
@@ -2558,7 +2678,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                     self.assertAlmostEqual(colour[2], blue / 255.0, places=2)
                 expectedOpacity = [0.0] * 4
                 colorNode.GetLookupTable().GetTableValue(
-                    casePool.UNLABELLED_CLASS_ID, expectedOpacity)
+                    cubeModule.UNLABELLED_CLASS_ID, expectedOpacity)
                 self.assertEqual(expectedOpacity[3], 0.0,
                                  "Unlabelled pixels would hide the result under white")
             finally:
@@ -2572,7 +2692,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         The comparison is between a classification and the labelling, so
         selecting gtMap must not take the classification off the screen.
         """
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2612,7 +2732,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.skipTest("Requires the maintained headful Slicer test target")
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             try:
                 self.assertTrue(widget._activatePresentation())
@@ -2662,7 +2782,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.skipTest("Requires the maintained headful Slicer test target")
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             try:
                 self.assertTrue(widget._activatePresentation())
@@ -2697,7 +2817,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         Laying one case's labelling over another case's result would read as
         agreement or disagreement that was never measured.
         """
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2718,7 +2838,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def test_unreadableGroundTruthDoesNotFailTheCapture(self) -> None:
         """Reading the ground truth is for the panel; the result does not need it."""
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2746,7 +2866,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def test_unreadableCubeDoesNotFailTheCapture(self) -> None:
         """Reading the cube is for the panel; the run does not depend on it."""
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2774,7 +2894,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.skipTest("Requires the maintained headful Slicer test target")
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession(caseNames=("004-02",)) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             try:
                 self.assertTrue(widget._activatePresentation())

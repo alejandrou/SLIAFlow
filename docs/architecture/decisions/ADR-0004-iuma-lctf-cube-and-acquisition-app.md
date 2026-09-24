@@ -1,8 +1,9 @@
 ---
 id: ADR-0004
 title: One IUMA LCTF cube as reference, and IUMA's acquisition app as the future source
-status: proposed
+status: accepted
 date: 2026-09-24
+accepted: 2026-09-24
 related_tasks: SLIA-031, SLIA-028, SLIA-032, SLIA-033, SLIA-034, SLIA-035, SLIA-030, SLIA-021, SLIA-009
 supersedes: ADR-0003 (decision 1 in part, decision 2 in part, decision 5 input validation)
 ---
@@ -10,6 +11,10 @@ supersedes: ADR-0003 (decision 1 in part, decision 2 in part, decision 5 input v
 # ADR-0004 - One IUMA LCTF cube as reference, and IUMA's acquisition app as the future source
 
 ## Status
+
+Accepted as written by the project owner on 2026-09-24, during the
+specification of `SLIA-031`. The reference case of decision 1 is `020-01`,
+chosen at the same time.
 
 Proposed on 2026-09-24 from decisions the project owner made in conversation
 that day. It is accepted by the project owner during the specification of

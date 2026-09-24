@@ -16,7 +16,9 @@ Since `SLIA-027` the demonstration runs from one application and no console:
 3. Press **Start**. LiveView shows the laptop camera.
 4. Press **Capture**. LiveView freezes and the frame is saved under
    `workspace\captures`. The status names the recorded case and moves through
-   running UC1 and validating; a run on `004-02` takes about two seconds.
+   running UC1 and validating; a run on `004-02` took about two seconds. Every
+   Capture runs on the one configured cube, `input\reference_hsi_brain_db\020-01`
+   (`SLIA-031`, `ADR-0004`).
 5. LiveView resumes. **Delineation output** selects `pca.bmp`, `svm.bmp`,
    `knn.bmp`, `kmeans.bmp` or `imageRGB.bmp`, each shown on its own as UC1 wrote
    it. The result status reads `Recorded case <case> - simulated acquisition`.
@@ -26,12 +28,8 @@ Since `SLIA-027` the demonstration runs from one application and no console:
    the overlay can be read directly. Use the slice view's Label opacity slider
    and outline toggle to compare.
 
-   35 of the 61 cases hold no tumour pixels at all. For a tumour comparison,
-   keep pressing Capture until one of `053-01`, `056-01`, `020-01`, `012-02` or
-   `038-01` comes up: those carry the most.
-
-Each Capture uses a different case until all 60 compatible cases have been used,
-then the order is reshuffled. `058-02` is deferred until `SLIA-029`.
+   `020-01` was kept as the reference case because it carries tumour pixels
+   (3,655 of them); 35 of the 61 database cases carry none.
 
 When a Capture fails, the status says `Failed on recorded case <case>: ...` with
 the reason and what to do, LiveView resumes, and the previous result stays on
@@ -45,10 +43,14 @@ case is started; press Capture again.
 | `The SVM model file ... must be ... bytes` | Re-stage with `build-uc1.ps1`; never patch the model |
 | `UC1 timed out after 60 s` | The process was killed; check the GPU and the Python console log |
 | `... is not a valid UC1 image ...` | An output was missing, older than the run, the wrong size or malformed; the whole run is refused |
-| `No compatible recorded case was found in ...` | Put the cases under `input\bin\bin` |
+| `The configured cube ... cannot be used: ...` | The folder named is missing or not a recorded case UC1 can run on; the reason follows. See `input\README.txt` |
 
 The sections below describe the standalone console producers. They no longer
-feed SLIAFlow's operator workflow and are retired by `SLIA-028`.
+feed SLIAFlow's operator workflow and are retired by `SLIA-028`. Since
+`SLIA-031` the cases they name live under
+`input\archive_hsi_brain_db_93_bands\bin`, except `020-01`, which is
+`input\reference_hsi_brain_db\020-01`; their default folder `input\bin\bin` no
+longer exists.
 
 ## What the demonstration shows, and what it does not
 
@@ -76,7 +78,7 @@ different from the one in `uc1_local_build.md`, stop and read that document
 before demonstrating: the runtimes and expected warnings recorded there were
 measured against a specific GPU, driver and nvcc.
 
-The cases have to be under `input\bin\bin`.
+The case has to be passed as an explicit folder (see above).
 
 ## The demonstration itself
 
@@ -91,7 +93,7 @@ console:
 on its own, run it directly on the case:
 
 ```powershell
-.\scripts\development\run-uc1-real.ps1 -DatasetFolder input\bin\bin\004-02
+.\scripts\development\run-uc1-real.ps1 -DatasetFolder input\archive_hsi_brain_db_93_bands\bin\004-02
 ```
 
 It classifies once, then serves `UC1_RGB` and `UC1_MV_CLASS` on 127.0.0.1:18945
@@ -201,7 +203,7 @@ are specific, so read them rather than retrying:
 | What is printed | What it means |
 | --- | --- |
 | The staged UC1 build was not found | Run `build-uc1.ps1`; the runner will not build on demand |
-| Refusing to run UC1 ... does not identify as a case of the HSI Human Brain Database | The folder is not a recorded case. Point it at a case folder under `input\bin\bin` |
+| Refusing to run UC1 ... does not identify as a case of the HSI Human Brain Database | The folder is not a recorded case. Point it at a case folder under `input\archive_hsi_brain_db_93_bands\bin` |
 | A dataset of N bands cannot be classified | Only 93-band cases match the staged SVM model |
 | A model file has the wrong size | The staged `svm_model/` does not match the pipeline. Rebuild rather than patching it |
 | The output is older than the run | UC1 exited without writing. Its stdout is above the message |

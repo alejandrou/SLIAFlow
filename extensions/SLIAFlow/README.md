@@ -19,13 +19,16 @@ workflow by itself. No console, Python service or OpenIGTLink link is involved.
 
 1. Build the UC1 binaries once: `scripts\development\build-uc1.ps1`. SLIAFlow
    runs `build\uc1\UC1\gpu_single_bsq\source\stratum.opt.intermediate.exe`.
-2. Put the HSI Human Brain Database cases under `input\bin\bin`.
+2. Capture reads one cube folder, `input\reference_hsi_brain_db\020-01`: a
+   recorded case of the HSI Human Brain Database kept as the UC1 reference
+   (`ADR-0004`). `input\README.txt` describes the rest of `input\`.
 3. Open SLIAFlow and press **Start**. The laptop camera stands in for the
    acquisition system's LiveView.
 4. Press **Capture**. LiveView freezes, the frame is saved as
-   `workspace\captures\output_laptop_camera_<date>-<time>.png`, a compatible
-   recorded case is picked from a shuffled pool, and UC1 runs on it in the
-   background (timeout 60 s). The status names the case and the stage.
+   `workspace\captures\output_laptop_camera_<date>-<time>.png`, the configured
+   cube is checked, and UC1 runs on it in the background (timeout 60 s). The
+   status names the case and the stage. A cube folder that is missing or
+   inconsistent is refused with the folder and the reason, and no run starts.
 5. When the run ends, LiveView resumes. On success the five UC1 outputs
    `pca.bmp`, `svm.bmp`, `knn.bmp`, `kmeans.bmp` and `imageRGB.bmp` are
    selectable under **Delineation output**, each shown on its own. On failure
@@ -49,10 +52,11 @@ workflow by itself. No console, Python service or OpenIGTLink link is involved.
 
 Every output is marked `SLIAFlow.DataOrigin = simulated` and names its recorded
 case: the pipeline and the cube are real, the acquisition is simulated, and
-nothing shown is a clinical result. Case `058-02` is deferred until `SLIA-029`.
-The HS Cube panel shows the recorded cube the capture stands for, opened at
+nothing shown is a clinical result. IUMA's LCTF capture `input\002-04` is not
+read yet: `SLIA-032` shows it and `SLIA-033` runs UC1 on it. The HS Cube panel shows the recorded cube the capture stands for, opened at
 its middle band; the Enhanced Vascularization panel is black and says why.
 
-`tools\simulators` and the session scripts still exist until `SLIA-028`. They
-use the same staged build; `.uc1-runner.lock` keeps one run at a time, and a
+`tools\simulators` and the session scripts still exist until `SLIA-028`. Their
+default case folder, `input\bin\bin`, was archived by `SLIA-031`, so they need
+an explicit case folder. They use the same staged build; `.uc1-runner.lock` keeps one run at a time, and a
 Capture while the lock is held is refused with the lock path in the message.
