@@ -56,7 +56,5 @@ nothing shown is a clinical result. IUMA's LCTF capture `input\002-04` is not
 read yet: `SLIA-032` shows it and `SLIA-033` runs UC1 on it. The HS Cube panel shows the recorded cube the capture stands for, opened at
 its middle band; the Enhanced Vascularization panel is black and says why.
 
-`tools\simulators` and the session scripts still exist until `SLIA-028`. Their
-default case folder, `input\bin\bin`, was archived by `SLIA-031`, so they need
-an explicit case folder. They use the same staged build; `.uc1-runner.lock` keeps one run at a time, and a
+The staged build's `.uc1-runner.lock` keeps one UC1 run at a time, and a
 Capture while the lock is held is refused with the lock path in the message.

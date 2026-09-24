@@ -215,7 +215,8 @@ re-sends an outgoing node when a message of the same name updates it, so the
 trigger and the answers travel under different names; and pyigtl keeps only the
 latest message per device name, so the one reply to a trigger cannot share a name
 with the state repeated every half second. The exact wording, and why the state is
-repeated at all, is in `tools/simulators/README.md`.
+repeated at all, is in `tools/simulators/README.md` as it stood before `SLIA-028`,
+in Git history.
 
 `UC1_RGB` shares port 18945 with `UC1_MV_CLASS` deliberately. One producer
 sending a result and its background from one cube over one connection makes

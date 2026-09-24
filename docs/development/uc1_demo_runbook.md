@@ -45,14 +45,17 @@ case is started; press Capture again.
 | `... is not a valid UC1 image ...` | An output was missing, older than the run, the wrong size or malformed; the whole run is refused |
 | `The configured cube ... cannot be used: ...` | The folder named is missing or not a recorded case UC1 can run on; the reason follows. See `input\README.txt` |
 
-The sections below describe the standalone console producers. They no longer
-feed SLIAFlow's operator workflow and are retired by `SLIA-028`. Since
-`SLIA-031` the cases they name live under
-`input\archive_hsi_brain_db_93_bands\bin`, except `020-01`, which is
-`input\reference_hsi_brain_db\020-01`; their default folder `input\bin\bin` no
-longer exists.
+## Before SLIA-028: the standalone console demonstration
 
-## What the demonstration shows, and what it does not
+**Historical.** The sections below record the console demonstration of
+2026-09-16. `SLIA-028` removed everything they run - `run-end-to-end-session.ps1`,
+`run-uc1-real.ps1`, `python -m stratum_sim` and `uc1_client.py` - so their
+commands no longer work, and demo mode and banners were removed from SLIAFlow
+before that (`ADR-0003`). Use the in-Slicer demonstration above. The cases they
+name now live under `input\archive_hsi_brain_db_93_bands\bin`, except `020-01`,
+which is `input\reference_hsi_brain_db\020-01`.
+
+### What the demonstration shows, and what it does not
 
 It shows that the vendored UC1 CUDA pipeline compiles unmodified on this
 machine, runs on the local GPU over a recorded case of the public, anonymized
@@ -64,7 +67,7 @@ recorded imagery, but this is a prototype, the acquisition event is simulated,
 and nothing on screen carries diagnostic meaning. That is why every result still
 travels marked `simulated`.
 
-## Once, before the day
+### Once, before the day
 
 ```powershell
 py -3 -m venv .venv
@@ -80,7 +83,7 @@ measured against a specific GPU, driver and nvcc.
 
 The case has to be passed as an explicit folder (see above).
 
-## The demonstration itself
+### The demonstration itself
 
 The whole loop - laptop camera, capture, cube, UC1, SLIAFlow - runs from one
 console:
@@ -132,7 +135,7 @@ Demo mode is the only thing that lets a simulated result be displayed at all,
 and a banner that cannot be drawn withholds the result rather than showing it
 unmarked.
 
-## Checking the wire without Slicer
+### Checking the wire without Slicer
 
 Worth doing before a demonstration, and the honest way to answer "how do you
 know what it is sending". With the runner serving and SLIAFlow's UC1 link
@@ -172,7 +175,7 @@ Metadata:
   Distinct UC1_* device names: UC1_MV_CLASS, UC1_RGB
 ```
 
-## The four things worth saying out loud
+### The four things worth saying out loud
 
 **One map, not five.** UC1 computes the other four contract maps and discards
 them before writing anything, so a session sends `UC1_MV_CLASS` alone, with its
@@ -195,7 +198,7 @@ requires at most 0.1% of pixels to change and every changed pixel to lie on a
 class boundary. A run that moved pixels away from boundaries, or moved
 appreciably more of them, would be a real regression.
 
-## When something goes wrong
+### When something goes wrong
 
 Failure is loud by design, and there is no fallback on any path. The messages
 are specific, so read them rather than retrying:

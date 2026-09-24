@@ -43,7 +43,7 @@ asserts the staged tree still hashes identically to `workspace/components/`.
 
 | Binary | Command line | Used by |
 | --- | --- | --- |
-| `stratum.opt.exe` | GUIDE section 3.1-B release | `tools/simulators` UC1 runner |
+| `stratum.opt.exe` | GUIDE section 3.1-B release | Nothing since `SLIA-028`; it was the `tools/simulators` UC1 runner's |
 | `stratum.opt.intermediate.exe` | the same, plus `-lineinfo -DPROFILE_MODE -DINTERMEDIATE_OUTPUT` (GUIDE 3.1-B intermediate) | SLIAFlow, inside Slicer (`SLIA-027`) |
 
 ### Staging layout
@@ -154,9 +154,16 @@ shown files were 403,058 bytes (`54 + 389 * (3 * 345 + 1)`, `bfSize` 402,669);
 `CalibratedImage_BIP.bmp` was 402,669 bytes, one byte per row short. The same
 case run from Slicer through SLIAFlow's `QProcess` took 2.05 s.
 
-## Running
+## The standalone runner, before SLIA-028
 
-The runner is a `Classifier` implementation. It uses `dataset.folder` and never
+**Historical.** `SLIA-028` removed the Python UC1 runner, `python -m stratum_sim
+uc1-real` and `uc1_client.py`, so the commands in this section no longer work.
+SLIAFlow runs `stratum.opt.intermediate.exe` itself when Capture is pressed (see
+`uc1_demo_runbook.md`), and `SLIAFlowUc1Run.py` restates the checks listed under
+*What the runner guaranteed*. The section is kept as the record of what the
+runner did and what was measured with it.
+
+The runner was a `Classifier` implementation. It uses `dataset.folder` and never
 loads a calibrated cube: the binary opens `raw.dat`, `whiteReference.dat`,
 `darkReference.dat` and `raw.hdr` itself and calibrates on the GPU.
 
@@ -184,7 +191,7 @@ That mode records everything that arrives and names every distinct device, which
 is the check that matters here: this producer sends one map, so the question is
 not whether five arrived but whether anything other than `UC1_MV_CLASS` did.
 
-### What the runner guarantees
+### What the runner guaranteed
 
 - **Recorded cases only.** A folder whose `gtMap.hdr` does not carry the
   `HSI Human Brain Database` marker is refused before the GPU runs and before
@@ -278,6 +285,6 @@ was trained on comes back as a single class.
 
 The classifier itself is never tuned, under any option. Changing
 `parameters.txt`, the SVM model, or vendored source to make a case produce a
-different map would make every future result meaningless. The runner reports a
-uniform map loudly - `uniformClassWarning` on stderr - so an input the model
-does not recognise says so.
+different map would make every future result meaningless. The retired runner
+reported a uniform map loudly - `uniformClassWarning` on stderr - so an input the
+model did not recognise said so.

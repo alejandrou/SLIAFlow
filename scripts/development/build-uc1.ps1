@@ -377,7 +377,5 @@ if ($allMismatches.Count -gt 0) {
 
 Write-Host "  All staged files are byte-identical to workspace\components." -ForegroundColor Green
 Write-Host ""
-Write-Host "Run the pipeline with:"
-Write-Host "  .\.venv\Scripts\python.exe -m stratum_sim uc1-real <dataset folder> --classify-only"
-Write-Host "SLIAFlow runs stratum.opt.intermediate.exe itself when Capture is pressed."
+Write-Host "Press Capture in SLIAFlow to run stratum.opt.intermediate.exe on the configured cube."
 exit 0

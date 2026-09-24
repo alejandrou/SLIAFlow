@@ -1,8 +1,8 @@
-"""Standard-library test runner for the STRATUM stand-in simulators.
+"""Standard-library test runner for the OpenIGTLink transport in ``stratum_sim``.
 
 The Slicer test runner is deliberately not used. Nothing under ``stratum_sim``
-imports ``slicer``; these are separate processes standing where the acquisition
-and UC1 applications stand, so their tests must run under a plain interpreter.
+imports ``slicer``; the transport runs in its own process beside Slicer, so its
+tests must run under a plain interpreter.
 """
 
 from __future__ import annotations

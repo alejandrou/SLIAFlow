@@ -1,17 +1,12 @@
-"""STRATUM acquisition stand-in and genuine UC1 runner.
+"""OpenIGTLink transport kept from the retired STRATUM stand-ins.
 
-These processes stand where the missing hyperspectral acquisition system stands,
-and run the genuine UC1 pipeline, so SLIAFlow has something real to consume
-before any hardware arrives.
+The acquisition stand-in and the UC1 runner that used to live here were retired
+by SLIA-028: UC1 runs inside Slicer (ADR-0003) and IUMA's acquisition app is the
+producer (ADR-0004). What remains is the transport - building IMAGE and STRING
+messages that keep their metadata, refusing a port another process holds, and
+watching clients - which SLIA-035 builds its imitation of IUMA's app on.
 
-Every cube is a recorded case of the public, anonymized HSI Human Brain
-Database, read where it lies. Only the acquisition event is simulated, and no
-output of these processes carries diagnostic meaning.
-
-The package deliberately lives outside `extensions/`: the seam between a
-stand-in and the real component is the network boundary the architecture
-already has, so replacing one with the other is stopping a process and starting
-another on the same port.
+Nothing here imports `slicer`; it runs under the repository-root `.venv`.
 """
 
 from __future__ import annotations
@@ -29,14 +24,6 @@ if sys.version_info < MINIMUM_PYTHON_VERSION:  # pragma: no cover - guard, not b
     )
 
 __all__ = [
-    "acquisition_sim",
-    "bmp",
-    "config",
     "contract",
-    "envi",
-    "frames",
     "igtl_transport",
-    "spectra",
-    "uc1_maps",
-    "uc1_runner",
 ]

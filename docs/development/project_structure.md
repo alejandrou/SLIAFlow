@@ -35,29 +35,23 @@ extensions/SLIAFlow/SLIAFlow/
 
 Keep final module source in `extensions/`, not in `workspace/`.
 
-## Stand-In Simulators
+## OpenIGTLink Transport
 
 ```text
 tools/simulators/
 ```
 
-`tools/simulators/` holds the stand-in processes that stand where the missing
-acquisition system and the UC1 pipeline stand. They are separate processes, not
-Slicer code: nothing under them imports `slicer`, and they run under the
+`tools/simulators/` holds the OpenIGTLink transport kept from the retired
+stand-in processes (`SLIA-028`): building messages whose metadata reaches the
+wire, refusing a port another process holds, and watching clients. It is the
+base for the stand-in that imitates IUMA's acquisition app (`SLIA-035`). It is
+not Slicer code: nothing under it imports `slicer`, and it runs under the
 repository-root `.venv` rather than inside Slicer's interpreter.
 
-They live outside `extensions/` deliberately. The seam between a stand-in and a
-real component is the network boundary the architecture already has, so
-replacing one with the other is stopping a process and starting another on the
-same port, with no change inside `extensions/`.
-
-Their dependencies are pinned in `tools/simulators/requirements.txt` and are
+Its dependencies are pinned in `tools/simulators/requirements.txt` and are
 never added to `extensions/SLIAFlow/SLIAFlow/Resources/requirements.txt`, which
-is the Slicer-runtime file. Their tests run under the standard-library
-`unittest` runner, not the Slicer test runner. See `tools/simulators/README.md`.
-
-Generated datasets are written under `workspace/simulators/`, which is already
-ignored by Git.
+is the Slicer-runtime file. Its tests run under the standard-library `unittest`
+runner, not the Slicer test runner. See `tools/simulators/README.md`.
 
 ## Local Slicer Source And Build Outputs
 
