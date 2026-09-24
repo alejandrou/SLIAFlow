@@ -9,6 +9,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/${MODULE_NAME}Test.py
   ${MODULE_NAME}Lib/${MODULE_NAME}BmpReader.py
   ${MODULE_NAME}Lib/${MODULE_NAME}Cube.py
+  ${MODULE_NAME}Lib/${MODULE_NAME}CalibratedCube.py
   ${MODULE_NAME}Lib/${MODULE_NAME}Uc1Run.py
   )
 

@@ -30,6 +30,16 @@ Since `SLIA-027` the demonstration runs from one application and no console:
 
    `020-01` was kept as the reference case because it carries tumour pixels
    (3,655 of them); 35 of the 61 database cases carry none.
+7. HS Cube shows IUMA's calibrated LCTF cube `002-04` (`SLIA-032`), read at
+   every Capture from `input\002-04`. It is not the cube UC1 ran on until
+   `SLIA-033`, and the panels say so: HS Cube reads
+   `Recorded cube 002-04, calibrated reflectance`, and Tumour Delineation reads
+   `Result for recorded case 020-01`. Scroll HS Cube to move through the 109
+   bands; the caption gives each band's wavelength. **HS Cube shows** switches
+   to a colour preview (650, 550 and 470 nm as red, green and blue, labelled
+   a band composite, not a photograph). Clicking a pixel plots its stored
+   reflectance under **Pixel spectrum**. Say out loud that the plot shows the
+   cube's own numbers, not an analysis.
 
 When a Capture fails, the status says `Failed on recorded case <case>: ...` with
 the reason and what to do, LiveView resumes, and the previous result stays on
@@ -44,6 +54,7 @@ case is started; press Capture again.
 | `UC1 timed out after 60 s` | The process was killed; check the GPU and the Python console log |
 | `... is not a valid UC1 image ...` | An output was missing, older than the run, the wrong size or malformed; the whole run is refused |
 | `The configured cube ... cannot be used: ...` | The folder named is missing or not a recorded case UC1 can run on; the reason follows. See `input\README.txt` |
+| HS Cube: `The hyperspectral cube could not be shown.` | `input\002-04\LCTF_Calibrated_Cube_Single` is missing or its header and data file disagree; the reason follows on the panel. UC1 still runs |
 
 ## Before SLIA-028: the standalone console demonstration
 
