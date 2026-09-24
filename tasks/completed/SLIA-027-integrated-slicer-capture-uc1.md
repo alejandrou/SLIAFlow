@@ -1,7 +1,7 @@
 ---
 id: SLIA-027
 title: Run capture and UC1 end to end inside the built Slicer
-status: active
+status: completed
 branch: feature/SLIA-027-integrated-slicer-capture-uc1
 priority: high
 depends_on: SLIA-025, SLIA-026
@@ -1118,3 +1118,7 @@ drawn over the output with the Label layer's opacity slider working on them.
 Nothing here was committed or pushed.
 
 ## Human approval
+
+Approved and marked completed by the project owner on 2026-09-24. The
+implementation was integrated into `main` as `2a81196` (ENH: Run capture and
+UC1 end to end inside Slicer).
