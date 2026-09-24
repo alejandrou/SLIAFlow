@@ -1,10 +1,12 @@
-"""Choose which recorded HSI case a capture sends to UC1.
+"""Describe and read the one cube a capture sends to UC1.
 
 The acquisition is simulated: each Capture stands for a hyperspectral cube, and
-the cube is a recorded case of the HSI Human Brain Database, read where it lies
-in `input/bin/bin`. Nothing here writes to that folder. Choosing a case reads
-only headers and file sizes; `readCube` reads the pixels of one chosen case, so
-that the HS Cube panel can show the cube the capture stands for.
+the cube is the one configured folder (`SLIAFlowLogic.cubeFolder`), read where
+it lies under `input/`. Until SLIA-033 that folder is a recorded case of the HSI
+Human Brain Database kept as the UC1 reference (ADR-0004 decision 1). Nothing
+here writes to it. Describing the cube reads only headers and file sizes;
+`readCube` reads its pixels, so that the HS Cube panel can show the cube the
+capture stands for.
 
 A case is used only when UC1 can run on it without silently reading the wrong
 thing. `main.cu` trusts the header's band count when it reads the SVM model and
@@ -15,20 +17,19 @@ applies in `envi.loadDataset`, `envi.assertDataFilesMatchHeader`,
 restated here because a Slicer module cannot import that tooling.
 """
 
-import logging
-import random
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+try:
+    from slicer.i18n import tr as _
+except ImportError:  # Outside Slicer, messages stay in English.
+    def _(text):
+        return text
+
 # The staged SVM model is sized for this many bands (uc1_runner.UC1_MODEL_BAND_COUNT).
 UC1_MODEL_BAND_COUNT = 93
-
-# Cases that are never picked, and why. `058-02` is the largest recorded case
-# and has not been verified on this GPU yet.
-DEFERRED_CASES = ("058-02",)
-DEFERRED_REASON = "deferred until SLIA-029 verifies it"
 
 # The three ENVI pairs UC1 opens, by stem.
 CASE_FILE_STEMS = ("raw", "darkReference", "whiteReference")
@@ -65,8 +66,8 @@ GROUND_TRUTH_CLASSES = (
 )
 HIGHEST_GROUND_TRUTH_CLASS_ID = max(classId for classId, _name, _colour in GROUND_TRUTH_CLASSES)
 
-# Most of a recorded case is left unlabelled: across the 61 cases in
-# `input/bin/bin`, between 0.0% and 16.2% of pixels carry a class. Class 0 is
+# Most of a recorded case is left unlabelled: across the 61 cases of the
+# database, between 0.0% and 16.2% of pixels carry a class. Class 0 is
 # the absence of a label, not a class the classifiers can be scored against.
 UNLABELLED_CLASS_ID = 0
 
@@ -82,10 +83,6 @@ class RecordedCase:
 
 class IncompatibleCaseError(ValueError):
     """The folder is not a recorded case UC1 can run on."""
-
-
-class NoCompatibleCaseError(RuntimeError):
-    """No recorded case in the input folder can be used."""
 
 
 def parseEnviHeader(text: str) -> dict[str, str]:
@@ -118,33 +115,33 @@ def parseEnviHeader(text: str) -> dict[str, str]:
 
 def _headerDimensions(path: Path) -> tuple[int, int, int]:
     if not path.is_file():
-        raise IncompatibleCaseError(f"{path.name} is missing.")
+        raise IncompatibleCaseError(_("{file} is missing.").format(file=path.name))
     values = parseEnviHeader(path.read_text(encoding="ascii", errors="replace"))
     missing = [key for key in ("samples", "lines", "bands") if key not in values]
     if missing:
-        raise IncompatibleCaseError(f"{path.name} does not declare {', '.join(missing)}.")
+        raise IncompatibleCaseError(_("{file} does not declare {keys}.").format(
+            file=path.name, keys=", ".join(missing)))
     try:
         dimensions = tuple(int(values[key]) for key in ("samples", "lines", "bands"))
     except ValueError as error:
-        raise IncompatibleCaseError(f"{path.name} has a dimension that is not an integer.") from error
+        raise IncompatibleCaseError(_("{file} has a dimension that is not an integer.").format(
+            file=path.name)) from error
     if any(value <= 0 for value in dimensions):
-        raise IncompatibleCaseError(f"{path.name} declares a dimension that is not positive.")
+        raise IncompatibleCaseError(_("{file} declares a dimension that is not positive.").format(
+            file=path.name))
     if values.get("data type") != ENVI_DATA_TYPE_UINT16:
-        raise IncompatibleCaseError(
-            f"{path.name} declares data type {values.get('data type')}, not 12 (uint16)."
-        )
+        raise IncompatibleCaseError(_("{file} declares data type {value}, not 12 (uint16).").format(
+            file=path.name, value=values.get("data type")))
     if values.get("interleave", "").lower() != "bsq":
-        raise IncompatibleCaseError(
-            f"{path.name} declares interleave {values.get('interleave')}, not bsq."
-        )
+        raise IncompatibleCaseError(_("{file} declares interleave {value}, not bsq.").format(
+            file=path.name, value=values.get("interleave")))
     if values.get("byte order") != "0":
         raise IncompatibleCaseError(
-            f"{path.name} declares byte order {values.get('byte order')}, not 0 (little-endian)."
-        )
+            _("{file} declares byte order {value}, not 0 (little-endian).").format(
+                file=path.name, value=values.get("byte order")))
     if values.get("header offset", "0") != "0":
-        raise IncompatibleCaseError(
-            f"{path.name} declares a header offset of {values.get('header offset')}, not 0."
-        )
+        raise IncompatibleCaseError(_("{file} declares a header offset of {value}, not 0.").format(
+            file=path.name, value=values.get("header offset")))
     return dimensions
 
 
@@ -152,7 +149,7 @@ def loadRecordedCase(folder) -> RecordedCase:
     """Describe a case folder UC1 can run on, or say why it cannot."""
     folder = Path(folder)
     if not folder.is_dir():
-        raise IncompatibleCaseError(f"{folder} is not a folder.")
+        raise IncompatibleCaseError(_("{folder} is not a folder.").format(folder=folder))
 
     dimensions = None
     firstHeader = None
@@ -162,39 +159,39 @@ def loadRecordedCase(folder) -> RecordedCase:
         if dimensions is None:
             dimensions, firstHeader = current, headerPath.name
         elif current != dimensions:
-            raise IncompatibleCaseError(
-                f"{headerPath.name} describes {current[0]} x {current[1]} x {current[2]} but "
-                f"{firstHeader} describes {dimensions[0]} x {dimensions[1]} x {dimensions[2]} "
-                "(samples x lines x bands)."
-            )
+            raise IncompatibleCaseError(_(
+                "{file} describes {samples} x {lines} x {bands} but {firstFile} describes "
+                "{firstSamples} x {firstLines} x {firstBands} (samples x lines x bands)."
+            ).format(file=headerPath.name, samples=current[0], lines=current[1],
+                     bands=current[2], firstFile=firstHeader, firstSamples=dimensions[0],
+                     firstLines=dimensions[1], firstBands=dimensions[2]))
     samples, lines, bands = dimensions
 
     if bands != UC1_MODEL_BAND_COUNT:
-        raise IncompatibleCaseError(
-            f"The case has {bands} bands, but the staged SVM model is sized for "
-            f"{UC1_MODEL_BAND_COUNT}. UC1 would classify against truncated or uninitialised "
-            "weights."
-        )
+        raise IncompatibleCaseError(_(
+            "The case has {bands} bands, but the staged SVM model is sized for {modelBands}. "
+            "UC1 would classify against truncated or uninitialised weights."
+        ).format(bands=bands, modelBands=UC1_MODEL_BAND_COUNT))
 
     expectedBytes = samples * lines * bands * BYTES_PER_SAMPLE
     for stem in CASE_FILE_STEMS:
         dataPath = folder / f"{stem}.dat"
         if not dataPath.is_file():
-            raise IncompatibleCaseError(f"{dataPath.name} is missing.")
+            raise IncompatibleCaseError(_("{file} is missing.").format(file=dataPath.name))
         actualBytes = dataPath.stat().st_size
         if actualBytes != expectedBytes:
             raise IncompatibleCaseError(
-                f"{dataPath.name} is {actualBytes} bytes but the headers describe {expectedBytes}."
-            )
+                _("{file} is {actual} bytes but the headers describe {expected}.").format(
+                    file=dataPath.name, actual=actualBytes, expected=expectedBytes))
 
     groundTruthHeader = folder / GROUND_TRUTH_HEADER_FILE_NAME
     if not groundTruthHeader.is_file() or RECORDED_DATASET_MARKER not in groundTruthHeader.read_text(
         encoding="ascii", errors="replace"
     ):
-        raise IncompatibleCaseError(
-            f"The folder does not identify as a case of the {RECORDED_DATASET_MARKER}: its "
-            f"{GROUND_TRUTH_HEADER_FILE_NAME} does not carry that marker."
-        )
+        raise IncompatibleCaseError(_(
+            "The folder does not identify as a case of the {dataset}: its {header} does not "
+            "carry that marker."
+        ).format(dataset=RECORDED_DATASET_MARKER, header=GROUND_TRUTH_HEADER_FILE_NAME))
 
     return RecordedCase(folder.name, folder.resolve(), samples, lines, bands)
 
@@ -213,8 +210,8 @@ def readCube(case) -> np.ndarray:
     actualBytes = path.stat().st_size
     if actualBytes != expectedBytes:
         raise IncompatibleCaseError(
-            f"{path.name} is {actualBytes} bytes but the headers describe {expectedBytes}."
-        )
+            _("{file} is {actual} bytes but the headers describe {expected}.").format(
+                file=path.name, actual=actualBytes, expected=expectedBytes))
     # Byte order 0, checked when the case was accepted.
     values = np.fromfile(path, dtype="<u2")
     return values.reshape(case.bands, case.lines, case.samples)
@@ -229,42 +226,40 @@ def _groundTruthHeaderDimensions(path: Path, case) -> tuple[int, int]:
     being stretched or cropped to fit.
     """
     if not path.is_file():
-        raise IncompatibleCaseError(f"{path.name} is missing.")
+        raise IncompatibleCaseError(_("{file} is missing.").format(file=path.name))
     values = parseEnviHeader(path.read_text(encoding="ascii", errors="replace"))
     missing = [key for key in ("samples", "lines", "bands") if key not in values]
     if missing:
-        raise IncompatibleCaseError(f"{path.name} does not declare {', '.join(missing)}.")
+        raise IncompatibleCaseError(_("{file} does not declare {keys}.").format(
+            file=path.name, keys=", ".join(missing)))
     try:
         samples, lines, bands = (int(values[key]) for key in ("samples", "lines", "bands"))
     except ValueError as error:
-        raise IncompatibleCaseError(f"{path.name} has a dimension that is not an integer.") from error
+        raise IncompatibleCaseError(_("{file} has a dimension that is not an integer.").format(
+            file=path.name)) from error
     if bands != GROUND_TRUTH_BAND_COUNT:
         raise IncompatibleCaseError(
-            f"{path.name} declares {bands} bands, not {GROUND_TRUTH_BAND_COUNT}: it is not a "
-            "single map of labels."
-        )
+            _("{file} declares {bands} bands, not {expected}: it is not a single map of "
+              "labels.").format(file=path.name, bands=bands, expected=GROUND_TRUTH_BAND_COUNT))
     if (samples, lines) != (case.samples, case.lines):
-        raise IncompatibleCaseError(
-            f"{path.name} describes {samples} x {lines} but the case is "
-            f"{case.samples} x {case.lines} (samples x lines)."
-        )
+        raise IncompatibleCaseError(_(
+            "{file} describes {samples} x {lines} but the case is {caseSamples} x {caseLines} "
+            "(samples x lines)."
+        ).format(file=path.name, samples=samples, lines=lines, caseSamples=case.samples,
+                 caseLines=case.lines))
     if values.get("data type") != ENVI_DATA_TYPE_UINT16:
-        raise IncompatibleCaseError(
-            f"{path.name} declares data type {values.get('data type')}, not 12 (uint16)."
-        )
+        raise IncompatibleCaseError(_("{file} declares data type {value}, not 12 (uint16).").format(
+            file=path.name, value=values.get("data type")))
     if values.get("interleave", "").lower() != ENVI_INTERLEAVE_BIL:
-        raise IncompatibleCaseError(
-            f"{path.name} declares interleave {values.get('interleave')}, not "
-            f"{ENVI_INTERLEAVE_BIL}."
-        )
+        raise IncompatibleCaseError(_("{file} declares interleave {value}, not {expected}.").format(
+            file=path.name, value=values.get("interleave"), expected=ENVI_INTERLEAVE_BIL))
     if values.get("byte order") != "0":
         raise IncompatibleCaseError(
-            f"{path.name} declares byte order {values.get('byte order')}, not 0 (little-endian)."
-        )
+            _("{file} declares byte order {value}, not 0 (little-endian).").format(
+                file=path.name, value=values.get("byte order")))
     if values.get("header offset", "0") != "0":
-        raise IncompatibleCaseError(
-            f"{path.name} declares a header offset of {values.get('header offset')}, not 0."
-        )
+        raise IncompatibleCaseError(_("{file} declares a header offset of {value}, not 0.").format(
+            file=path.name, value=values.get("header offset")))
     return lines, samples
 
 
@@ -284,104 +279,44 @@ def readGroundTruth(case) -> np.ndarray:
     lines, samples = _groundTruthHeaderDimensions(headerPath, case)
     path = Path(case.folder) / GROUND_TRUTH_FILE_NAME
     if not path.is_file():
-        raise IncompatibleCaseError(f"{path.name} is missing.")
+        raise IncompatibleCaseError(_("{file} is missing.").format(file=path.name))
     expectedBytes = samples * lines * BYTES_PER_SAMPLE
     actualBytes = path.stat().st_size
     if actualBytes != expectedBytes:
         raise IncompatibleCaseError(
-            f"{path.name} is {actualBytes} bytes but {headerPath.name} describes {expectedBytes}."
-        )
+            _("{file} is {actual} bytes but {header} describes {expected}.").format(
+                file=path.name, actual=actualBytes, header=headerPath.name,
+                expected=expectedBytes))
     # Byte order 0, checked just above.
     labels = np.fromfile(path, dtype="<u2").reshape(lines, samples)
     highest = int(labels.max()) if labels.size else 0
     if highest > HIGHEST_GROUND_TRUTH_CLASS_ID:
         raise IncompatibleCaseError(
-            f"{path.name} holds class ID {highest}, but {headerPath.name} only legends "
-            f"0 to {HIGHEST_GROUND_TRUTH_CLASS_ID}."
-        )
+            _("{file} holds class ID {classId}, but {header} only legends 0 to {highest}.").format(
+                file=path.name, classId=highest, header=headerPath.name,
+                highest=HIGHEST_GROUND_TRUTH_CLASS_ID))
     return labels
 
 
 def assertCaseUnchanged(case: RecordedCase) -> None:
     """Re-read the case folder and refuse the run if it no longer matches.
 
-    A case is described when the pool is refilled, which can be several
-    captures and many minutes before that case is used. The folder lies outside
-    the repository and nothing here owns it, so it can be edited, truncated or
+    The cube is described when Capture is pressed, and its pixels are read for
+    the HS Cube panel before the run starts. The folder lies outside the
+    repository and nothing here owns it, so it can be edited, truncated or
     copied over in between, and UC1 reads the sizes from the headers without
     checking what it got. Re-reading the folder immediately before the run is
     the only point at which the description the operator was shown is known to
-    still be the case on disk.
+    still be the cube on disk.
 
-    The run is refused rather than moved to another case: a silent replacement
-    would stamp the result with a case the operator never saw chosen.
+    The run is refused rather than run on whatever the folder now holds: that
+    would stamp the result with a cube the operator never saw described.
     """
     current = loadRecordedCase(case.folder)
     if current != case:
-        raise IncompatibleCaseError(
-            f"Recorded case {case.name} changed on disk since it was chosen: it was "
-            f"{case.samples} x {case.lines} x {case.bands} and is now "
-            f"{current.samples} x {current.lines} x {current.bands} (samples x lines x bands). "
-            "Press Capture again to run on the case as it is now."
-        )
-
-
-def discoverCases(inputRoot, deferredCases=DEFERRED_CASES):
-    """Return the usable cases, and a reason for every folder that was not used."""
-    root = Path(inputRoot)
-    cases: list[RecordedCase] = []
-    rejected: dict[str, str] = {}
-    if not root.is_dir():
-        return cases, rejected
-    for child in sorted(root.iterdir()):
-        if not child.is_dir():
-            continue
-        if child.name in deferredCases:
-            rejected[child.name] = DEFERRED_REASON
-            continue
-        try:
-            cases.append(loadRecordedCase(child))
-        except (IncompatibleCaseError, OSError) as error:
-            rejected[child.name] = str(error)
-    return cases, rejected
-
-
-class CasePool:
-    """Every usable case once, in a shuffled order, then a new shuffle.
-
-    The folder is read again at every reshuffle, so a case added or repaired
-    during the session joins the next round. The order lives only as long as
-    the pool.
-    """
-
-    def __init__(self, inputRoot, deferredCases=DEFERRED_CASES, rng=None) -> None:
-        self.inputRoot = Path(inputRoot)
-        self.deferredCases = tuple(deferredCases)
-        self.rejected: dict[str, str] = {}
-        self._rng = rng if rng is not None else random.Random()
-        self._queue: list[RecordedCase] = []
-        self._lastName = None
-
-    def nextCase(self) -> RecordedCase:
-        if not self._queue:
-            self._refill()
-        case = self._queue.pop(0)
-        self._lastName = case.name
-        return case
-
-    def _refill(self) -> None:
-        cases, self.rejected = discoverCases(self.inputRoot, self.deferredCases)
-        for name, reason in self.rejected.items():
-            logging.info("SLIAFlow: recorded case %s is not used: %s", name, reason)
-        if not cases:
-            raise NoCompatibleCaseError(
-                f"No compatible recorded case was found in {self.inputRoot}. Put the HSI Human "
-                "Brain Database cases there; each needs raw, darkReference and whiteReference "
-                f"with {UC1_MODEL_BAND_COUNT}-band uint16 BSQ headers."
-            )
-        order = list(cases)
-        self._rng.shuffle(order)
-        # A new round never starts with the case that ended the last one.
-        if len(order) > 1 and order[0].name == self._lastName:
-            order[0], order[1] = order[1], order[0]
-        self._queue = order
+        raise IncompatibleCaseError(_(
+            "Recorded case {case} changed on disk since Capture was pressed: it was "
+            "{samples} x {lines} x {bands} and is now {nowSamples} x {nowLines} x {nowBands} "
+            "(samples x lines x bands). Press Capture again to run on the case as it is now."
+        ).format(case=case.name, samples=case.samples, lines=case.lines, bands=case.bands,
+                 nowSamples=current.samples, nowLines=current.lines, nowBands=current.bands))

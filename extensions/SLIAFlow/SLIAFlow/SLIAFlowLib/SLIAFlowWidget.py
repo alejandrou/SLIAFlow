@@ -9,7 +9,7 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
-from .SLIAFlowCasePool import UC1_MODEL_BAND_COUNT, NoCompatibleCaseError
+from .SLIAFlowCube import IncompatibleCaseError
 from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
     CAPTURE_ID_ATTRIBUTE,
@@ -524,15 +524,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
 
         try:
-            case = self.logic.casePool.nextCase()
-        except NoCompatibleCaseError:
-            self._failCapture(_(
-                "No compatible recorded case was found in {folder}. Put the HSI Human Brain "
-                "Database cases there; each needs raw, darkReference and whiteReference with "
-                "{bands}-band uint16 BSQ headers."
-            ).format(folder=self.logic.inputRoot, bands=UC1_MODEL_BAND_COUNT))
-            return
-        except (Uc1RunError, OSError) as error:
+            case = self.logic.loadConfiguredCube()
+        except (IncompatibleCaseError, Uc1RunError, OSError) as error:
             self._failCapture(str(error))
             return
         self._captureCaseName = case.name
@@ -551,7 +544,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Show the recorded cube this capture stands for.
 
         The cube is the input of the run, so it is shown as soon as the case is
-        chosen rather than with the result. Reading it is not what the capture
+        described rather than with the result. Reading it is not what the capture
         is for: if the cube cannot be read, the panel says it is still waiting
         and UC1 runs on the case regardless.
         """

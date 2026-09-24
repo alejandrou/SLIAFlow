@@ -11,12 +11,14 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
 from vtk.util import numpy_support
 
-from .SLIAFlowCasePool import (
+from .SLIAFlowCube import (
     CUBE_FILE_STEM,
     GROUND_TRUTH_CLASSES,
     GROUND_TRUTH_FILE_NAME,
     UNLABELLED_CLASS_ID,
-    CasePool,
+    IncompatibleCaseError,
+    RecordedCase,
+    loadRecordedCase,
     readCube,
     readGroundTruth,
 )
@@ -49,7 +51,10 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
 
     # Where a capture's files live, relative to the repository root.
     CAPTURES_RELATIVE_PATH = Path("workspace") / "captures"
-    INPUT_RELATIVE_PATH = Path("input") / "bin" / "bin"
+    # The one cube Capture sends to UC1 (ADR-0004 decision 1): the recorded
+    # case the project owner kept as the UC1 reference at SLIA-031, until
+    # SLIA-033 lets UC1 read IUMA's LCTF cube.
+    CUBE_RELATIVE_PATH = Path("input") / "reference_hsi_brain_db" / "020-01"
     SNAPSHOT_PREFIX = "output_laptop_camera_"
     SNAPSHOT_TIME_FORMAT = "%Y%m%d-%H%M%S"
 
@@ -93,7 +98,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         # a real QProcess; a test points both somewhere else.
         self._repositoryRootOverride = None
         self._processFactory = None
-        self._casePool = None
+        self._cubeFolderOverride = None
         self.currentRun: Uc1Run | None = None
 
     @staticmethod
@@ -309,13 +314,14 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     def setRunEnvironment(self, repositoryRoot=None, processFactory=None) -> None:
         """Point runs at another repository tree and process type, or back.
 
-        Any run in progress is cancelled first, and the case pool is rebuilt,
-        so nothing from the previous environment carries over.
+        Any run in progress is cancelled first, and the cube folder returns to
+        the new environment's reference case, so nothing from the previous
+        environment carries over.
         """
         self.cancelRun()
         self._repositoryRootOverride = None if repositoryRoot is None else Path(repositoryRoot)
         self._processFactory = processFactory
-        self._casePool = None
+        self._cubeFolderOverride = None
 
     @property
     def repositoryRoot(self) -> Path:
@@ -328,19 +334,38 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         return self.repositoryRoot / self.CAPTURES_RELATIVE_PATH
 
     @property
-    def inputRoot(self) -> Path:
-        return self.repositoryRoot / self.INPUT_RELATIVE_PATH
+    def cubeFolder(self) -> Path:
+        """The one cube folder every Capture reads.
+
+        By default the reference case under the repository; assigning a folder
+        replaces it and assigning None restores the default.
+        """
+        if self._cubeFolderOverride is not None:
+            return self._cubeFolderOverride
+        return self.repositoryRoot / self.CUBE_RELATIVE_PATH
+
+    @cubeFolder.setter
+    def cubeFolder(self, folder) -> None:
+        self._cubeFolderOverride = None if folder is None else Path(folder)
+
+    def loadConfiguredCube(self) -> RecordedCase:
+        """Describe the configured cube, or say which folder it is and why not.
+
+        The folder is read at every Capture, so a cube repaired or replaced on
+        disk is picked up by the next one without restarting Slicer.
+        """
+        folder = self.cubeFolder
+        try:
+            return loadRecordedCase(folder)
+        except (IncompatibleCaseError, OSError) as error:
+            raise IncompatibleCaseError(
+                _("The configured cube {folder} cannot be used: {reason}").format(
+                    folder=folder, reason=error)
+            ) from error
 
     @property
     def uc1Build(self) -> Uc1Build:
         return Uc1Build.forRepository(self.repositoryRoot)
-
-    @property
-    def casePool(self) -> CasePool:
-        """One shuffled queue of recorded cases for the whole Slicer session."""
-        if self._casePool is None:
-            self._casePool = CasePool(self.inputRoot)
-        return self._casePool
 
     @staticmethod
     def newCaptureId() -> str:

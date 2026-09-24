@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .SLIAFlowBmpReader import BmpFormatError, readUc1Bmp
-from .SLIAFlowCasePool import (
+from .SLIAFlowCube import (
     UC1_MODEL_BAND_COUNT,
     IncompatibleCaseError,
     assertCaseUnchanged,
@@ -156,7 +156,7 @@ class Uc1Build:
 
     def assertRunnable(self, case) -> None:
         """Name what is missing or unsafe before anything is started."""
-        # The case was described when the pool was filled, not now. Re-read it
+        # The case was described when Capture was pressed, not now. Re-read it
         # here, the last moment before the lock is taken, so a case that was
         # edited or truncated since is refused instead of run on.
         try:
