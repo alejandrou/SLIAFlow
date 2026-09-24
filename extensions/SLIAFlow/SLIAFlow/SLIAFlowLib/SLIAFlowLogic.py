@@ -1,6 +1,7 @@
 import datetime
 import importlib
 import logging
+import time
 import uuid
 from pathlib import Path
 
@@ -11,15 +12,20 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
 from vtk.util import numpy_support
 
+from .SLIAFlowCalibratedCube import (
+    CalibratedCube,
+    CalibratedCubeError,
+    loadCalibratedCube,
+    nearestBand,
+    readCalibratedCube,
+)
 from .SLIAFlowCube import (
-    CUBE_FILE_STEM,
     GROUND_TRUTH_CLASSES,
     GROUND_TRUTH_FILE_NAME,
     UNLABELLED_CLASS_ID,
     IncompatibleCaseError,
     RecordedCase,
     loadRecordedCase,
-    readCube,
     readGroundTruth,
 )
 from .SLIAFlowParameterNode import (
@@ -30,7 +36,9 @@ from .SLIAFlowParameterNode import (
     RECORDED_CASE_ATTRIBUTE,
     SIMULATED_ORIGIN,
     SIMULATION_DETAIL_ATTRIBUTE,
+    WAVELENGTHS_ATTRIBUTE,
     SLIAFlowParameterNode,
+    calibratedCubeDetail,
     recordedCaseDetail,
 )
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES, Uc1Build, Uc1Run, findRepositoryRoot
@@ -55,6 +63,11 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     # case the project owner kept as the UC1 reference at SLIA-031, until
     # SLIA-033 lets UC1 read IUMA's LCTF cube.
     CUBE_RELATIVE_PATH = Path("input") / "reference_hsi_brain_db" / "020-01"
+    # The cube the HS Cube panel shows (SLIA-032, ADR-0004 decision 1): IUMA's
+    # calibrated float32 LCTF capture. UC1 does not read it until SLIA-033.
+    CALIBRATED_CUBE_RELATIVE_PATH = (
+        Path("input") / "002-04" / "LCTF_Calibrated_Cube_Single.hdr"
+    )
     SNAPSHOT_PREFIX = "output_laptop_camera_"
     SNAPSHOT_TIME_FORMAT = "%Y%m%d-%H%M%S"
 
@@ -63,7 +76,21 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     OUTPUT_COMPONENTS = 3
 
     CUBE_OWNER = "RecordedCube"
-    CUBE_VOLUME_NAME = f"{CUBE_FILE_STEM}.dat"
+
+    # The colour preview: the bands nearest these wavelengths as R, G and B,
+    # on one fixed scale where this reflectance is full brightness. A display
+    # mapping of a derived picture, never of the cube's stored values.
+    PREVIEW_OWNER = "CalibratedCubePreview"
+    PREVIEW_WAVELENGTHS_NM = (650.0, 550.0, 470.0)
+    PREVIEW_FULL_SCALE_REFLECTANCE = 1.0
+    PREVIEW_WAVELENGTHS_ATTRIBUTE = "SLIAFlow.PreviewWavelengthsNm"
+    PREVIEW_VOLUME_NAME_FORMAT = "{cube} colour preview"
+
+    # One pixel's stored values against wavelength, for the module panel's plot.
+    SPECTRUM_OWNER = "PixelSpectrum"
+    SPECTRUM_WAVELENGTH_COLUMN = _("Wavelength (nm)")
+    SPECTRUM_VALUE_COLUMN = _("Reflectance (stored value)")
+    SPECTRUM_TITLE_FORMAT = _("{cube}, pixel column {column}, row {row}")
 
     GROUND_TRUTH_OWNER = "RecordedGroundTruth"
     GROUND_TRUTH_VOLUME_NAME = GROUND_TRUTH_FILE_NAME
@@ -99,6 +126,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         self._repositoryRootOverride = None
         self._processFactory = None
         self._cubeFolderOverride = None
+        self._calibratedCubeHeaderOverride = None
         self.currentRun: Uc1Run | None = None
 
     @staticmethod
@@ -314,14 +342,15 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     def setRunEnvironment(self, repositoryRoot=None, processFactory=None) -> None:
         """Point runs at another repository tree and process type, or back.
 
-        Any run in progress is cancelled first, and the cube folder returns to
-        the new environment's reference case, so nothing from the previous
-        environment carries over.
+        Any run in progress is cancelled first, and the cube folder and the
+        calibrated cube return to the new environment's defaults, so nothing
+        from the previous environment carries over.
         """
         self.cancelRun()
         self._repositoryRootOverride = None if repositoryRoot is None else Path(repositoryRoot)
         self._processFactory = processFactory
         self._cubeFolderOverride = None
+        self._calibratedCubeHeaderOverride = None
 
     @property
     def repositoryRoot(self) -> Path:
@@ -361,6 +390,36 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             raise IncompatibleCaseError(
                 _("The configured cube {folder} cannot be used: {reason}").format(
                     folder=folder, reason=error)
+            ) from error
+
+    @property
+    def calibratedCubeHeader(self) -> Path:
+        """The header of the calibrated cube every Capture shows in HS Cube.
+
+        By default IUMA's 002-04 under the repository; assigning a header
+        replaces it and assigning None restores the default.
+        """
+        if self._calibratedCubeHeaderOverride is not None:
+            return self._calibratedCubeHeaderOverride
+        return self.repositoryRoot / self.CALIBRATED_CUBE_RELATIVE_PATH
+
+    @calibratedCubeHeader.setter
+    def calibratedCubeHeader(self, header) -> None:
+        self._calibratedCubeHeaderOverride = None if header is None else Path(header)
+
+    def loadConfiguredCalibratedCube(self) -> CalibratedCube:
+        """Describe the configured calibrated cube, or say why it cannot be shown.
+
+        Read at every Capture, like the cube folder. The reason names the file
+        and the defect only, so it can be written on the panel; the full path
+        is `calibratedCubeHeader`.
+        """
+        try:
+            return loadCalibratedCube(self.calibratedCubeHeader)
+        except OSError as error:
+            raise CalibratedCubeError(
+                _("{file} could not be read: {reason}").format(
+                    file=self.calibratedCubeHeader.name, reason=error.strerror or error)
             ) from error
 
     @property
@@ -538,26 +597,32 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         return None
 
     @classmethod
-    def acceptCube(cls, case, captureId: str):
-        """Put one recorded case's acquired cube into the module-owned volume.
+    def acceptCube(cls, cube: CalibratedCube, captureId: str):
+        """Put the calibrated cube into the module-owned volume, values as stored.
 
         The volume's third axis is the band, so a slice view scrolls the cube
-        band by band. The cube is the input of the run, not its result: it
-        carries the same origin and case attributes as the outputs so that no
-        panel can present it as something acquired here and now.
+        band by band. The file is read straight into the volume's own float32
+        buffer: no conversion, and no second copy of a cube that is about half a
+        gigabyte. The cube is read from disk, so the acquisition is simulated
+        and the node says so (ADR-0004 decision 7), with the wavelengths it
+        was recorded at.
         """
         if not captureId:
             raise ValueError(_("A cube needs a capture ID."))
-        bands = readCube(case)
+        started = time.perf_counter()
         node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
         try:
             node.SetSaveWithScene(False)
-            slicer.util.updateVolumeFromArray(node, bands)
+            image = vtk.vtkImageData()
+            image.SetDimensions(cube.samples, cube.lines, cube.bands)
+            image.AllocateScalars(vtk.VTK_FLOAT, 1)
+            node.SetAndObserveImageData(image)
+            readCalibratedCube(cube, out=slicer.util.arrayFromVolume(node))
+            slicer.util.arrayFromVolumeModified(node)
             cls._applyLiveVolumeGeometry(node)
-            node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, SIMULATED_ORIGIN)
-            node.SetAttribute(RECORDED_CASE_ATTRIBUTE, case.name)
-            node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, recordedCaseDetail(case.name))
-            node.SetAttribute(CAPTURE_ID_ATTRIBUTE, captureId)
+            cls._setCubeProvenance(node, cube.name, captureId)
+            node.SetAttribute(WAVELENGTHS_ATTRIBUTE,
+                              ",".join(f"{value:g}" for value in cube.wavelengths))
             if node.GetDisplayNode() is None:
                 node.CreateDefaultDisplayNodes()
             displayNode = node.GetDisplayNode()
@@ -572,15 +637,198 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
 
         cls.removeCubeNode()
         # The previous node is gone, so the plain name is free again.
-        node.SetName(cls.CUBE_VOLUME_NAME)
+        node.SetName(cube.dataPath.name)
         node.SetAttribute(OWNER_ATTRIBUTE, cls.CUBE_OWNER)
+        logging.info("SLIAFlow: cube %s (%d x %d x %d float32) read in %.2f s from %s",
+                     cube.name, cube.samples, cube.lines, cube.bands,
+                     time.perf_counter() - started, cube.dataPath)
         return node
+
+    @staticmethod
+    def _setCubeProvenance(node, cubeName: str, captureId: str) -> None:
+        node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, SIMULATED_ORIGIN)
+        node.SetAttribute(RECORDED_CASE_ATTRIBUTE, cubeName)
+        node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, calibratedCubeDetail(cubeName))
+        node.SetAttribute(CAPTURE_ID_ATTRIBUTE, captureId)
 
     @classmethod
     def removeCubeNode(cls) -> None:
+        """Remove the cube and everything derived from it: preview and spectrum."""
+        cls.removeColourPreviewNode()
+        cls.removeSpectrumNodes()
         node = cls.cubeNode()
         if node is not None:
             cls._removeVolumeNode(node)
+
+    @staticmethod
+    def cubeWavelengths(node) -> tuple:
+        """The wavelengths in nm a cube volume was recorded at, one per band."""
+        text = node.GetAttribute(WAVELENGTHS_ATTRIBUTE) if node is not None else None
+        if not text:
+            return ()
+        return tuple(float(value) for value in text.split(","))
+
+    @staticmethod
+    def cubeBandAt(node, ras) -> int | None:
+        """The band a slice through RAS point `ras` shows, or None outside the cube."""
+        if node is None or node.GetImageData() is None:
+            return None
+        rasToIjk = vtk.vtkMatrix4x4()
+        node.GetRASToIJKMatrix(rasToIjk)
+        band = int(round(rasToIjk.MultiplyPoint((*ras, 1.0))[2]))
+        bands = node.GetImageData().GetDimensions()[2]
+        return band if 0 <= band < bands else None
+
+    # ------------------------------------------------------------------
+    # The colour preview of the calibrated cube
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def colourPreviewNode(cls):
+        """The module-owned colour preview of the cube, or None."""
+        for node in slicer.util.getNodesByClass("vtkMRMLVectorVolumeNode"):
+            if node.GetAttribute(OWNER_ATTRIBUTE) == cls.PREVIEW_OWNER:
+                return node
+        return None
+
+    @classmethod
+    def previewWavelengths(cls, previewNode) -> tuple:
+        """The wavelengths in nm of the preview's R, G and B bands."""
+        text = previewNode.GetAttribute(cls.PREVIEW_WAVELENGTHS_ATTRIBUTE) if previewNode else None
+        return tuple(float(value) for value in text.split(",")) if text else ()
+
+    @classmethod
+    def acceptColourPreview(cls, cubeNode):
+        """Build the cube's colour preview: three bands as R, G and B.
+
+        Each channel is the band nearest its target wavelength. All three share
+        one fixed display scale, reflectance 0 to PREVIEW_FULL_SCALE_REFLECTANCE,
+        rounded half up to 0-255, so the colours compare across channels and
+        across captures. It is a band composite, not a photograph, and it
+        changes no stored value: the cube volume is only read.
+        """
+        wavelengths = cls.cubeWavelengths(cubeNode)
+        if not wavelengths:
+            raise ValueError(_("The cube carries no wavelengths to choose preview bands from."))
+        bands = [nearestBand(wavelengths, target) for target in cls.PREVIEW_WAVELENGTHS_NM]
+        cube = slicer.util.arrayFromVolume(cubeNode)
+        channels = [
+            np.floor(np.clip(cube[band], 0.0, cls.PREVIEW_FULL_SCALE_REFLECTANCE)
+                     * (255.0 / cls.PREVIEW_FULL_SCALE_REFLECTANCE) + 0.5).astype(np.uint8)
+            for band in bands
+        ]
+        rgb = np.stack(channels, axis=-1)[np.newaxis, ...]
+
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode")
+        try:
+            node.SetSaveWithScene(False)
+            slicer.util.updateVolumeFromArray(node, rgb)
+            cls._applyLiveVolumeGeometry(node)
+            for attribute in (DATA_ORIGIN_ATTRIBUTE, RECORDED_CASE_ATTRIBUTE,
+                              SIMULATION_DETAIL_ATTRIBUTE, CAPTURE_ID_ATTRIBUTE):
+                node.SetAttribute(attribute, cubeNode.GetAttribute(attribute))
+            node.SetAttribute(cls.PREVIEW_WAVELENGTHS_ATTRIBUTE,
+                              ",".join(f"{wavelengths[band]:g}" for band in bands))
+            if node.GetDisplayNode() is None:
+                node.CreateDefaultDisplayNodes()
+            displayNode = node.GetDisplayNode()
+            if displayNode is not None:
+                displayNode.SetSaveWithScene(False)
+        except Exception:
+            cls._removeVolumeNode(node)
+            raise
+
+        cls.removeColourPreviewNode()
+        node.SetName(cls.PREVIEW_VOLUME_NAME_FORMAT.format(cube=cubeNode.GetName()))
+        node.SetAttribute(OWNER_ATTRIBUTE, cls.PREVIEW_OWNER)
+        return node
+
+    @classmethod
+    def removeColourPreviewNode(cls) -> None:
+        node = cls.colourPreviewNode()
+        if node is not None:
+            cls._removeVolumeNode(node)
+
+    # ------------------------------------------------------------------
+    # One pixel's spectrum
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def pixelSpectrum(cls, cubeNode, column: int, row: int):
+        """Return (wavelengths in nm, stored values) of one pixel of the cube.
+
+        The values are copied out of the volume exactly as stored. A pixel
+        outside the cube raises IndexError rather than wrapping around.
+        """
+        cube = slicer.util.arrayFromVolume(cubeNode)
+        _bands, lines, samples = cube.shape
+        if not (0 <= column < samples and 0 <= row < lines):
+            raise IndexError(f"Pixel ({column}, {row}) is outside a {samples} x {lines} cube.")
+        wavelengths = np.array(cls.cubeWavelengths(cubeNode), dtype=np.float64)
+        return wavelengths, np.array(cube[:, row, column], copy=True)
+
+    @classmethod
+    def _ownedNode(cls, className: str, owner: str):
+        for node in slicer.util.getNodesByClass(className):
+            if node.GetAttribute(OWNER_ATTRIBUTE) == owner:
+                return node
+        node = slicer.mrmlScene.AddNewNodeByClass(className)
+        node.SetSaveWithScene(False)
+        node.SetAttribute(OWNER_ATTRIBUTE, owner)
+        return node
+
+    @classmethod
+    def showPixelSpectrum(cls, cubeNode, column: int, row: int):
+        """Put one pixel's stored values into the module-owned plot, and return its chart."""
+        wavelengths, values = cls.pixelSpectrum(cubeNode, column, row)
+        table = vtk.vtkTable()
+        wavelengthColumn = numpy_support.numpy_to_vtk(wavelengths, deep=True)
+        wavelengthColumn.SetName(cls.SPECTRUM_WAVELENGTH_COLUMN)
+        valueColumn = numpy_support.numpy_to_vtk(values.astype(np.float32), deep=True)
+        valueColumn.SetName(cls.SPECTRUM_VALUE_COLUMN)
+        table.AddColumn(wavelengthColumn)
+        table.AddColumn(valueColumn)
+
+        tableNode = cls._ownedNode("vtkMRMLTableNode", cls.SPECTRUM_OWNER)
+        tableNode.SetAndObserveTable(table)
+        for attribute in (DATA_ORIGIN_ATTRIBUTE, RECORDED_CASE_ATTRIBUTE,
+                          SIMULATION_DETAIL_ATTRIBUTE, CAPTURE_ID_ATTRIBUTE):
+            tableNode.SetAttribute(attribute, cubeNode.GetAttribute(attribute))
+        title = cls.SPECTRUM_TITLE_FORMAT.format(
+            cube=cubeNode.GetAttribute(RECORDED_CASE_ATTRIBUTE), column=column, row=row)
+        tableNode.SetName(title)
+
+        seriesNode = cls._ownedNode("vtkMRMLPlotSeriesNode", cls.SPECTRUM_OWNER)
+        seriesNode.SetName(title)
+        seriesNode.SetAndObserveTableNodeID(tableNode.GetID())
+        seriesNode.SetXColumnName(cls.SPECTRUM_WAVELENGTH_COLUMN)
+        seriesNode.SetYColumnName(cls.SPECTRUM_VALUE_COLUMN)
+        seriesNode.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
+        seriesNode.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone)
+
+        chartNode = cls._ownedNode("vtkMRMLPlotChartNode", cls.SPECTRUM_OWNER)
+        chartNode.SetName(title)
+        if chartNode.GetPlotSeriesNodeID() != seriesNode.GetID():
+            chartNode.RemoveAllPlotSeriesNodeIDs()
+            chartNode.AddAndObservePlotSeriesNodeID(seriesNode.GetID())
+        chartNode.SetTitle(title)
+        chartNode.SetXAxisTitle(cls.SPECTRUM_WAVELENGTH_COLUMN)
+        chartNode.SetYAxisTitle(cls.SPECTRUM_VALUE_COLUMN)
+        chartNode.SetLegendVisibility(False)
+        return chartNode
+
+    @classmethod
+    def spectrumPlotViewNode(cls):
+        """The module-owned plot view the module panel's plot widget shows."""
+        return cls._ownedNode("vtkMRMLPlotViewNode", cls.SPECTRUM_OWNER)
+
+    @classmethod
+    def removeSpectrumNodes(cls) -> None:
+        """Remove the spectrum's chart, series and table; the plot view stays."""
+        for className in ("vtkMRMLPlotChartNode", "vtkMRMLPlotSeriesNode", "vtkMRMLTableNode"):
+            for node in list(slicer.util.getNodesByClass(className)):
+                if node.GetAttribute(OWNER_ATTRIBUTE) == cls.SPECTRUM_OWNER:
+                    slicer.mrmlScene.RemoveNode(node)
 
     # ------------------------------------------------------------------
     # The recorded case's own ground truth

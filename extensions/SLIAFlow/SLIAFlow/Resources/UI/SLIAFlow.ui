@@ -94,7 +94,7 @@
          <bool>false</bool>
         </property>
         <property name="toolTip">
-         <string>Freeze LiveView, save the frame, and run UC1 in the background on a recorded HSI case. The acquisition is simulated. Available while the camera runs and no capture is in progress.</string>
+         <string>Freeze LiveView, save the frame, run UC1 in the background on a recorded HSI case, and show the calibrated cube in HS Cube. The acquisition is simulated. Available while the camera runs and no capture is in progress.</string>
         </property>
         <property name="text">
          <string>Capture</string>
@@ -121,6 +121,23 @@
         </property>
        </widget>
       </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="cubeDisplayLabel">
+        <property name="text">
+         <string>HS Cube shows:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QComboBox" name="cubeDisplaySelector">
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+        <property name="toolTip">
+         <string>Bands: the calibrated cube one band at a time, with the band's wavelength on the panel; scroll the panel to change band. Colour preview: the bands nearest 650, 550 and 470 nm shown as red, green and blue, reflectance 0 to 1.0 on one fixed scale. It is a band composite, not a photograph. Click a pixel of HS Cube in either view to plot its spectrum under Pixel spectrum.</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
@@ -144,6 +161,52 @@
        <widget class="QLabel" name="resultStatusLabel">
         <property name="text">
          <string>No UC1 result yet. Press Capture.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="ctkCollapsibleButton" name="spectrumCollapsibleButton">
+     <property name="text">
+      <string>Pixel spectrum</string>
+     </property>
+     <property name="collapsed">
+      <bool>true</bool>
+     </property>
+     <layout class="QVBoxLayout" name="spectrumLayout">
+      <item>
+       <widget class="QWidget" name="spectrumPlotContainer">
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>220</height>
+         </size>
+        </property>
+        <layout class="QVBoxLayout" name="spectrumPlotLayout">
+         <property name="leftMargin">
+          <number>0</number>
+         </property>
+         <property name="topMargin">
+          <number>0</number>
+         </property>
+         <property name="rightMargin">
+          <number>0</number>
+         </property>
+         <property name="bottomMargin">
+          <number>0</number>
+         </property>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="spectrumLabel">
+        <property name="text">
+         <string>Click a pixel of HS Cube to plot its stored values.</string>
         </property>
         <property name="wordWrap">
          <bool>true</bool>

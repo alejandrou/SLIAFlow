@@ -1,12 +1,12 @@
-"""Describe and read the one cube a capture sends to UC1.
+"""Describe the one case folder a capture sends to UC1, and read its ground truth.
 
 The acquisition is simulated: each Capture stands for a hyperspectral cube, and
-the cube is the one configured folder (`SLIAFlowLogic.cubeFolder`), read where
+UC1 runs on the one configured folder (`SLIAFlowLogic.cubeFolder`), read where
 it lies under `input/`. Until SLIA-033 that folder is a recorded case of the HSI
 Human Brain Database kept as the UC1 reference (ADR-0004 decision 1). Nothing
-here writes to it. Describing the cube reads only headers and file sizes;
-`readCube` reads its pixels, so that the HS Cube panel can show the cube the
-capture stands for.
+here writes to it. Describing the case reads only headers and file sizes. The
+HS Cube panel shows IUMA's calibrated cube instead (`SLIAFlowCalibratedCube`,
+SLIA-032), so the case's own `raw.dat` pixels are read only by UC1.
 
 A case is used only when UC1 can run on it without silently reading the wrong
 thing. `main.cu` trusts the header's band count when it reads the SVM model and
@@ -33,8 +33,6 @@ UC1_MODEL_BAND_COUNT = 93
 
 # The three ENVI pairs UC1 opens, by stem.
 CASE_FILE_STEMS = ("raw", "darkReference", "whiteReference")
-# The one of them that is the acquired cube rather than a calibration reference.
-CUBE_FILE_STEM = "raw"
 # ENVI data type 12 is uint16, which is what UC1 reads.
 ENVI_DATA_TYPE_UINT16 = "12"
 BYTES_PER_SAMPLE = 2
@@ -196,27 +194,6 @@ def loadRecordedCase(folder) -> RecordedCase:
     return RecordedCase(folder.name, folder.resolve(), samples, lines, bands)
 
 
-def readCube(case) -> np.ndarray:
-    """Return a case's acquired cube as a (bands, lines, samples) uint16 array.
-
-    `loadRecordedCase` has already checked the header and the file size, but the
-    file lies outside this repository and may have changed since, so the size is
-    checked again here rather than reshaping whatever is on disk. BSQ stores one
-    whole band after another, which is already the band-major order a Slicer
-    volume wants, so the bytes are reshaped and never rearranged.
-    """
-    path = Path(case.folder) / f"{CUBE_FILE_STEM}.dat"
-    expectedBytes = case.samples * case.lines * case.bands * BYTES_PER_SAMPLE
-    actualBytes = path.stat().st_size
-    if actualBytes != expectedBytes:
-        raise IncompatibleCaseError(
-            _("{file} is {actual} bytes but the headers describe {expected}.").format(
-                file=path.name, actual=actualBytes, expected=expectedBytes))
-    # Byte order 0, checked when the case was accepted.
-    values = np.fromfile(path, dtype="<u2")
-    return values.reshape(case.bands, case.lines, case.samples)
-
-
 def _groundTruthHeaderDimensions(path: Path, case) -> tuple[int, int]:
     """Check gtMap.hdr against the case, and return its (lines, samples).
 
@@ -301,8 +278,8 @@ def readGroundTruth(case) -> np.ndarray:
 def assertCaseUnchanged(case: RecordedCase) -> None:
     """Re-read the case folder and refuse the run if it no longer matches.
 
-    The cube is described when Capture is pressed, and its pixels are read for
-    the HS Cube panel before the run starts. The folder lies outside the
+    The case is described when Capture is pressed, and the run starts after
+    that. The folder lies outside the
     repository and nothing here owns it, so it can be edited, truncated or
     copied over in between, and UC1 reads the sizes from the headers without
     checking what it got. Re-reading the folder immediately before the run is

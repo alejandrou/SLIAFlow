@@ -9,12 +9,14 @@ from slicer.i18n import tr as _
 from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
+from .SLIAFlowCalibratedCube import CalibratedCubeError
 from .SLIAFlowCube import IncompatibleCaseError
 from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
     CAPTURE_ID_ATTRIBUTE,
     DEFAULT_RESULT_OUTPUT,
     GROUND_TRUTH_VIEW_NAME,
+    RECORDED_CASE_ATTRIBUTE,
     RESULT_VIEW_NAMES,
     SLIAFlowParameterNode,
 )
@@ -156,6 +158,31 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # The label layer is drawn over the result, so it is half transparent: both
     # the labelled class and the classification under it stay readable.
     GROUND_TRUTH_LABEL_OPACITY = 0.5
+
+    # SLIA-032: what HS Cube shows, and the captions that say which cube each
+    # panel shows. View text names the input only (owner rule, 2026-09-18).
+    CUBE_DISPLAY_BANDS = 0
+    CUBE_DISPLAY_PREVIEW = 1
+    CUBE_DISPLAY_ENTRIES = (_("Bands"), _("Colour preview"))
+    CUBE_CAPTION = _("Recorded cube {cube}, calibrated reflectance")
+    BAND_CAPTION = _("Band {band} of {bands} - {wavelength:g} nm")
+    BAND_OUTSIDE_CAPTION = _("Between bands: scroll to a band of the cube")
+    PREVIEW_CAPTION = _(
+        "R {red:g} nm, G {green:g} nm, B {blue:g} nm - band composite, not a photograph"
+    )
+    RESULT_CAPTION = _("Result for recorded case {case}")
+    CUBE_UNREADABLE_MESSAGE = _("The hyperspectral cube could not be shown.\n{reason}")
+    CAPTION_FONT_SIZE = 13
+    # Top of HS Cube; bottom of Tumour Delineation, whose top carries the stale line.
+    CAPTION_POSITIONS = {CUBE_VIEW_NAME: (0.5, 0.97), RESULT_VIEW_NAME: (0.5, 0.03)}
+    SPECTRUM_PROMPT = _("Click a pixel of HS Cube to plot its stored values.")
+    SPECTRUM_LABEL = _(
+        "Pixel column {column}, row {row} of recorded cube {cube}: stored values, "
+        "not an analysis."
+    )
+    SPECTRUM_OUTSIDE_LABEL = _(
+        "That click was outside the cube. Click a pixel of HS Cube to plot its stored values."
+    )
     CUSTOM_LAYOUT_DESCRIPTION = _layoutDescription(VIEW_ROWS)
 
     def __init__(self, parent=None) -> None:
@@ -196,6 +223,17 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # last framed for.
         self._cubeCaptureId: str | None = None
         self._fittedCubeCaptureId: str | None = None
+        # Why the last Capture's cube could not be shown, for the HS Cube panel.
+        self._cubeError: str | None = None
+        self._cubeDisplay = self.CUBE_DISPLAY_BANDS
+        # Captions naming what a panel shows, one actor per view.
+        self._panelCaptionActors: dict[str, Any] = {}
+        self._panelCaptionRenderers: dict[str, Any] = {}
+        self._panelCaptions: dict[str, str] = {}
+        # The HS Cube slice node and interactor observed while presenting.
+        self._observedCubeSliceNode = None
+        self._observedCubeInteractor = None
+        self._spectrumPlotWidget = None
         self._resultStale = False
         # True only while connectGui refills the output combo box.
         self._bindingResultSelector = False
@@ -232,12 +270,25 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.resultOutputSelector.connect(
             "currentIndexChanged(int)", self._onResultOutputChanged
         )
+        for entry in self.CUBE_DISPLAY_ENTRIES:
+            self.ui.cubeDisplaySelector.addItem(entry)
+        self.ui.cubeDisplaySelector.connect(
+            "currentIndexChanged(int)", self._onCubeDisplayChanged
+        )
+        self._spectrumPlotWidget = slicer.qMRMLPlotWidget()
+        self._spectrumPlotWidget.setMRMLScene(slicer.mrmlScene)
+        self.ui.spectrumPlotContainer.layout().addWidget(self._spectrumPlotWidget)
+        self.ui.spectrumLabel.setText(self.SPECTRUM_PROMPT)
         # Module cleanup is not guaranteed to run before the process exits, and
         # a UC1 process left behind would hold the build lock.
         slicer.app.connect("aboutToQuit()", self._cancelCapture)
         self.initializeParameterNode()
         self._setCameraSupportState(self.logic.openCVAvailable())
         self._updateResultStatus()
+        # Reload sets up a new widget but does not enter it, although the
+        # module is still the selected one (slicer.util.reloadScriptedModule).
+        if getattr(self.parent, "isEntered", False):
+            self.enter()
 
     def cleanup(self) -> None:
         try:
@@ -313,9 +364,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._showResult()
 
     def _configureResultControls(self) -> None:
-        selector = getattr(getattr(self, "ui", None), "resultOutputSelector", None)
-        if selector is not None:
-            selector.setEnabled(self._presentationActive)
+        for name in ("resultOutputSelector", "cubeDisplaySelector"):
+            selector = getattr(getattr(self, "ui", None), name, None)
+            if selector is not None:
+                selector.setEnabled(self._presentationActive)
         self._refreshCameraControls()
 
     # ------------------------------------------------------------------
@@ -523,13 +575,19 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._failCapture(_("The capture snapshot could not be saved: {error}").format(error=error))
             return
 
+        self._startUc1()
+        # UC1 runs in its own process, so the cube is read while it runs. The
+        # cube does not need UC1: it is shown whether or not the run started.
+        self._showCapturedCube()
+
+    def _startUc1(self) -> None:
+        """Start UC1 on the configured case folder, or end the capture saying why."""
         try:
             case = self.logic.loadConfiguredCube()
         except (IncompatibleCaseError, Uc1RunError, OSError) as error:
             self._failCapture(str(error))
             return
         self._captureCaseName = case.name
-        self._showCapturedCube(case)
         logging.info(
             "SLIAFlow: capture %s uses recorded case %s; snapshot %s",
             self._captureId, case.name, self._captureSnapshotName,
@@ -540,28 +598,34 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except (Uc1RunError, OSError) as error:
             self._failCapture(str(error))
 
-    def _showCapturedCube(self, case) -> None:
-        """Show the recorded cube this capture stands for.
+    def _showCapturedCube(self) -> None:
+        """Show the calibrated cube this capture stands for (SLIA-032).
 
-        The cube is the input of the run, so it is shown as soon as the case is
-        described rather than with the result. Reading it is not what the capture
-        is for: if the cube cannot be read, the panel says it is still waiting
-        and UC1 runs on the case regardless.
+        Until SLIA-033 this is not the cube UC1 runs on, which is why both
+        panels name theirs. Reading it is not what UC1 needs: if the cube cannot
+        be read, HS Cube says why and the capture goes on.
         """
         if self.logic is None:
             return
         try:
-            self.logic.acceptCube(case, self._captureId)
+            cube = self.logic.loadConfiguredCalibratedCube()
+            self.logic.acceptCube(cube, self._captureId)
+            self._cubeError = None
             self._cubeCaptureId = self._captureId
+            self._resetSpectrumLabel()
             self._showCube()
         except Exception as error:
             # Reading and drawing the cube are both only for the panel, so
             # neither may reach the caller and end the capture.
             logging.exception(
-                "SLIAFlow: the cube of recorded case %s could not be shown: %s",
-                case.name, error,
+                "SLIAFlow: the calibrated cube %s could not be shown: %s",
+                self.logic.calibratedCubeHeader, error,
             )
             self._forgetCube()
+            self._cubeError = (
+                str(error) if isinstance(error, CalibratedCubeError)
+                else _("It could not be read: {error}").format(error=error)
+            )
             self._showCube()
 
     def _showGroundTruth(self, case) -> None:
@@ -589,9 +653,45 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.logic.removeCubeNode()
         self._cubeCaptureId = None
         self._fittedCubeCaptureId = None
+        self._cubeError = None
+        self._resetSpectrumLabel()
+        self._removePanelCaption(self.CUBE_VIEW_NAME)
+
+    def _resetSpectrumLabel(self) -> None:
+        label = getattr(getattr(self, "ui", None), "spectrumLabel", None)
+        if label is not None:
+            label.setText(self.SPECTRUM_PROMPT)
+
+    def _onCubeDisplayChanged(self, index=None) -> None:
+        selector = getattr(getattr(self, "ui", None), "cubeDisplaySelector", None)
+        if selector is None:
+            return
+        self._cubeDisplay = (self.CUBE_DISPLAY_PREVIEW
+                             if selector.currentIndex == self.CUBE_DISPLAY_PREVIEW
+                             else self.CUBE_DISPLAY_BANDS)
+        self._showCube()
+
+    def _cubeDisplayNode(self, cubeNode):
+        """The volume HS Cube shows for the chosen display: the cube or its preview.
+
+        The preview is built from the cube on screen the first time it is asked
+        for, and again for every new cube. If it cannot be built, the bands are
+        shown rather than nothing.
+        """
+        if self._cubeDisplay != self.CUBE_DISPLAY_PREVIEW or self.logic is None:
+            return cubeNode
+        preview = self.logic.colourPreviewNode()
+        if (preview is None or preview.GetAttribute(CAPTURE_ID_ATTRIBUTE)
+                != cubeNode.GetAttribute(CAPTURE_ID_ATTRIBUTE)):
+            try:
+                preview = self.logic.acceptColourPreview(cubeNode)
+            except Exception:
+                logging.exception("SLIAFlow: the colour preview could not be built")
+                return cubeNode
+        return preview
 
     def _showCube(self, layoutManager=None) -> None:
-        """Bind the recorded cube to HS Cube, or say the panel is still waiting."""
+        """Bind the cube or its preview to HS Cube, or say why the panel is empty."""
         if not self._presentationActive:
             return
         cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME, layoutManager)
@@ -603,22 +703,26 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             composite = sliceLogic.GetSliceCompositeNode()
             if node is None:
                 self._clearSliceLayers(cubeWidget)
+                self._removePanelCaption(self.CUBE_VIEW_NAME)
                 self._showPanelMessage(
                     self.CUBE_VIEW_NAME,
-                    self.RESERVED_PANEL_REASONS[self.CUBE_VIEW_NAME],
+                    self.CUBE_UNREADABLE_MESSAGE.format(reason=self._cubeError)
+                    if self._cubeError else self.RESERVED_PANEL_REASONS[self.CUBE_VIEW_NAME],
                     layoutManager,
                 )
             else:
                 self._removePanelMessage(self.CUBE_VIEW_NAME)
-                # Recorded cases differ in size, so every cube is framed for its
-                # own; a redraw of the same cube keeps the operator's framing and
-                # the band they scrolled to.
-                if (composite.GetBackgroundVolumeID() != node.GetID()
+                shown = self._cubeDisplayNode(node)
+                # Every new cube, and every switch between the bands and the
+                # preview, is framed for its own; a redraw of the same volume
+                # keeps the operator's framing and the band they scrolled to.
+                if (composite.GetBackgroundVolumeID() != shown.GetID()
                         or self._fittedCubeCaptureId != self._cubeCaptureId):
-                    composite.SetBackgroundVolumeID(node.GetID())
+                    composite.SetBackgroundVolumeID(shown.GetID())
                     sliceLogic.FitSliceToBackground()
                     self._fittedCubeCaptureId = self._cubeCaptureId
-                    self._showMiddleBand(sliceLogic, node)
+                    if shown is node:
+                        self._showMiddleBand(sliceLogic, node)
                 composite.SetForegroundVolumeID(None)
                 # The cube is shown alone. The ground truth is a labelling of
                 # the image the outputs classify, not of the spectrum, and it
@@ -627,11 +731,107 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 # label map placed in that stack is off the plane the operator
                 # is scrolling.
                 composite.SetLabelVolumeID(None)
+                self._updateCubeCaption(layoutManager)
             cubeView = cubeWidget.sliceView()
             if cubeView is not None:
                 cubeView.forceRender()
         except RuntimeError:
             return
+
+    def _updateCubeCaption(self, layoutManager=None) -> None:
+        """Name the cube on HS Cube, with the band on screen or the preview's bands."""
+        node = self.logic.cubeNode() if self.logic is not None else None
+        cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME, layoutManager)
+        if not self._presentationActive or node is None or cubeWidget is None:
+            self._removePanelCaption(self.CUBE_VIEW_NAME)
+            return
+        composite = cubeWidget.sliceLogic().GetSliceCompositeNode()
+        preview = self.logic.colourPreviewNode()
+        lines = [self.CUBE_CAPTION.format(cube=node.GetAttribute(RECORDED_CASE_ATTRIBUTE))]
+        if preview is not None and composite.GetBackgroundVolumeID() == preview.GetID():
+            red, green, blue = self.logic.previewWavelengths(preview)
+            lines.append(self.PREVIEW_CAPTION.format(red=red, green=green, blue=blue))
+        else:
+            sliceToRas = cubeWidget.mrmlSliceNode().GetSliceToRAS()
+            centre = [sliceToRas.GetElement(row, 3) for row in range(3)]
+            band = self.logic.cubeBandAt(node, centre)
+            wavelengths = self.logic.cubeWavelengths(node)
+            if band is None or band >= len(wavelengths):
+                lines.append(self.BAND_OUTSIDE_CAPTION)
+            else:
+                lines.append(self.BAND_CAPTION.format(
+                    band=band + 1, bands=len(wavelengths), wavelength=wavelengths[band]))
+        self._showPanelCaption(self.CUBE_VIEW_NAME, "\n".join(lines), layoutManager)
+
+    def _onCubeSliceModified(self, caller=None, event=None) -> None:
+        self._updateCubeCaption()
+
+    # ------------------------------------------------------------------
+    # Pixel spectrum (SLIA-032)
+    # ------------------------------------------------------------------
+
+    def _onCubeViewPressed(self, caller=None, event=None) -> None:
+        """A left press on HS Cube plots the pixel under it. The press is not consumed."""
+        cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME)
+        if caller is None or cubeWidget is None or self.logic is None:
+            return
+        if self.logic.cubeNode() is None:
+            return
+        try:
+            x, y = caller.GetEventPosition()
+            xyz = cubeWidget.sliceView().convertDeviceToXYZ([x, y])
+            self._pickCubePixelAtXYZ(list(xyz))
+        except Exception:
+            # A plot that cannot be drawn must not break the view's own interaction.
+            logging.exception("SLIAFlow: the clicked pixel's spectrum could not be shown")
+
+    def _pickCubePixelAtXYZ(self, xyz) -> None:
+        """Plot the stored spectrum of the cube pixel drawn at slice-view XY `xyz`."""
+        cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME)
+        node = self.logic.cubeNode() if self.logic is not None else None
+        if cubeWidget is None or node is None:
+            return
+        # As the Data Probe does: the background layer maps view XY to the IJK
+        # of the volume it draws. The preview shares the cube's columns and rows.
+        xyToIjk = cubeWidget.sliceLogic().GetBackgroundLayer().GetXYToIJKTransform()
+        ijk = xyToIjk.TransformDoublePoint(list(xyz)[:3])
+        column, row = int(round(ijk[0])), int(round(ijk[1]))
+        try:
+            chart = self.logic.showPixelSpectrum(node, column, row)
+        except IndexError:
+            self.ui.spectrumLabel.setText(self.SPECTRUM_OUTSIDE_LABEL)
+            return
+        viewNode = self.logic.spectrumPlotViewNode()
+        viewNode.SetPlotChartNodeID(chart.GetID())
+        if self._spectrumPlotWidget is not None:
+            if self._spectrumPlotWidget.mrmlPlotViewNode() is not viewNode:
+                self._spectrumPlotWidget.setMRMLPlotViewNode(viewNode)
+        self.ui.spectrumCollapsibleButton.collapsed = False
+        self.ui.spectrumLabel.setText(self.SPECTRUM_LABEL.format(
+            column=column, row=row, cube=node.GetAttribute(RECORDED_CASE_ATTRIBUTE)))
+
+    def _observeCubeView(self, layoutManager=None) -> None:
+        """Follow HS Cube's slice (for the band caption) and its clicks (for the spectrum)."""
+        self._stopObservingCubeView()
+        cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME, layoutManager)
+        if cubeWidget is None:
+            return
+        sliceNode = cubeWidget.mrmlSliceNode()
+        self.addObserver(sliceNode, vtk.vtkCommand.ModifiedEvent, self._onCubeSliceModified)
+        self._observedCubeSliceNode = sliceNode
+        interactor = cubeWidget.sliceView().interactorStyle().GetInteractor()
+        self.addObserver(interactor, vtk.vtkCommand.LeftButtonPressEvent, self._onCubeViewPressed)
+        self._observedCubeInteractor = interactor
+
+    def _stopObservingCubeView(self) -> None:
+        if self._observedCubeSliceNode is not None:
+            self.removeObserver(self._observedCubeSliceNode, vtk.vtkCommand.ModifiedEvent,
+                                self._onCubeSliceModified)
+            self._observedCubeSliceNode = None
+        if self._observedCubeInteractor is not None:
+            self.removeObserver(self._observedCubeInteractor, vtk.vtkCommand.LeftButtonPressEvent,
+                                self._onCubeViewPressed)
+            self._observedCubeInteractor = None
 
     @staticmethod
     def _showMiddleBand(sliceLogic, node) -> None:
@@ -769,6 +969,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._fittedCaptureId = None
         self._resultStale = False
         self._removeStaleLine()
+        self._removePanelCaption(self.RESULT_VIEW_NAME)
         if hasattr(self, "ui"):
             self._updateResultStatus()
 
@@ -826,9 +1027,17 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             composite = sliceLogic.GetSliceCompositeNode()
             if node is None:
                 self._clearSliceLayers(resultWidget)
+                self._removePanelCaption(self.RESULT_VIEW_NAME)
                 self._showWaitingAnnotation(resultWidget)
             else:
                 self._removeWaitingAnnotation()
+                # Until SLIA-033 the result is not from the cube HS Cube shows,
+                # so the panel names its own.
+                self._showPanelCaption(
+                    self.RESULT_VIEW_NAME,
+                    self.RESULT_CAPTION.format(case=self._resultCaseName),
+                    layoutManager,
+                )
                 boundBefore = composite.GetBackgroundVolumeID()
                 composite.SetBackgroundVolumeID(node.GetID())
                 # Recorded cases differ in size, so every new result is framed
@@ -987,6 +1196,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._updateResultStatus()
         self._showResult(layoutManager)
         self._showCube(layoutManager)
+        self._observeCubeView(layoutManager)
         return True
 
     @staticmethod
@@ -1118,9 +1328,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not self._isRestorableLayout(previousLayout):
             previousLayout = None
 
+        self._stopObservingCubeView()
         self._removeWaitingAnnotation()
         self._removeStaleLine()
         self._removeAllPanelMessages()
+        self._removeAllPanelCaptions()
         if layoutManager is not None:
             layoutNode = layoutManager.layoutLogic().GetLayoutNode()
             if int(layoutNode.GetViewArrangement()) == self.CUSTOM_LAYOUT_ID:
@@ -1206,3 +1418,61 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for viewName in list(self._panelAnnotationActors):
             self._removePanelMessage(viewName)
         self._panelMessages.clear()
+
+    def panelCaption(self, viewName: str) -> str:
+        """The caption naming what this panel shows, or an empty string."""
+        return self._panelCaptions.get(viewName, "")
+
+    def _showPanelCaption(self, viewName: str, caption: str, layoutManager=None) -> bool:
+        """Write the line that names what a panel shows. Returns whether it reached a renderer."""
+        self._panelCaptions[viewName] = caption
+        actor = self._panelCaptionActors.get(viewName)
+        if actor is None:
+            actor = vtk.vtkTextActor()
+            actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+            x, y = self.CAPTION_POSITIONS.get(viewName, (0.5, 0.97))
+            actor.SetPosition(x, y)
+            textProperty = actor.GetTextProperty()
+            textProperty.SetFontSize(self.CAPTION_FONT_SIZE)
+            textProperty.SetColor(1.0, 1.0, 1.0)
+            # A dark band behind the text keeps it legible over a bright band.
+            textProperty.SetBackgroundColor(0.0, 0.0, 0.0)
+            textProperty.SetBackgroundOpacity(0.6)
+            textProperty.SetJustificationToCentered()
+            if y > 0.5:
+                textProperty.SetVerticalJustificationToTop()
+            else:
+                textProperty.SetVerticalJustificationToBottom()
+            self._panelCaptionActors[viewName] = actor
+        if actor.GetInput() != caption:
+            actor.SetInput(caption)
+        sliceWidget = self._sliceWidgetOrNone(viewName, layoutManager)
+        if sliceWidget is None:
+            return False
+        placed = self._placeAnnotationActor(
+            self._sliceViewRenderer(sliceWidget), actor,
+            self._panelCaptionRenderers.get(viewName),
+        )
+        if placed is None:
+            return False
+        self._panelCaptionRenderers[viewName] = placed
+        sliceView = sliceWidget.sliceView()
+        if sliceView is not None:
+            sliceView.scheduleRender()
+        return True
+
+    def _removePanelCaption(self, viewName: str) -> None:
+        self._panelCaptions.pop(viewName, None)
+        actor = self._panelCaptionActors.pop(viewName, None)
+        renderer = self._panelCaptionRenderers.pop(viewName, None)
+        if actor is None or renderer is None:
+            return
+        try:
+            renderer.RemoveActor2D(actor)
+        except (RuntimeError, ValueError):
+            pass
+
+    def _removeAllPanelCaptions(self) -> None:
+        for viewName in list(self._panelCaptionActors):
+            self._removePanelCaption(viewName)
+        self._panelCaptions.clear()

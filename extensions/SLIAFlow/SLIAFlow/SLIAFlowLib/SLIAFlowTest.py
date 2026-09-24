@@ -551,6 +551,39 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             if int(layoutNode.GetViewArrangement()) != previousLayout:
                 layoutManager.setLayout(previousLayout)
 
+    def test_reloadWhileSelectedKeepsThePresentation(self) -> None:
+        """Reload with SLIAFlow selected leaves the six-panel presentation on.
+
+        Slicer's Reload calls cleanup() on the old widget and setup() on the
+        new one, but not enter(), although the module stays entered
+        (`slicer.util.reloadScriptedModule`). The developer workflow reloads
+        with the module selected, so the new widget has to take over.
+        """
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None or slicer.util.mainWindow() is None:
+            self.skipTest("Requires the maintained headful Slicer test target")
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        previousModule = slicer.util.selectedModule() or "Data"
+        previousLayout = int(layoutNode.GetViewArrangement())
+        try:
+            slicer.util.selectModule("SLIAFlow")
+            widget = self._moduleRepresentationAndWidget()[1]
+            self.assertTrue(widget._presentationActive)
+
+            slicer.util.reloadScriptedModule("SLIAFlow")
+            representation, reloaded = self._moduleRepresentationAndWidget()
+            self.assertIsNot(reloaded, widget)
+            self.assertTrue(representation.isEntered)
+            self.assertFalse(widget._presentationActive)
+            self.assertTrue(reloaded._presentationActive,
+                            "The reloaded widget left the presentation off")
+            self.assertEqual(int(layoutNode.GetViewArrangement()), reloaded.CUSTOM_LAYOUT_ID)
+        finally:
+            slicer.util.selectModule(previousModule)
+            if previousModule != "SLIAFlow" and \
+                    int(layoutNode.GetViewArrangement()) != previousLayout:
+                layoutManager.setLayout(previousLayout)
+
     def test_layoutRestoreIgnoresTransientEmptyLayout(self) -> None:
         widget = self._moduleRepresentationAndWidget()[1]
         layoutManager = slicer.app.layoutManager()
@@ -762,9 +795,11 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             interactive.extend(slicer.util.findChildren(operatorSection, className=className))
         # SLIA-027: Start, Stop, Capture and the five-output selector. The
         # links, demo mode, layers and band browser are gone (ADR-0003).
+        # SLIA-032: what the HS Cube panel shows, bands or the colour preview.
         self.assertEqual(
             sorted(control.objectName for control in interactive),
-            sorted(("startButton", "stopButton", "captureButton", "resultOutputSelector")),
+            sorted(("startButton", "stopButton", "captureButton", "resultOutputSelector",
+                    "cubeDisplaySelector")),
         )
         for control in interactive:
             with self.subTest(control=control.objectName):
@@ -894,6 +929,63 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             (folder / "gtMap").write_bytes(labels.tobytes())
         return folder
 
+    # The calibrated LCTF cube (SLIA-032). The layout, names and wavelength grid
+    # are those of IUMA's LCTF_Calibrated_Cube_Single.hdr in input/002-04: ENVI
+    # data type 4, bsq, byte order 0, 460-1000 nm in 5 nm steps.
+    CALIBRATED_CUBE_NAME = "002-04"
+    CALIBRATED_CUBE_STEM = "LCTF_Calibrated_Cube_Single"
+    LCTF_WAVELENGTHS_NM = tuple(range(460, 1001, 5))
+    # ADR-0004 decision 7, in the wording the SLIA-032 card fixes.
+    CALIBRATED_DETAIL = (
+        "recorded IUMA LCTF capture 002-04, calibrated by IUMA (simulated acquisition)"
+    )
+    # The SLIA-032 card: the bands nearest 650, 550 and 470 nm, as R, G and B,
+    # on one fixed scale where reflectance 1.0 is full brightness.
+    PREVIEW_WAVELENGTHS_NM = (650, 550, 470)
+
+    def _writeFixtureCalibratedCube(self, folder: Path, *, samples=4, lines=3,
+                                    wavelengths=LCTF_WAVELENGTHS_NM, bands=None, dataType=4,
+                                    interleave="bsq", byteOrder=0, headerOffset=0,
+                                    units="Nanometers", dataBytes=None, dataSuffix=".dat"):
+        """Write a placeholder float32 cube laid out like IUMA's calibrated cube.
+
+        Returns the header path and the values written, as (bands, lines,
+        samples) float32. Every voxel differs, and some exceed 1.0, as the real
+        cube's clipped [0, 1.5] range does. The values stand for no imagery.
+        """
+        folder.mkdir(parents=True, exist_ok=True)
+        if bands is None:
+            bands = len(self.LCTF_WAVELENGTHS_NM) if wavelengths is None else len(wavelengths)
+        entries = [
+            "ENVI",
+            f"bands = {bands}",
+            f"data type = {dataType}",
+            f"interleave = {interleave}",
+            f"header offset = {headerOffset}",
+        ]
+        if units is not None:
+            entries.append(f"wavelength units = {units}")
+        entries.append(f"byte order = {byteOrder}")
+        if wavelengths is not None:
+            # Six values to a line and the brace closed on the last one, as the
+            # real header writes it.
+            rows = [", ".join(f"{value:>4}" for value in wavelengths[index:index + 6])
+                    for index in range(0, len(wavelengths), 6)]
+            entries.append("wavelength = {" + ", \n".join(rows) + "}")
+        entries += [f"lines = {lines}", f"samples = {samples}"]
+        header = folder / f"{self.CALIBRATED_CUBE_STEM}.hdr"
+        header.write_text("\n".join(entries) + "\n", encoding="ascii")
+
+        count = bands * lines * samples
+        values = ((np.arange(count, dtype=np.int64) % 97) / 64.0).astype(np.float32)
+        values = values.reshape(bands, lines, samples)
+        if dataSuffix is not None:
+            data = values.astype("<f4").tobytes()
+            if dataBytes is not None:
+                data = (data + b"\0" * dataBytes)[:dataBytes]
+            (folder / f"{self.CALIBRATED_CUBE_STEM}{dataSuffix}").write_bytes(data)
+        return header, values
+
     def _makeFixtureRepository(self, root: Path, caseNames=("004-02",), **caseOptions) -> dict:
         """A repository-shaped placeholder tree: markers, input cases, staged build."""
         (root / "AGENTS.md").write_text("test fixture\n", encoding="ascii")
@@ -902,6 +994,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         inputRoot.mkdir(parents=True)
         for name in caseNames:
             self._writeFixtureCase(inputRoot, name, **caseOptions)
+        calibratedHeader, calibratedValues = self._writeFixtureCalibratedCube(
+            root / "input" / self.CALIBRATED_CUBE_NAME)
         buildRoot = root / "build" / "uc1" / "UC1"
         source = buildRoot / "gpu_single_bsq" / "source"
         (source / "output" / "rgb").mkdir(parents=True)
@@ -918,6 +1012,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             "executable": source / "stratum.opt.intermediate.exe",
             "lock": buildRoot / ".uc1-runner.lock",
             "captures": root / "workspace" / "captures",
+            "calibratedHeader": calibratedHeader,
+            "calibratedValues": calibratedValues,
         }
 
     @staticmethod
@@ -1299,16 +1395,23 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 for path in root.rglob("*")
             )
 
+        calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
         with self._fixtureDirectory() as root:
             folder = self._writeFixtureCase(root, "004-02")
             broken = self._writeFixtureCase(root, "broken", dataBytes=3)
+            calibratedHeader, _values = self._writeFixtureCalibratedCube(root / "002-04")
+            brokenCalibrated, _values = self._writeFixtureCalibratedCube(
+                root / "broken-calibrated", dataBytes=5)
             before = snapshot(root)
             case = cubeModule.loadRecordedCase(folder)
-            cubeModule.readCube(case)
             cubeModule.readGroundTruth(case)
             cubeModule.assertCaseUnchanged(case)
             with self.assertRaises(cubeModule.IncompatibleCaseError):
                 cubeModule.loadRecordedCase(broken)
+            calibrated = calibratedModule.loadCalibratedCube(calibratedHeader)
+            calibratedModule.readCalibratedCube(calibrated)
+            with self.assertRaises(calibratedModule.CalibratedCubeError):
+                calibratedModule.loadCalibratedCube(brokenCalibrated)
             self.assertEqual(snapshot(root), before)
 
     def test_moduleHasNoCasePool(self) -> None:
@@ -1396,21 +1499,27 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             return marker + text
 
         cubeModule = self._helperModule("SLIAFlowCube")
-        tree = ast.parse(Path(cubeModule.__file__).read_text(encoding="utf-8"))
-        raises, untranslated = 0, []
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
-                    and getattr(node.exc.func, "id", None) == "IncompatibleCaseError"):
-                continue
-            raises += 1
-            message = node.exc.args[0] if node.exc.args else None
-            if (isinstance(message, ast.Call) and isinstance(message.func, ast.Attribute)
-                    and message.func.attr == "format"):
-                message = message.func.value
-            if not (isinstance(message, ast.Call) and getattr(message.func, "id", None) == "_"):
-                untranslated.append(node.lineno)
-        self.assertGreater(raises, 0)
-        self.assertEqual(untranslated, [], "Refusals raised without _() at these lines")
+        calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
+        for module, errorName in ((cubeModule, "IncompatibleCaseError"),
+                                  (calibratedModule, "CalibratedCubeError")):
+            with self.subTest(module=module.__name__):
+                tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+                raises, untranslated = 0, []
+                for node in ast.walk(tree):
+                    if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                            and getattr(node.exc.func, "id", None) == errorName):
+                        continue
+                    raises += 1
+                    message = node.exc.args[0] if node.exc.args else None
+                    if (isinstance(message, ast.Call) and isinstance(message.func, ast.Attribute)
+                            and message.func.attr == "format"):
+                        message = message.func.value
+                    if not (isinstance(message, ast.Call)
+                            and getattr(message.func, "id", None) == "_"):
+                        untranslated.append(node.lineno)
+                self.assertGreater(raises, 0)
+                self.assertEqual(untranslated, [],
+                                 "Refusals raised without _() at these lines")
 
         messages = {}
         with mock.patch.object(slicer.i18n, "translate", translate), \
@@ -1432,13 +1541,18 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
                 cubeModule.assertCaseUnchanged(case)
             messages["changed on disk"] = str(raised.exception)
-            with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
-                cubeModule.readCube(case)
-            messages["cube resized"] = str(raised.exception)
             (folder / "gtMap").unlink()
             with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
                 cubeModule.readGroundTruth(cubeModule.loadRecordedCase(folder))
             messages["ground truth missing"] = str(raised.exception)
+
+            for name, options in (("calibrated uint16", dict(dataType=12)),
+                                  ("calibrated short", dict(dataBytes=10)),
+                                  ("calibrated no wavelengths", dict(wavelengths=None, bands=109))):
+                header, _values = self._writeFixtureCalibratedCube(root / name, **options)
+                with self.assertRaises(calibratedModule.CalibratedCubeError) as raised:
+                    calibratedModule.loadCalibratedCube(header)
+                messages[name] = str(raised.exception)
 
         for label, message in messages.items():
             with self.subTest(refusal=label):
@@ -1914,6 +2028,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 widget._cancelCapture()
                 widget._stopCamera(clearLiveView=True)
                 widget.logic.removeOutputNodes()
+                widget._forgetCube()
                 widget.logic.cubeFolder = None
                 widget.logic.setRunEnvironment(repositoryRoot=None, processFactory=None)
 
@@ -2597,11 +2712,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                                  "A displayed volume is named after the module")
 
     def test_capturedCubeIsShownBandByBand(self) -> None:
-        """The HS Cube panel shows the cube the capture stands for.
+        """The HS Cube panel shows the calibrated cube the capture stands for.
 
-        The recorded case is the cube the simulated acquisition represents, so
-        it is displayed as the run's input, with the run's own provenance. Its
-        third axis is the band, which is what makes the panel scrollable.
+        SLIA-032: it is IUMA's calibrated float32 cube, shown with its stored
+        values unchanged, while UC1 still runs on the reference case folder
+        until SLIA-033. Its third axis is the band, which is what makes the
+        panel scrollable, and it carries ADR-0004 decision 7 provenance.
         """
         with self._captureSession() as session:
             widget = session["widget"]
@@ -2609,18 +2725,31 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self._showFrame(session, 30)
             widget._onCaptureClicked()
             case = widget.logic.currentRun.case
+            self.assertEqual(case.folder, session["cube"].resolve(),
+                             "UC1 left the reference case before SLIA-033")
             try:
                 node = widget.logic.cubeNode()
                 self.assertIsNotNone(node, "No cube reached the scene")
                 captureId = node.GetAttribute("SLIAFlow.CaptureId")
-                self.assertEqual(node.GetName(), "raw.dat")
+                self.assertTrue(captureId)
+                self.assertEqual(node.GetName(), f"{self.CALIBRATED_CUBE_STEM}.dat")
                 array = np.array(slicer.util.arrayFromVolume(node))
-                self.assertEqual(array.shape, (case.bands, case.lines, case.samples),
+                expected = session["calibratedValues"]
+                self.assertEqual(array.shape, expected.shape,
                                  "The cube's third axis is not the band")
-                self.assertEqual(array.dtype, np.uint16)
+                self.assertEqual(array.dtype, np.float32, "The stored float32 was converted")
+                np.testing.assert_array_equal(array, expected)
                 self.assertEqual(self._ijkToRasDirections(node), self.UPRIGHT_LIVE_DIRECTIONS)
-                self.assertEqual(node.GetAttribute("SLIAFlow.RecordedCase"), case.name)
+                self.assertEqual(node.GetAttribute("SLIAFlow.RecordedCase"),
+                                 self.CALIBRATED_CUBE_NAME)
                 self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "simulated")
+                self.assertEqual(node.GetAttribute("SLIAFlow.SimulationDetail"),
+                                 self.CALIBRATED_DETAIL)
+                self.assertEqual(
+                    tuple(float(value) for value in
+                          node.GetAttribute("SLIAFlow.WavelengthsNm").split(",")),
+                    tuple(float(value) for value in self.LCTF_WAVELENGTHS_NM),
+                )
                 self._finishCapture(session, seed=7)
                 # The cube belongs to the capture the result belongs to.
                 self.assertEqual(
@@ -2928,3 +3057,323 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 widget._deactivatePresentation(restore=True)
                 if int(layoutNode.GetViewArrangement()) != previousLayout:
                     layoutManager.setLayout(previousLayout)
+
+    # ----------------------------------------------------------------------
+    # SLIA-032: the calibrated LCTF cube - bands, colour preview, pixel spectrum
+    #
+    # Every cube below is a placeholder fixture laid out like IUMA's calibrated
+    # cube, written to a temporary directory. No test reads input/002-04.
+    # ----------------------------------------------------------------------
+
+    def test_calibratedCubeIsReadWithItsValuesUnchanged(self) -> None:
+        """The reader hands back the stored float32 values and the header's wavelengths."""
+        module = self._helperModule("SLIAFlowCalibratedCube")
+        with self._fixtureDirectory() as root:
+            header, values = self._writeFixtureCalibratedCube(root / self.CALIBRATED_CUBE_NAME)
+            cube = module.loadCalibratedCube(header)
+            self.assertEqual((cube.name, cube.samples, cube.lines, cube.bands),
+                             (self.CALIBRATED_CUBE_NAME, 4, 3, len(self.LCTF_WAVELENGTHS_NM)))
+            self.assertEqual(tuple(cube.wavelengths),
+                             tuple(float(value) for value in self.LCTF_WAVELENGTHS_NM))
+
+            array = module.readCalibratedCube(cube)
+            self.assertEqual(array.dtype, np.float32)
+            self.assertEqual(array.shape, values.shape)
+            np.testing.assert_array_equal(array, values)
+
+            # Read into a buffer the caller owns, as the volume's own is.
+            buffer = np.zeros(values.shape, dtype=np.float32)
+            self.assertIs(module.readCalibratedCube(cube, out=buffer), buffer)
+            np.testing.assert_array_equal(buffer, values)
+
+    def test_calibratedCubeRejectsIncompatibleContents(self) -> None:
+        """A cube the display would misread is refused, each time naming the file."""
+        module = self._helperModule("SLIAFlowCalibratedCube")
+        full = len(self.LCTF_WAVELENGTHS_NM) * 3 * 4 * 4
+        defects = {
+            "uint16": dict(dataType=12),
+            "bip": dict(interleave="bip"),
+            "big-endian": dict(byteOrder=1),
+            "header-offset": dict(headerOffset=10),
+            "short-file": dict(dataBytes=full - 4),
+            "long-file": dict(dataBytes=full + 4),
+            "no-wavelengths": dict(wavelengths=None, bands=109),
+            "too-few-wavelengths": dict(wavelengths=self.LCTF_WAVELENGTHS_NM[:-1], bands=109),
+            # An empty entry beside 109 numbers is still not one number per band.
+            "empty-wavelength-entry": dict(wavelengths=self.LCTF_WAVELENGTHS_NM[:50] + ("",)
+                                           + self.LCTF_WAVELENGTHS_NM[50:], bands=109),
+            "trailing-comma": dict(wavelengths=self.LCTF_WAVELENGTHS_NM + ("",), bands=109),
+            "decreasing-wavelengths": dict(wavelengths=tuple(reversed(self.LCTF_WAVELENGTHS_NM))),
+            "micrometres": dict(units="Micrometers"),
+            "no-data-file": dict(dataSuffix=None),
+        }
+        with self._fixtureDirectory() as root:
+            for name, options in defects.items():
+                with self.subTest(defect=name):
+                    header, _values = self._writeFixtureCalibratedCube(root / name, **options)
+                    with self.assertRaises(module.CalibratedCubeError) as raised:
+                        module.loadCalibratedCube(header)
+                    self.assertIn(self.CALIBRATED_CUBE_STEM, str(raised.exception),
+                                  f"{name} was refused without naming the file")
+            with self.assertRaises(module.CalibratedCubeError):
+                module.loadCalibratedCube(root / "absent" / f"{self.CALIBRATED_CUBE_STEM}.hdr")
+
+            # A file cut short after the cube was described is refused again at
+            # read time rather than reshaped.
+            header, _values = self._writeFixtureCalibratedCube(root / "truncated-later")
+            cube = module.loadCalibratedCube(header)
+            cube.dataPath.write_bytes(b"\0" * 12)
+            with self.assertRaises(module.CalibratedCubeError) as raised:
+                module.readCalibratedCube(cube)
+            self.assertIn("12 bytes", str(raised.exception))
+
+    def test_colourPreviewUsesTheNamedBandsOnAFixedScale(self) -> None:
+        """R, G and B are the bands nearest 650, 550 and 470 nm, on one fixed scale.
+
+        The oracle is the card's rule, computed here from the fixture: the band
+        index is (wavelength - 460) / 5 on the 002-04 grid, reflectance 0 is 0
+        and 1.0 and above is 255, rounded half up.
+        """
+        with self._captureSession() as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            cubeNode = widget.logic.cubeNode()
+            self.assertIsNotNone(cubeNode, "No cube reached the scene")
+            preview = widget.logic.acceptColourPreview(cubeNode)
+            try:
+                array = np.array(slicer.util.arrayFromVolume(preview))
+                values = session["calibratedValues"]
+                self.assertEqual(array.dtype, np.uint8)
+                self.assertEqual(array.shape, (1, values.shape[1], values.shape[2], 3))
+                for channel, wavelength in enumerate(self.PREVIEW_WAVELENGTHS_NM):
+                    band = (wavelength - self.LCTF_WAVELENGTHS_NM[0]) // 5
+                    expected = np.floor(np.clip(values[band], 0.0, 1.0) * 255.0 + 0.5)
+                    with self.subTest(channel="RGB"[channel], wavelength=wavelength):
+                        np.testing.assert_array_equal(array[0, :, :, channel],
+                                                      expected.astype(np.uint8))
+                self.assertGreater(float(values.max()), 1.0,
+                                   "The fixture does not exercise values above 1.0")
+                self.assertEqual(self._ijkToRasDirections(preview), self.UPRIGHT_LIVE_DIRECTIONS)
+                for attribute in ("SLIAFlow.DataOrigin", "SLIAFlow.RecordedCase",
+                                  "SLIAFlow.SimulationDetail", "SLIAFlow.CaptureId"):
+                    self.assertEqual(preview.GetAttribute(attribute),
+                                     cubeNode.GetAttribute(attribute), attribute)
+                self.assertIs(widget.logic.colourPreviewNode(), preview)
+            finally:
+                widget._forgetCube()
+            self.assertIsNone(widget.logic.colourPreviewNode(),
+                              "The colour preview outlived its cube")
+
+    def _spectrumTableArrays(self, chartNode):
+        series = chartNode.GetNthPlotSeriesNode(0)
+        self.assertIsNotNone(series, "The chart has no series")
+        table = series.GetTableNode()
+        self.assertIsNotNone(table, "The series has no table")
+        wavelengths = np.array(slicer.util.arrayFromTableColumn(table, series.GetXColumnName()))
+        values = np.array(slicer.util.arrayFromTableColumn(table, series.GetYColumnName()))
+        return table, wavelengths, values
+
+    def test_pixelSpectrumIsTheStoredValues(self) -> None:
+        """A pixel's spectrum is the stored values at that pixel, against the header grid."""
+        with self._captureSession() as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            cubeNode = widget.logic.cubeNode()
+            values = session["calibratedValues"]
+            grid = np.array(self.LCTF_WAVELENGTHS_NM, dtype=np.float64)
+            try:
+                for column, row in ((0, 0), (3, 1), (2, 2)):
+                    with self.subTest(column=column, row=row):
+                        wavelengths, spectrum = widget.logic.pixelSpectrum(cubeNode, column, row)
+                        np.testing.assert_array_equal(wavelengths, grid)
+                        np.testing.assert_array_equal(spectrum, values[:, row, column])
+
+                        chart = widget.logic.showPixelSpectrum(cubeNode, column, row)
+                        table, plotted, plottedValues = self._spectrumTableArrays(chart)
+                        np.testing.assert_array_equal(plotted, grid)
+                        np.testing.assert_array_equal(plottedValues, values[:, row, column])
+                        self.assertIn("nm", chart.GetXAxisTitle())
+                        self.assertIn("Reflectance", chart.GetYAxisTitle())
+                        self.assertEqual(table.GetAttribute("SLIAFlow.RecordedCase"),
+                                         self.CALIBRATED_CUBE_NAME)
+                        self.assertEqual(table.GetAttribute("SLIAFlow.DataOrigin"), "simulated")
+                        self.assertEqual(table.GetAttribute("SLIAFlow.CaptureId"),
+                                         cubeNode.GetAttribute("SLIAFlow.CaptureId"))
+                with self.assertRaises(IndexError):
+                    widget.logic.pixelSpectrum(cubeNode, 4, 0)
+            finally:
+                widget._forgetCube()
+
+    def test_cubeIsShownEvenWhenUc1IsRefused(self) -> None:
+        """The cube does not need UC1: a refused UC1 case still shows it."""
+        with self._captureSession() as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            missing = session["root"] / "input" / "reference_hsi_brain_db" / "absent"
+            widget.logic.cubeFolder = missing
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            self.assertIn("is not a folder", widget.ui.statusLabel.text)
+            self.assertEqual(session["processes"], [], "UC1 started on a refused case")
+            node = widget.logic.cubeNode()
+            self.assertIsNotNone(node, "A refused UC1 case kept the cube off the panel")
+            self.assertEqual(node.GetAttribute("SLIAFlow.CaptureId"), widget._captureId)
+
+    @contextlib.contextmanager
+    def _capturedPresentation(self, *, finish=True, prepare=None):
+        """A capture session with the six-panel layout active and one Capture made."""
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            self.skipTest("Requires the maintained headful Slicer test target")
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        previousLayout = int(layoutNode.GetViewArrangement())
+        with self._captureSession() as session:
+            widget = session["widget"]
+            try:
+                self.assertTrue(widget._activatePresentation())
+                if prepare is not None:
+                    prepare(session)
+                self._startFakeCamera(session)
+                self._showFrame(session, 30)
+                widget._onCaptureClicked()
+                if finish:
+                    self._finishCapture(session, seed=31)
+                yield session, layoutManager
+            finally:
+                widget._forgetResult()
+                widget._forgetCube()
+                widget._deactivatePresentation(restore=True)
+                if int(layoutNode.GetViewArrangement()) != previousLayout:
+                    layoutManager.setLayout(previousLayout)
+
+    def _waitForCaption(self, widget, layoutManager, viewName, fragments):
+        sliceWidget = layoutManager.sliceWidget(viewName)
+        sliceWidget.mrmlSliceNode().Modified()
+        self._waitForUi(
+            lambda: all(fragment in widget.panelCaption(viewName) for fragment in fragments),
+            f"the {viewName} caption to read {fragments!r}",
+        )
+        actor = widget._panelCaptionActors.get(viewName)
+        self.assertIsNotNone(actor, f"{viewName} has no caption actor")
+        self.assertEqual(actor.GetInput(), widget.panelCaption(viewName))
+        self._waitForUi(
+            lambda: bool(widget._sliceViewRenderer(sliceWidget).HasViewProp(actor)),
+            f"the caption to reach the {viewName} renderer",
+        )
+
+    @staticmethod
+    def _bandOffset(node, band):
+        matrix = vtk.vtkMatrix4x4()
+        node.GetIJKToRASMatrix(matrix)
+        return matrix.MultiplyPoint((0.0, 0.0, float(band), 1.0))[2]
+
+    def test_cubeCaptionNamesTheBandAndItsWavelength(self) -> None:
+        """Scrolling HS Cube shows the band number and its wavelength on the view."""
+        with self._capturedPresentation() as (session, layoutManager):
+            widget = session["widget"]
+            node = widget.logic.cubeNode()
+            bands = len(self.LCTF_WAVELENGTHS_NM)
+            middle = bands // 2
+            # The panel opens at the middle band.
+            self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME, (
+                f"Band {middle + 1} of {bands} - {self.LCTF_WAVELENGTHS_NM[middle]} nm",))
+            sliceLogic = layoutManager.sliceWidget(widget.CUBE_VIEW_NAME).sliceLogic()
+            for band in (0, 38, bands - 1):
+                with self.subTest(band=band):
+                    sliceLogic.SetSliceOffset(self._bandOffset(node, band))
+                    self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME, (
+                        f"Band {band + 1} of {bands} - {self.LCTF_WAVELENGTHS_NM[band]} nm",))
+
+    def test_colourPreviewCaptionNamesItsWavelengths(self) -> None:
+        """Colour preview replaces the bands on HS Cube and says what it is."""
+        with self._capturedPresentation() as (session, layoutManager):
+            widget = session["widget"]
+            composite = layoutManager.sliceWidget(
+                widget.CUBE_VIEW_NAME).sliceLogic().GetSliceCompositeNode()
+            selector = widget.ui.cubeDisplaySelector
+            self.assertEqual(selector.currentIndex, 0, "HS Cube does not open on the bands")
+            try:
+                selector.setCurrentIndex(1)
+                preview = widget.logic.colourPreviewNode()
+                self.assertIsNotNone(preview, "Choosing the colour preview built none")
+                self.assertEqual(composite.GetBackgroundVolumeID(), preview.GetID())
+                self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME, (
+                    "R 650 nm", "G 550 nm", "B 470 nm", "band composite, not a photograph",
+                    self.CALIBRATED_CUBE_NAME))
+                selector.setCurrentIndex(0)
+                self.assertEqual(composite.GetBackgroundVolumeID(),
+                                 widget.logic.cubeNode().GetID())
+                self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME, ("Band ",))
+            finally:
+                selector.setCurrentIndex(0)
+
+    def test_clickedCubePixelIsThePixelUnderTheCursor(self) -> None:
+        """A click on HS Cube plots the pixel drawn under it, and says whose values they are."""
+        with self._capturedPresentation() as (session, layoutManager):
+            widget = session["widget"]
+            node = widget.logic.cubeNode()
+            values = session["calibratedValues"]
+            cubeWidget = layoutManager.sliceWidget(widget.CUBE_VIEW_NAME)
+            sliceView = cubeWidget.sliceView()
+            cubeWidget.sliceLogic().SetSliceOffset(self._bandOffset(node, 10))
+            matrix = vtk.vtkMatrix4x4()
+            node.GetIJKToRASMatrix(matrix)
+
+            def xyzOf(column, row):
+                ras = matrix.MultiplyPoint((float(column), float(row), 10.0, 1.0))[:3]
+                return list(sliceView.convertRASToXYZ(list(ras)))
+
+            chart = None
+            for column, row in ((0, 0), (3, 2), (1, 2)):
+                with self.subTest(column=column, row=row):
+                    widget._pickCubePixelAtXYZ(xyzOf(column, row))
+                    chartID = widget._spectrumPlotWidget.mrmlPlotViewNode().GetPlotChartNodeID()
+                    chart = slicer.mrmlScene.GetNodeByID(chartID)
+                    self.assertIsNotNone(chart, "The plot shows no chart")
+                    _table, _wavelengths, plotted = self._spectrumTableArrays(chart)
+                    np.testing.assert_array_equal(plotted, values[:, row, column])
+                    label = widget.ui.spectrumLabel.text
+                    self.assertIn(self.CALIBRATED_CUBE_NAME, label)
+                    self.assertIn("stored values", label)
+
+            widget._pickCubePixelAtXYZ(xyzOf(-6, 1))
+            self.assertIn("outside", widget.ui.spectrumLabel.text.lower())
+            _table, _wavelengths, plotted = self._spectrumTableArrays(chart)
+            np.testing.assert_array_equal(plotted, values[:, 2, 1],
+                                          "A click outside the cube replaced the spectrum")
+
+    def test_panelsNameTheCubeTheyShow(self) -> None:
+        """HS Cube names its cube and Tumour Delineation its case, in operator words."""
+        with self._capturedPresentation() as (session, layoutManager):
+            widget = session["widget"]
+            caseName = session["cube"].name
+            self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME,
+                                 (self.CALIBRATED_CUBE_NAME,))
+            self._waitForCaption(widget, layoutManager, widget.RESULT_VIEW_NAME, (caseName,))
+            self.assertNotIn(self.CALIBRATED_CUBE_NAME,
+                             widget.panelCaption(widget.RESULT_VIEW_NAME))
+            for viewName in (widget.CUBE_VIEW_NAME, widget.RESULT_VIEW_NAME):
+                lowered = widget.panelCaption(viewName).lower()
+                for word in self.PANEL_TEXT_FORBIDDEN_WORDS:
+                    with self.subTest(view=viewName, word=word):
+                        self.assertNotIn(word, lowered)
+
+    def test_unreadableCubeIsExplainedOnThePanel(self) -> None:
+        """A cube that cannot be shown says why on HS Cube, and UC1 still runs."""
+        def truncate(session):
+            data = session["calibratedHeader"].with_suffix(".dat")
+            data.write_bytes(data.read_bytes()[:-4])
+
+        with self._capturedPresentation(finish=False, prepare=truncate) as (session, _layout):
+            widget = session["widget"]
+            self.assertIsNone(widget.logic.cubeNode())
+            self.assertEqual(len(session["processes"]), 1, "UC1 did not run without the cube")
+            message = widget.panelMessage(widget.CUBE_VIEW_NAME)
+            self.assertIn(f"{self.CALIBRATED_CUBE_STEM}.dat", message)
+            self.assertIn("bytes", message)
+            for word in self.PANEL_TEXT_FORBIDDEN_WORDS:
+                self.assertNotIn(word, message.lower())

@@ -41,6 +41,17 @@ def recordedCaseDetail(caseName: str) -> str:
     return f"{SIMULATION_DETAIL_PRODUCER}, recorded HSI case {caseName} (simulated acquisition)"
 
 
+# The calibrated cube's wavelengths in nm, comma-separated, on the cube volume
+# itself, so a spectrum is always plotted against the grid of the cube it reads.
+WAVELENGTHS_ATTRIBUTE = "SLIAFlow.WavelengthsNm"
+
+
+def calibratedCubeDetail(cubeName: str) -> str:
+    """The simulation detail of IUMA's calibrated cube read from disk (ADR-0004 decision 7)."""
+    return (f"recorded IUMA LCTF capture {cubeName}, calibrated by IUMA "
+            "(simulated acquisition)")
+
+
 @parameterNodeWrapper
 class SLIAFlowParameterNode:
     """Persisted SLIAFlow references and presentation selections."""
