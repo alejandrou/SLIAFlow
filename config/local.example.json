@@ -2,20 +2,5 @@
   "slicerSourceDirectory": "C:/path/to/Slicer/source",
   "slicerBuildDirectory": "C:/path/to/Slicer/build",
   "slicerExecutable": "C:/path/to/Slicer-build/Slicer.exe",
-  "slicerSkillDirectory": "C:/path/to/slicer-skill",
-
-  "simulators": {
-    "preset": "demo",
-    "webcamIndex": 0,
-    "liveViewPort": 18944,
-    "liveViewDeviceName": "LiveView",
-    "targetFrameRate": 10.0,
-    "rotate180": true,
-    "case": null,
-    "recordedRoot": null,
-    "hsCubePort": 18947,
-    "controlPort": 18950,
-    "captureDelayMinSec": 5.0,
-    "captureDelayMaxSec": 8.0
-  }
+  "slicerSkillDirectory": "C:/path/to/slicer-skill"
 }

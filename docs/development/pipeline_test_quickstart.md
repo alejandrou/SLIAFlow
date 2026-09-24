@@ -1,5 +1,11 @@
 # Testing the pipeline: a quick start
 
+> **Historical since `SLIA-028`.** This quick start runs
+> `run-end-to-end-session.ps1`, which `SLIA-028` removed with the standalone
+> acquisition stand-in and UC1 runner it launched, so the commands below no
+> longer work. It is kept as the record of that session. The current way to run
+> is the in-Slicer demonstration in `uc1_demo_runbook.md`.
+
 One console, one command, and a numbered list of what to do and why. This is the
 short version of `end_to_end_verification.md`, which is the full procedure with
 its evidence tables. Read this to run a session; read that one to record one.

@@ -1,5 +1,13 @@
 # End-to-end hardware-free workflow verification
 
+> **Historical since `SLIA-028`.** This procedure runs the standalone
+> acquisition stand-in and UC1 runner through `run-end-to-end-session.ps1`,
+> `run-acquisition-simulator.ps1`, `run-uc1-real.ps1` and `python -m stratum_sim`.
+> `SLIA-028` removed all of them, and `ADR-0003` had already moved capture and
+> UC1 into Slicer, so the commands below no longer work. It is kept as the record
+> of the three-process session. The current way to run is the in-Slicer
+> demonstration in `uc1_demo_runbook.md`.
+
 This is the procedure for running the whole three-box workflow on one machine
 with no hyperspectral camera: the acquisition stand-in streaming the laptop
 camera as `LiveView` and publishing a recorded case's cube on capture, the

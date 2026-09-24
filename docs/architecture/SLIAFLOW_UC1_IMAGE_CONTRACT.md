@@ -131,7 +131,8 @@ a screenshot. `majorityVoting` in `gpu_single_bsq/source/functions_cuda.cu`
 fills a per-pixel buffer in **B, G, R** order, and `writeMatrixRGB` in
 `gpu_single_bsq/source/BitmapWriter.cpp` writes it out as R, G, B. Reading the
 first function alone swaps tumour and hypervascularized. `CLASS_PALETTE` in
-`tools/simulators/stratum_sim/bmp.py` holds the same four colours.
+`tools/simulators/stratum_sim/bmp.py` held the same four colours until
+`SLIA-028` removed it.
 `SLIAFlowTest.test_classColorTableMatchesUc1Palette` asserts every table entry,
 and `SLIAFlowTest.test_classMapSlicePipelineEmitsUc1Colors` asserts the RGBA the
 display node hands to the slice views for each class, after window/level. Both
@@ -365,7 +366,7 @@ message carries and removes none, so if a producer sends provenance once and
 then stops sending it, the prefixed attributes from the earlier message remain
 on the node and SLIAFlow has no way to tell that the latest frame did not carry
 them. Producers must therefore send all five keys with every message. The
-stand-ins do.
+stand-ins did, until `SLIA-028` removed them.
 
 Accepting the bare spelling costs one line and is not currently exercised by
 any build; it is there so that the receiver keeps working if the pin moves to a
@@ -458,14 +459,15 @@ These are the five exact device names for the five map roles, on
 
 `SLIA-012` first sent all five from a CUDA-free arithmetic stand-in, to prove the
 producer/consumer seam before `SLIA-013` connected the genuine binary. `SLIA-025`
-retired that stand-in, so today the genuine runner is the only map producer.
+retired that stand-in, which left the genuine runner as the only map producer
+until `SLIA-028` removed it too.
 
 ## SLIA-013 genuine UC1 runner
 
-The genuine pipeline is connected by `tools/simulators/stratum_sim/uc1_runner.py`,
-which builds nothing of its own: it runs the vendored UC1 binary, compiled
-unmodified, and reads back what that binary wrote. It listens on
-`127.0.0.1:18945` and implements the `Classifier` seam in `contract.py`.
+The genuine pipeline was connected by `tools/simulators/stratum_sim/uc1_runner.py`,
+which `SLIA-028` removed. It built nothing of its own: it ran the vendored UC1
+binary, compiled unmodified, and read back what that binary wrote. It listened
+on `127.0.0.1:18945` and implemented the `Classifier` seam in `contract.py`.
 
 ### A real-UC1 producer supplies one of the five roles
 
@@ -476,9 +478,9 @@ are computed on the device and then discarded, and the write that would have
 surfaced them is inside a comment block at `main.cu` lines 164-174.
 
 This is a property of the upstream binary, not of SLIAFlow. SLIAFlow's contract
-has five roles; a real-UC1 producer currently fills one of them.
+has five roles; the real-UC1 runner filled one of them.
 
-Three options exist for the other four, and the chosen default is the third.
+Three options existed for the other four, and the chosen default was the third.
 
 1. Run the real binary for `UC1_MV_CLASS` and the stand-in for the other four.
    Rejected. It would require a loud, non-optional distinction in the
@@ -490,11 +492,11 @@ Three options exist for the other four, and the chosen default is the third.
 3. **Leave the four unavailable in real-UC1 mode and show the waiting state.**
    One box, one story, nothing implied.
 
-An absent map is `None` in `Uc1Maps` and is never substituted with zeros. A
+An absent map was `None` in `Uc1Maps` and was never substituted with zeros. A
 consumer must be able to read "this producer did not produce this map" without
 being handed a fabricated one.
 
-### Wire metadata the real runner stamps
+### Wire metadata the real runner stamped
 
 | Key | Value |
 | --- | --- |
@@ -514,26 +516,27 @@ are silently dropped.
 
 ### Recovering the class map
 
-The binary emits colour, not classes, so the class map is recovered by inverting
-the palette. The forward table and the inverse SLIA-013 reads with are one
-definition in `bmp.py`, exported both ways, so they cannot drift apart. An RGB triple that is not in the table is reported with its count
-and first offending coordinates and fails the run; it is never resolved to the
-nearest known colour, because a nearest-colour fallback would turn an unexpected
+The binary emits colour, not classes, so the runner recovered the class map by
+inverting the palette. The forward table and the inverse SLIA-013 read with were
+one definition in `bmp.py`, exported both ways, so they could not drift apart.
+An RGB triple that was not in the table was reported with its count and first
+offending coordinates and failed the run; it was never resolved to the nearest
+known colour, because a nearest-colour fallback would turn an unexpected
 pipeline output into a plausible-looking class map.
 
-Outputs are checked for freshness rather than existence. UC1 writes the same
+Outputs were checked for freshness rather than existence. UC1 writes the same
 three `output/rgb/*.txt` names for every dataset on every run, so an existence
 check cannot distinguish this run's output from a previous run's, and a crashed
-run that left last week's files behind would pass one. A file that predates the
-run fails it.
+run that left last week's files behind would pass one. A file that predated the
+run failed it.
 
 `docs/development/uc1_local_build.md` records the build, the measured runtime and
 VRAM, and why a map can come back as a single class.
 
 ### The input is part of the provenance
 
-Every cube is a recorded case of the public, anonymized HSI Human Brain Database
-(`SLIA-023`), and every stream names what produced a message:
+Every cube was a recorded case of the public, anonymized HSI Human Brain Database
+(`SLIA-023`), and every stream named what produced a message:
 
 | Stream | Detail |
 | --- | --- |
@@ -541,15 +544,15 @@ Every cube is a recorded case of the public, anonymized HSI Human Brain Database
 | `HSCube` | `acquisition stand-in, recorded HSI case <case> (simulated acquisition)` |
 | `UC1_RGB`, `UC1_MV_CLASS` | `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` |
 
-A recorded case is always described as one. A detail that did not name the case
+A recorded case was always described as one. A detail that did not name the case
 would leave a viewer to guess what is on screen.
 
-The runner reads the case from the folder itself - a folder is a recorded case
-only when its `gtMap.hdr` carries the database marker - not from a flag, so the
-detail cannot disagree with the data that was read, and any other folder is
-refused. `DataOrigin` stays `simulated` in every case: in this repository the
-acquisition is always simulated, and the origin never softens because the
-algorithm is genuine or the cube was recorded.
+The runner read the case from the folder itself - a folder was a recorded case
+only when its `gtMap.hdr` carried the database marker - not from a flag, so the
+detail could not disagree with the data that was read, and any other folder was
+refused. `DataOrigin` stayed `simulated` in every case: the acquisition was
+always simulated, and the origin never softened because the algorithm was
+genuine or the cube was recorded.
 
 A consumer must not branch on the detail. It is display-only and free text:
 SLIAFlow reads it to write the second banner line and for nothing else.
@@ -571,8 +574,8 @@ Wire metadata: `SLIAFlow.DeviceName = UC1_RGB`, and `SLIAFlow.DataOrigin`,
 
 `SLIAFlow.CaptureId` is an opaque value, one per classification of one cube. It is
 never reused for another cube or another classification, and a resend of a
-result already computed reuses it. The genuine runner makes one random value per
-run and sends it in every cycle, on the map and on `UC1_RGB` when it is sent. It identifies nothing to a person. It
+result already computed reuses it. The genuine runner made one random value per
+run and sent it in every cycle, on the map and on `UC1_RGB` when it is sent. It identifies nothing to a person. It
 exists so that a `UC1_RGB` retained in the scene from another run - same device,
 origin, detail and size - cannot be composited under a later map.
 
@@ -583,8 +586,9 @@ previous run's ID, and match that run's retained `UC1_RGB`. SLIAFlow sees only
 the node, so it cannot detect the omission. The guarantee rests on producers
 sending the ID.
 There is no `SLIAFlow.ResultMap`, so no discovery path can mistake it for a
-result. The genuine runner sends it on the UC1 connection, before the map, in
-every cycle. How it is assembled is in `tools/simulators/README.md`.
+result. The genuine runner sent it on the UC1 connection, before the map, in
+every cycle. How it was assembled is in `tools/simulators/README.md` as it
+stood before `SLIA-028`, in Git history.
 
 ### The background layer
 

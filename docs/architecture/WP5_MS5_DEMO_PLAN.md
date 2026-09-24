@@ -1,5 +1,13 @@
 # WP5 / MS5 demonstrator plan
 
+> **Historical since `SLIA-028`.** This plan was carried out with standalone
+> producers on separate ports. `ADR-0003` moved capture and UC1 into Slicer,
+> `ADR-0004` made IUMA's acquisition app the producer and its LCTF cube the data,
+> and `SLIA-028` removed the producers, the capture client and the session
+> scripts this plan names. It is kept as the record of the WP5 / MS5 plan; its
+> commands no longer work. The current way to run is the in-Slicer
+> demonstration in `docs/development/uc1_demo_runbook.md`.
+
 ## Purpose
 
 This is the repository-resident plan for the STRATUM WP5 demonstration that
