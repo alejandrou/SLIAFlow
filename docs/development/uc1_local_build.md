@@ -152,6 +152,27 @@ UC1 is changed only through a patch in `scripts/development/uc1-patches/`,
 recorded in `uc1_changes.md` (`ADR-0004` decision 3). An edit anywhere else fails
 the hash assertion.
 
+### Measurement variants
+
+`SLIA-034` builds UC1 with other preprocessor definitions to measure what they
+change, without touching the product build:
+
+```powershell
+.\scripts\development\build-uc1.ps1 -Clean -Variant kmeans-shared -Defines "-DOPTIMIZE_KMEANS=1 -DPCA_PD=1 -DKMEANS_SHARED"
+.\scripts\development\build-uc1.ps1 -Clean -Variant release -Release
+```
+
+A variant is staged, patched and hash-checked like the product, in
+`build/uc1/variants/<name>/` with its own reference tree, and only one binary is
+built there: the intermediate one, or the release one with `-Release`, under
+the product's file name. `-Defines` replaces `-DOPTIMIZE_KMEANS=1 -DPCA_PD=1`.
+The variant's compiler warnings are printed but not held to the product's
+list, because other definitions compile other code. `build/uc1/UC1/` is never
+touched, and SLIAFlow never runs a variant; `scripts/development/measure-uc1.py`
+does (`docs/development/uc1_performance.md`).
+
+`KMEANS_SHARED` is tested with `#ifdef`: `-DKMEANS_SHARED=0` switches it on too.
+
 ## The intermediate build SLIAFlow runs
 
 `stratum.opt.intermediate.exe` takes a folder holding `raw.hdr` and `raw.dat` as

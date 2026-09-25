@@ -340,3 +340,11 @@ Most of the tissue in view is classed as tumour. That is a finding about a
 model trained on another camera meeting the LCTF cube, recorded as such and not
 tuned away here (`SLIA-034` owns parameters and speed). `002-04` has no ground
 truth, so nothing here can say which pixels are right.
+
+## Speed and size
+
+`SLIA-034` measured UC1's speed on `002-04`, what build flags and parameters
+change it, and the largest cube this laptop takes:
+[`uc1_performance.md`](uc1_performance.md). It changed nothing listed here. A
+setting adopted from it becomes a patch or a parameter change recorded in this
+document, like the three above.

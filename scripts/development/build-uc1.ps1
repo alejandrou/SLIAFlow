@@ -50,6 +50,23 @@
     The folder of `*.patch` files to apply. Defaults to
     `scripts/development/uc1-patches`; another folder is only for checking how
     the script reacts to a patch that does not apply.
+
+.PARAMETER Variant
+    Build a measurement variant instead of the product (SLIA-034): the same
+    staged source and patches, in `build/uc1/variants/<Variant>/`, and only one
+    binary, the intermediate one unless -Release is given. `build/uc1/UC1/` is
+    never touched. SLIAFlow never runs a variant; `measure-uc1.py` does.
+
+.PARAMETER Defines
+    With -Variant only: the preprocessor definitions that replace the
+    product's `-DOPTIMIZE_KMEANS=1 -DPCA_PD=1`, for example
+    `"-DOPTIMIZE_KMEANS=1 -DPCA_PD=0"`. A variant's warnings are printed but
+    not held to the product's list, because other definitions compile other
+    code.
+
+.PARAMETER Release
+    With -Variant only: build the release binary, without the per-stage CSV
+    timings and intermediate images, instead of the intermediate one.
 #>
 [CmdletBinding()]
 param(
@@ -57,24 +74,51 @@ param(
 
     [switch]$SkipBuild,
 
-    [string]$PatchDirectory = (Join-Path $PSScriptRoot "uc1-patches")
+    [string]$PatchDirectory = (Join-Path $PSScriptRoot "uc1-patches"),
+
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]{0,31}$')]
+    [string]$Variant,
+
+    [string]$Defines,
+
+    [switch]$Release
 )
 
 $ErrorActionPreference = "Stop"
+
+# The definitions GUIDE section 3.1-B gives every optimised binary (OPT=1).
+$productDefines = "-DOPTIMIZE_KMEANS=1 -DPCA_PD=1"
+
+if (-not $Variant -and ($PSBoundParameters.ContainsKey("Defines") -or $Release)) {
+    Write-Host "ERROR: -Defines and -Release apply only to a -Variant build." -ForegroundColor Red
+    exit 1
+}
+if ($Variant -and -not $PSBoundParameters.ContainsKey("Defines")) {
+    $Defines = $productDefines
+}
 
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $vendoredRoot = Join-Path $repositoryRoot "workspace\components\UC1_Brain_Tumor-GPU_optimization\UC1_Brain_Tumor-GPU_optimization"
 $vendoredSource = Join-Path $vendoredRoot "gpu_single_bsq\source"
 $vendoredModel = Join-Path $vendoredRoot "svm_model"
 
-$stagedRoot = Join-Path $repositoryRoot "build\uc1\UC1"
+if ($Variant) {
+    $stagedRoot = Join-Path $repositoryRoot "build\uc1\variants\$Variant"
+} else {
+    $stagedRoot = Join-Path $repositoryRoot "build\uc1\UC1"
+}
 $stagedSource = Join-Path $stagedRoot "gpu_single_bsq\source"
 $stagedModel = Join-Path $stagedRoot "svm_model"
 $stagedRgbOutput = Join-Path $stagedSource "output\rgb"
 
 # The reference the hash assertion compares against: a fresh copy of the
-# vendored source with the same patches applied, rebuilt on every run.
-$expectedSource = Join-Path $repositoryRoot "build\uc1\expected\gpu_single_bsq\source"
+# vendored source with the same patches applied, rebuilt on every run. A
+# variant keeps its own, so building one never rewrites the product's.
+if ($Variant) {
+    $expectedSource = Join-Path $stagedRoot "expected\gpu_single_bsq\source"
+} else {
+    $expectedSource = Join-Path $repositoryRoot "build\uc1\expected\gpu_single_bsq\source"
+}
 
 
 # The GPU this build targets. `sm_120` compiles and executes natively on the
@@ -91,6 +135,8 @@ $binaries = @(
     [PSCustomObject]@{
         Name = "stratum.opt.exe"
         Flags = ""
+        Defines = $productDefines
+        EnforceWarnings = $true
         ExpectedWarnings = @(
             @{ Code = "#550-D"; Where = "functions_cuda.cu line 63, num_th_last_block set but never used" },
             @{ Code = "C4068"; Where = "matrixlib.cpp lines 205, 221, 293, unknown pragma unroll" }
@@ -99,12 +145,30 @@ $binaries = @(
     [PSCustomObject]@{
         Name = "stratum.opt.intermediate.exe"
         Flags = "-lineinfo -DPROFILE_MODE -DINTERMEDIATE_OUTPUT"
+        Defines = $productDefines
+        EnforceWarnings = $true
         ExpectedWarnings = @(
             @{ Code = "#550-D"; Where = "functions_cuda.cu line 63, num_th_last_block set but never used" },
             @{ Code = "C4068"; Where = "matrixlib.cpp lines 205, 221, 293, unknown pragma unroll" }
         )
     }
 )
+
+# A variant is one of those two binaries, under the same name so that
+# measure-uc1.py runs it the same way, with other definitions. Its warnings are
+# reported, not enforced.
+if ($Variant) {
+    $variantName = if ($Release) { "stratum.opt.exe" } else { "stratum.opt.intermediate.exe" }
+    $binaries = @($binaries | Where-Object { $_.Name -eq $variantName } | ForEach-Object {
+        [PSCustomObject]@{
+            Name = $_.Name
+            Flags = $_.Flags
+            Defines = $Defines
+            EnforceWarnings = $false
+            ExpectedWarnings = $_.ExpectedWarnings
+        }
+    })
+}
 
 # Files the build produces inside the staged source tree. They have no
 # `workspace/components/` original, so the hash assertion expects them. Each
@@ -251,6 +315,9 @@ function Assert-StagedTreeIsUnchanged {
 Write-Host "== STRATUM UC1 build =="
 Write-Host "Vendored source: $vendoredSource"
 Write-Host "Staged build:    $stagedRoot"
+if ($Variant) {
+    Write-Host "Variant:         $Variant, $($binaries[0].Name), $Defines"
+}
 Write-Host ""
 
 if (-not (Test-Path -LiteralPath $vendoredSource -PathType Container)) {
@@ -333,7 +400,7 @@ function Invoke-Uc1Build {
         "     -gencode arch=compute_$computeCapability,code=sm_$computeCapability ^",
         "     -gencode arch=compute_$computeCapability,code=compute_$computeCapability ^",
         "     -std=c++17 ^",
-        "     -DOPTIMIZE_KMEANS=1 -DPCA_PD=1 ^",
+        "     $($Binary.Defines) ^",
         "     $outputFlags -o $($Binary.Name)",
         "exit /b %errorlevel%"
     )
@@ -394,7 +461,13 @@ function Invoke-Uc1Build {
         $warningFailures += "unexpected warning $code"
     }
 
-    if ($warningFailures.Count -gt 0) {
+    if (-not $Binary.EnforceWarnings) {
+        # A variant compiles other code, so the product's list does not bind
+        # it. What it emitted is listed above for the measurement record.
+        if ($warningFailures.Count -gt 0) {
+            Write-Host "  Variant build: the differences above are reported, not enforced."
+        }
+    } elseif ($warningFailures.Count -gt 0) {
         Write-Host ""
         Write-Host "  The vendored source is not to be silenced or 'fixed' to clear this." -ForegroundColor Red
         Write-Host "  Investigate the toolchain, then re-record the expected set on the task" -ForegroundColor Red
@@ -455,5 +528,10 @@ if ($allMismatches.Count -gt 0) {
 
 Write-Host "  All staged files equal workspace\components plus the patches." -ForegroundColor Green
 Write-Host ""
-Write-Host "Press Capture in SLIAFlow to run stratum.opt.intermediate.exe on the configured cube."
+if ($Variant) {
+    Write-Host "Variant $Variant ($($binaries[0].Name), $Defines) is in $stagedSource."
+    Write-Host "SLIAFlow does not run it; measure it with scripts\development\measure-uc1.py."
+} else {
+    Write-Host "Press Capture in SLIAFlow to run stratum.opt.intermediate.exe on the configured cube."
+}
 exit 0
