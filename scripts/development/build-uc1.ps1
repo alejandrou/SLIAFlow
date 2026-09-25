@@ -4,10 +4,12 @@
 
 .DESCRIPTION
     Copies the vendored `gpu_single_bsq/source/` and `svm_model/` trees into the
-    already-ignored `build/uc1/UC1/`, builds two binaries from them with the
-    GUIDE section 3.1-B command lines retargeted at `sm_120`, and then asserts by
-    SHA-256 that every staged source file is still byte-identical to its
-    `workspace/components/` original.
+    already-ignored `build/uc1/UC1/`, applies the versioned patches in
+    `scripts/development/uc1-patches/` to the staged source in name order,
+    builds two binaries with the GUIDE section 3.1-B command lines retargeted at
+    `sm_120`, and then asserts by SHA-256 that every staged file equals the
+    `workspace/components/` original plus those patches (ADR-0004 decision 3).
+    The vendored copy itself is never written to.
 
     - `stratum.opt.exe`, the release build, used by the standalone Python
       runner.
@@ -31,18 +33,31 @@
     vendored source is not edited to remove them. An absent expected warning is
     a surprise, and it is reported as one.
 
+    Every change to UC1 is a patch, applied with `git apply`, which refuses a
+    hunk whose context does not match instead of guessing. A patch that no
+    longer applies, for example after a new UC1 delivery, fails the build; it
+    is never skipped. What each patch does and what it produced is recorded in
+    `docs/development/uc1_changes.md`.
+
 .PARAMETER Clean
     Delete the staged build root before staging. Removes previous run outputs
     along with the binary.
 
 .PARAMETER SkipBuild
-    Stage and run the hash assertion without invoking the compiler.
+    Stage, patch and run the hash assertion without invoking the compiler.
+
+.PARAMETER PatchDirectory
+    The folder of `*.patch` files to apply. Defaults to
+    `scripts/development/uc1-patches`; another folder is only for checking how
+    the script reacts to a patch that does not apply.
 #>
 [CmdletBinding()]
 param(
     [switch]$Clean,
 
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+
+    [string]$PatchDirectory = (Join-Path $PSScriptRoot "uc1-patches")
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +71,10 @@ $stagedRoot = Join-Path $repositoryRoot "build\uc1\UC1"
 $stagedSource = Join-Path $stagedRoot "gpu_single_bsq\source"
 $stagedModel = Join-Path $stagedRoot "svm_model"
 $stagedRgbOutput = Join-Path $stagedSource "output\rgb"
+
+# The reference the hash assertion compares against: a fresh copy of the
+# vendored source with the same patches applied, rebuilt on every run.
+$expectedSource = Join-Path $repositoryRoot "build\uc1\expected\gpu_single_bsq\source"
 
 
 # The GPU this build targets. `sm_120` compiles and executes natively on the
@@ -139,6 +158,42 @@ function Copy-Tree {
         $copiedCount++
     }
     return $copiedCount
+}
+
+function Get-Patches {
+    if (-not (Test-Path -LiteralPath $PatchDirectory -PathType Container)) {
+        Stop-WithError "The patch folder is missing: $PatchDirectory"
+    }
+    # Name order is application order: the patches are numbered 0001, 0002...
+    return @(Get-ChildItem -LiteralPath $PatchDirectory -Filter "*.patch" -File | Sort-Object Name)
+}
+
+function Invoke-Patches {
+    param([string]$Directory, [object[]]$Patches)
+
+    # Inside a repository, `git apply` reads patch paths from the repository
+    # root and silently skips any file it then finds outside the current
+    # folder, exiting 0. So it runs from the root, the staged folder is given
+    # as a prefix, and a "Skipped patch" line is a failure like any other.
+    $fullDirectory = [System.IO.Path]::GetFullPath($Directory)
+    if (-not $fullDirectory.StartsWith($repositoryRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Stop-WithError "$Directory is outside the repository $repositoryRoot."
+    }
+    $relativeDirectory = $fullDirectory.Substring($repositoryRoot.Length).TrimStart('\').Replace('\', '/')
+
+    foreach ($patch in $Patches) {
+        # core.autocrlf is off for this call: the vendored sources are LF, and
+        # the patched files must stay byte-for-byte what the patch describes.
+        $output = & git -c core.autocrlf=false -C $repositoryRoot apply --verbose --whitespace=nowarn `
+            "--directory=$relativeDirectory" $patch.FullName 2>&1 | ForEach-Object { $_.ToString() }
+        $exitCode = $LASTEXITCODE
+        $skipped = @($output | Where-Object { $_ -like "Skipped patch*" })
+        $applied = @($output | Where-Object { $_ -like "Applied patch*" })
+        if ($exitCode -ne 0 -or $skipped.Count -gt 0 -or $applied.Count -eq 0) {
+            $output | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+            Stop-WithError "$($patch.Name) does not apply to $Directory. The vendored UC1 source has changed or the patch is wrong; the build does not continue without it."
+        }
+    }
 }
 
 function Test-IsBuildProduct {
@@ -232,6 +287,18 @@ Write-Host "-- Staging --"
 $stagedSourceCount = Copy-Tree -Source $vendoredSource -Destination $stagedSource
 $stagedModelCount = Copy-Tree -Source $vendoredModel -Destination $stagedModel
 Write-Host "Copied $stagedSourceCount source file(s) and $stagedModelCount model file(s)."
+Write-Host ""
+
+# Every staged source file was just overwritten with its vendored original, so
+# the patches always apply to the delivered code, never to an earlier result.
+Write-Host "-- Patches ($PatchDirectory) --"
+$patches = Get-Patches
+Invoke-Patches -Directory $stagedSource -Patches $patches
+foreach ($patch in $patches) {
+    $patchHash = (Get-FileHash -LiteralPath $patch.FullName -Algorithm SHA256).Hash
+    Write-Host "  applied  $($patch.Name)  $patchHash"
+}
+Write-Host "Applied $($patches.Count) patch(es) to the staged source."
 
 # The binary creates neither output directory and fails quietly without them.
 New-Item -ItemType Directory -Path $stagedRgbOutput -Force | Out-Null
@@ -351,12 +418,21 @@ if ($SkipBuild) {
     }
 }
 
-# The compliance property - "no changes to vendored UC1 source" - is re-tested
-# on every build rather than trusted once. `build/` is gitignored, so
-# `git status` proves nothing about the staged copy.
+# The compliance property - "the staged source is the vendored UC1 plus the
+# versioned patches, and nothing else" - is re-tested on every build rather
+# than trusted once. `build/` is gitignored, so `git status` proves nothing
+# about the staged copy. The reference is rebuilt from scratch: a fresh copy of
+# the vendored source with the same patches applied.
 Write-Host "-- SHA-256 source assertion --"
+if (Test-Path -LiteralPath $expectedSource -PathType Container) {
+    Remove-Item -LiteralPath $expectedSource -Recurse -Force
+}
+Copy-Tree -Source $vendoredSource -Destination $expectedSource | Out-Null
+Invoke-Patches -Directory $expectedSource -Patches $patches
+Write-Host "  Reference: vendored source plus $($patches.Count) patch(es), in $expectedSource"
+
 $results = @(
-    (Assert-StagedTreeIsUnchanged -Original $vendoredSource -Staged $stagedSource -Label "gpu_single_bsq\source"),
+    (Assert-StagedTreeIsUnchanged -Original $expectedSource -Staged $stagedSource -Label "gpu_single_bsq\source"),
     (Assert-StagedTreeIsUnchanged -Original $vendoredModel -Staged $stagedModel -Label "svm_model")
 )
 
@@ -366,16 +442,18 @@ foreach ($result in $results) {
     $allMismatches += $result.Mismatches
 }
 
+$vendoredMainHash = (Get-FileHash -LiteralPath (Join-Path $vendoredSource "main.cu") -Algorithm SHA256).Hash
 $mainHash = (Get-FileHash -LiteralPath (Join-Path $stagedSource "main.cu") -Algorithm SHA256).Hash
-Write-Host "  main.cu SHA-256: $mainHash"
+Write-Host "  main.cu SHA-256, vendored: $vendoredMainHash"
+Write-Host "  main.cu SHA-256, staged:   $mainHash"
 
 if ($allMismatches.Count -gt 0) {
     Write-Host ""
     foreach ($mismatch in $allMismatches) { Write-Host "  $mismatch" -ForegroundColor Red }
-    Stop-WithError "The staged tree is not byte-identical to workspace\components. Modifying vendored UC1 source is out of scope for this project; re-stage with -Clean, and escalate if the difference is intentional."
+    Stop-WithError "The staged tree is not the vendored UC1 plus the patches in $PatchDirectory. Change UC1 only through a patch there; re-stage with -Clean, and escalate if the difference is intentional."
 }
 
-Write-Host "  All staged files are byte-identical to workspace\components." -ForegroundColor Green
+Write-Host "  All staged files equal workspace\components plus the patches." -ForegroundColor Green
 Write-Host ""
 Write-Host "Press Capture in SLIAFlow to run stratum.opt.intermediate.exe on the configured cube."
 exit 0

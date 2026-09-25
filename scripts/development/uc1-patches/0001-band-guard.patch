@@ -1,0 +1,32 @@
+diff --git a/main.cu b/main.cu
+--- a/main.cu
++++ b/main.cu
+@@ -83,6 +83,28 @@ int main(int argc, char **argv) {
+ 
+ 	fclose(fp);
+ 
++	// SLIAFlow patch 0001, band guard. The SVM weights hold one value per band
++	// and binary classifier, and are read below with the cube's band count
++	// without checking how much was read. A cube with another band count would
++	// be classified against garbage weights, so it is refused here, before any
++	// image is read.
++	FILE *weights_fp = fopen("../../svm_model/w_vector.bin", "rb");
++	if (weights_fp == NULL) {
++		fprintf(stderr, "Band guard: ../../svm_model/w_vector.bin cannot be opened.\n");
++		return EXIT_FAILURE;
++	}
++	fseek(weights_fp, 0, SEEK_END);
++	long weightsBytes = ftell(weights_fp);
++	fclose(weights_fp);
++	long weightsBytesPerBand = (long)(num_binary_classifiers * sizeof(float));
++	if (weightsBytes != (long)numberOfBands * weightsBytesPerBand) {
++		fprintf(stderr, "Band guard: the cube has %zu bands, but ../../svm_model/w_vector.bin "
++			"holds %ld bytes, the weights of %ld bands for %d binary classifiers. "
++			"UC1 does not classify this cube.\n",
++			numberOfBands, weightsBytes, weightsBytes / weightsBytesPerBand, num_binary_classifiers);
++		return EXIT_FAILURE;
++	}
++
+ 	printf("%s\nSample: %zu\nLines: %zu\n", config.hsi_path, numberOfSamples, numberOfLines);
+ 
+ 	/*Pre processing malloc*/

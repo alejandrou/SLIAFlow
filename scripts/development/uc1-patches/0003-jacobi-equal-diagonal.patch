@@ -1,0 +1,22 @@
+diff --git a/functions_cuda.cu b/functions_cuda.cu
+--- a/functions_cuda.cu
++++ b/functions_cuda.cu
+@@ -396,10 +396,18 @@ __host__ int *computingClassification(AppConfig *config, uint16_t *dev_rawImage,
+                     a_ii = matr_mult[i*numberOfBands + i];
+                     a_jj = matr_mult[j*numberOfBands + j];
+ 
++                    if (a_jj == a_ii) {
++                        // SLIAFlow patch 0003: two equal diagonal entries, as two
++                        // identical bands give. The rotation below would divide
++                        // by zero; 45 degrees zeroes a_ij exactly in this case.
++                        cosA = sqrt(0.5);
++                        sinA = cosA;
++                    } else {
+                     pca_alpha = a_ij / (a_jj - a_ii);
+ 
+                     cosA = 1 / (sqrt(pca_alpha*pca_alpha + 1));
+                     sinA = cosA*pca_alpha;
++                    }
+ 
+                     for (int k = 0; k < numberOfBands; k++) {
+                         value_aux = cosA*matr_mult[i*numberOfBands + k] - sinA*matr_mult[j*numberOfBands + k];

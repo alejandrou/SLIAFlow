@@ -23,9 +23,6 @@ from .SLIAFlowCube import (
     GROUND_TRUTH_CLASSES,
     GROUND_TRUTH_FILE_NAME,
     UNLABELLED_CLASS_ID,
-    IncompatibleCaseError,
-    RecordedCase,
-    loadRecordedCase,
     readGroundTruth,
 )
 from .SLIAFlowParameterNode import (
@@ -39,8 +36,9 @@ from .SLIAFlowParameterNode import (
     WAVELENGTHS_ATTRIBUTE,
     SLIAFlowParameterNode,
     calibratedCubeDetail,
-    recordedCaseDetail,
+    uc1ResultDetail,
 )
+from .SLIAFlowUc1Input import Uc1Input, describeUc1Input
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES, Uc1Build, Uc1Run, findRepositoryRoot
 
 
@@ -59,12 +57,9 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
 
     # Where a capture's files live, relative to the repository root.
     CAPTURES_RELATIVE_PATH = Path("workspace") / "captures"
-    # The one cube Capture sends to UC1 (ADR-0004 decision 1): the recorded
-    # case the project owner kept as the UC1 reference at SLIA-031, until
-    # SLIA-033 lets UC1 read IUMA's LCTF cube.
-    CUBE_RELATIVE_PATH = Path("input") / "reference_hsi_brain_db" / "020-01"
-    # The cube the HS Cube panel shows (SLIA-032, ADR-0004 decision 1): IUMA's
-    # calibrated float32 LCTF capture. UC1 does not read it until SLIA-033.
+    # The one cube every Capture shows in HS Cube and runs UC1 on (ADR-0004
+    # decision 1): IUMA's calibrated float32 LCTF capture. UC1 reads it mapped
+    # onto its model's bands (SLIA-033, `SLIAFlowUc1Input`).
     CALIBRATED_CUBE_RELATIVE_PATH = (
         Path("input") / "002-04" / "LCTF_Calibrated_Cube_Single.hdr"
     )
@@ -125,7 +120,6 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         # a real QProcess; a test points both somewhere else.
         self._repositoryRootOverride = None
         self._processFactory = None
-        self._cubeFolderOverride = None
         self._calibratedCubeHeaderOverride = None
         self.currentRun: Uc1Run | None = None
 
@@ -342,14 +336,13 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     def setRunEnvironment(self, repositoryRoot=None, processFactory=None) -> None:
         """Point runs at another repository tree and process type, or back.
 
-        Any run in progress is cancelled first, and the cube folder and the
-        calibrated cube return to the new environment's defaults, so nothing
-        from the previous environment carries over.
+        Any run in progress is cancelled first, and the calibrated cube returns
+        to the new environment's default, so nothing from the previous
+        environment carries over.
         """
         self.cancelRun()
         self._repositoryRootOverride = None if repositoryRoot is None else Path(repositoryRoot)
         self._processFactory = processFactory
-        self._cubeFolderOverride = None
         self._calibratedCubeHeaderOverride = None
 
     @property
@@ -363,38 +356,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         return self.repositoryRoot / self.CAPTURES_RELATIVE_PATH
 
     @property
-    def cubeFolder(self) -> Path:
-        """The one cube folder every Capture reads.
-
-        By default the reference case under the repository; assigning a folder
-        replaces it and assigning None restores the default.
-        """
-        if self._cubeFolderOverride is not None:
-            return self._cubeFolderOverride
-        return self.repositoryRoot / self.CUBE_RELATIVE_PATH
-
-    @cubeFolder.setter
-    def cubeFolder(self, folder) -> None:
-        self._cubeFolderOverride = None if folder is None else Path(folder)
-
-    def loadConfiguredCube(self) -> RecordedCase:
-        """Describe the configured cube, or say which folder it is and why not.
-
-        The folder is read at every Capture, so a cube repaired or replaced on
-        disk is picked up by the next one without restarting Slicer.
-        """
-        folder = self.cubeFolder
-        try:
-            return loadRecordedCase(folder)
-        except (IncompatibleCaseError, OSError) as error:
-            raise IncompatibleCaseError(
-                _("The configured cube {folder} cannot be used: {reason}").format(
-                    folder=folder, reason=error)
-            ) from error
-
-    @property
     def calibratedCubeHeader(self) -> Path:
-        """The header of the calibrated cube every Capture shows in HS Cube.
+        """The header of the one cube every Capture shows in HS Cube and runs UC1 on.
 
         By default IUMA's 002-04 under the repository; assigning a header
         replaces it and assigning None restores the default.
@@ -410,7 +373,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     def loadConfiguredCalibratedCube(self) -> CalibratedCube:
         """Describe the configured calibrated cube, or say why it cannot be shown.
 
-        Read at every Capture, like the cube folder. The reason names the file
+        Read at every Capture, so a cube repaired or replaced on disk is picked
+        up by the next one without restarting Slicer. The reason names the file
         and the defect only, so it can be written on the panel; the full path
         is `calibratedCubeHeader`.
         """
@@ -420,6 +384,23 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             raise CalibratedCubeError(
                 _("{file} could not be read: {reason}").format(
                     file=self.calibratedCubeHeader.name, reason=error.strerror or error)
+            ) from error
+
+    def loadConfiguredUc1Input(self) -> Uc1Input:
+        """Describe what UC1 runs on, or say which cube it is and why it cannot be used.
+
+        The configured calibrated cube, checked as for the HS Cube panel and
+        then against the band mapping UC1 is run with (ADR-0004 decisions 4
+        and 6). Nothing is written until the run starts.
+        """
+        header = self.calibratedCubeHeader
+        try:
+            return describeUc1Input(self.loadConfiguredCalibratedCube(),
+                                    self.uc1Build.inputDirectory)
+        except CalibratedCubeError as error:
+            raise CalibratedCubeError(
+                _("The configured cube {header} cannot be used: {reason}").format(
+                    header=header, reason=error)
             ) from error
 
     @property
@@ -479,7 +460,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     # ------------------------------------------------------------------
 
     def startUc1Run(self, case, onFinished, onStage=None) -> Uc1Run:
-        """Start UC1 on one recorded case. Raises Uc1RunError if refused.
+        """Start UC1 on the configured cube (a Uc1Input). Raises Uc1RunError if refused.
 
         `onFinished` receives the Uc1RunResult after `currentRun` is cleared.
         """
@@ -551,7 +532,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
                 ))
             images[fileName] = np.ascontiguousarray(image[np.newaxis, ...])
 
-        detail = recordedCaseDetail(case.name)
+        detail = uc1ResultDetail(case.name)
         nodes = {}
         try:
             for fileName, values in images.items():
@@ -831,7 +812,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
                     slicer.mrmlScene.RemoveNode(node)
 
     # ------------------------------------------------------------------
-    # The recorded case's own ground truth
+    # The ground truth beside the cube, where it has one
     # ------------------------------------------------------------------
 
     @classmethod
@@ -869,21 +850,22 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
 
     @classmethod
     def acceptGroundTruth(cls, case, captureId: str):
-        """Put one recorded case's ground truth into the module-owned label map.
+        """Put the ground truth beside the cube into the module-owned label map.
 
-        This is the database's labelling, read from the case folder; it is not a
-        UC1 output and was not computed here. It is a label map rather than a
-        third colour image so that Slicer treats it as a layer: it can sit on
-        the Label layer over svm.bmp or knn.bmp with the layer's own opacity and
-        outline controls, which is the comparison it exists for.
+        `case` is the run's Uc1Input. The ground truth is someone's labelling of
+        the cube, read from the cube's own folder; it is not a UC1 output and
+        was not computed here. It is a label map rather than a third colour
+        image so that Slicer treats it as a layer: it can sit on the Label
+        layer over svm.bmp or knn.bmp with the layer's own opacity and outline
+        controls, which is the comparison it exists for.
 
-        It carries the same origin, case and capture attributes as the outputs,
+        It carries the same origin, cube and capture attributes as the outputs,
         so no panel can present it as something acquired here and now, and a
         stale ground truth is spotted the same way a stale result is.
         """
         if not captureId:
             raise ValueError(_("A ground truth needs a capture ID."))
-        labels = readGroundTruth(case)
+        labels = readGroundTruth(case.groundTruthFolder, case.samples, case.lines)
         node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
         try:
             node.SetSaveWithScene(False)
@@ -892,7 +874,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             cls._applyLiveVolumeGeometry(node)
             node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, SIMULATED_ORIGIN)
             node.SetAttribute(RECORDED_CASE_ATTRIBUTE, case.name)
-            node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, recordedCaseDetail(case.name))
+            node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, calibratedCubeDetail(case.name))
             node.SetAttribute(CAPTURE_ID_ATTRIBUTE, captureId)
             if node.GetDisplayNode() is None:
                 node.CreateDefaultDisplayNodes()

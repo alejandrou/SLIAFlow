@@ -1,0 +1,253 @@
+diff --git a/data_loader.cpp b/data_loader.cpp
+--- a/data_loader.cpp
++++ b/data_loader.cpp
+@@ -91,7 +91,11 @@ ErrorCode parse_arguments(const char *folder_path, AppConfig *config) {
+     char line[MAX_PATH_LENGTH];
+     int found_values = 0;
+ 
+-    while (fgets(line, sizeof(line), file) != NULL && found_values < 3) {
++    // SLIAFlow patch 0002: the header is read to the end, because `data type`
++    // may follow the dimensions. A header that does not declare it is read as
++    // uint16, as before this patch.
++    config->dataType = ENVI_DATA_TYPE_UINT16;
++    while (fgets(line, sizeof(line), file) != NULL) {
+         int value;
+ 		//printf("%s/n",line);
+         // Look for lines that match the pattern "val = <integer>"
+@@ -104,6 +108,8 @@ ErrorCode parse_arguments(const char *folder_path, AppConfig *config) {
+ 		} else if (sscanf(line, "samples = %d", &value) == 1) {
+ 			config->numberOfSamples = value;
+ 			found_values++;
++		} else if (sscanf(line, "data type = %d", &value) == 1) {
++			config->dataType = value;
+ 		}
+     }
+ 
+@@ -114,6 +120,10 @@ ErrorCode parse_arguments(const char *folder_path, AppConfig *config) {
+         fprintf(stderr, "Error: Expected 3 values in raw.hdr: bands, samples and lines, but found %d\n", found_values);
+         return ERR_INVALID_ARGUMENT;
+     }
++    if (config->dataType != ENVI_DATA_TYPE_UINT16 && config->dataType != ENVI_DATA_TYPE_FLOAT32) {
++        fprintf(stderr, "Error: raw.hdr declares data type %d; UC1 reads 12 (uint16 raw) or 4 (float32 calibrated)\n", config->dataType);
++        return ERR_INVALID_ARGUMENT;
++    }
+ 
+     return SUCCESS;
+ }
+diff --git a/data_loader.hpp b/data_loader.hpp
+--- a/data_loader.hpp
++++ b/data_loader.hpp
+@@ -10,6 +10,12 @@
+ 
+ #define MAX_PATH_LENGTH 128
+ 
++// SLIAFlow patch 0002: the ENVI data types raw.hdr may declare. uint16 is the
++// raw cube UC1 calibrates with its references; float32 is a cube that is
++// already calibrated reflectance and is read alone.
++#define ENVI_DATA_TYPE_UINT16 12
++#define ENVI_DATA_TYPE_FLOAT32 4
++
+ typedef enum {
+     SUCCESS = 0,
+     ERR_INVALID_ARGUMENT = 1,
+@@ -27,6 +33,7 @@ struct AppConfig{
+     size_t numberOfSamples;
+     size_t numberOfLines;
+     size_t numberOfBands;
++    int dataType;
+ };
+ 
+ struct PipelineConfig {
+diff --git a/functions.cu b/functions.cu
+--- a/functions.cu
++++ b/functions.cu
+@@ -146,6 +146,40 @@ void uploadImages_uint16(AppConfig *config, uint16_t **dev_whiteRef, uint16_t **
+     nvtxRangePop();
+ }
+ 
++// SLIAFlow patch 0002: read raw.dat as a float32 BSQ cube that is already
++// calibrated reflectance, and copy it to the device as it is stored. Unlike
++// the uint16 path, a short read or a failed allocation is reported, so the
++// caller can refuse the run instead of classifying an empty buffer.
++bool uploadCalibratedImage_float32(AppConfig *config, float **dev_calibratedImage) {
++    size_t imageBytes = config->numberOfLines * config->numberOfSamples * config->numberOfBands * sizeof(float);
++    FILE *fp = fopen(config->hsi_path, "rb");
++    if (!fp) {
++        fprintf(stderr, "Error: cannot open %s\n", config->hsi_path);
++        return false;
++    }
++    float *hostImage = nullptr;
++    if (cudaMallocHost((void**)&hostImage, imageBytes) != cudaSuccess) {
++        fprintf(stderr, "Error: cannot allocate %zu bytes of host memory for the cube\n", imageBytes);
++        fclose(fp);
++        return false;
++    }
++    size_t readBytes = fread(hostImage, 1, imageBytes, fp);
++    fclose(fp);
++    if (readBytes != imageBytes) {
++        fprintf(stderr, "Error: %s holds %zu bytes, the header describes %zu\n", config->hsi_path, readBytes, imageBytes);
++        cudaFreeHost(hostImage);
++        return false;
++    }
++    if (cudaMalloc((void**)dev_calibratedImage, imageBytes) != cudaSuccess) {
++        fprintf(stderr, "Error: cannot allocate %zu bytes of device memory for the cube\n", imageBytes);
++        cudaFreeHost(hostImage);
++        return false;
++    }
++    cudaMemcpy(*dev_calibratedImage, hostImage, imageBytes, cudaMemcpyHostToDevice);
++    cudaFreeHost(hostImage);
++    return true;
++}
++
+ void uploadImages_cudaBSQ(AppConfig *config, float **dev_whiteRef, float **dev_darkRef, float **dev_rawImage) {
+     
+     nvtxRangePushA("Read Images CUDA");
+diff --git a/functions.h b/functions.h
+--- a/functions.h
++++ b/functions.h
+@@ -14,6 +14,8 @@
+ void uploadImages_cudaBSQ(AppConfig *config, float **dev_whiteRef, float **dev_darkRef, float **dev_rawImage);
+ 
+ void uploadImages_uint16(AppConfig *config, uint16_t **dev_whiteRef, uint16_t **dev_darkRef, uint16_t **dev_rawImage);
++// SLIAFlow patch 0002: read a float32 BSQ cube that is already calibrated.
++bool uploadCalibratedImage_float32(AppConfig *config, float **dev_calibratedImage);
+ __global__ void convertBSQtoBIP_kernel(const uint16_t* __restrict__ bsqImageIn,
+                                        float* __restrict__ bipImageOut,
+                                        size_t numberOfLines,
+diff --git a/functions_cuda.cu b/functions_cuda.cu
+--- a/functions_cuda.cu
++++ b/functions_cuda.cu
+@@ -16,7 +16,7 @@ __global__ void convertFloatToDouble(double *out, const float *in, int n) {
+ }
+ #endif
+ 
+-__host__ int *computingClassification(AppConfig *config, uint16_t *dev_rawImage, uint16_t *dev_whiteRef, uint16_t *dev_darkRef, int numberOfLines, int numberOfSamples, int numberOfBands, int checkHySime, double eps, int bands_pca, float min_prob, float max_prob, float *w, float *svm_data, int bin_class, int classes, int svm_iters, float svm_epsilon, int windowsize_costant, float lambda, int distance_metric, int knn, int kmeans_k, float kmeans_minErr, int kmeans_maxIter){
++__host__ int *computingClassification(AppConfig *config, uint16_t *dev_rawImage, uint16_t *dev_whiteRef, uint16_t *dev_darkRef, int numberOfLines, int numberOfSamples, int numberOfBands, int checkHySime, double eps, int bands_pca, float min_prob, float max_prob, float *w, float *svm_data, int bin_class, int classes, int svm_iters, float svm_epsilon, int windowsize_costant, float lambda, int distance_metric, int knn, int kmeans_k, float kmeans_minErr, int kmeans_maxIter, float *dev_calibratedImage){
+     /*** Variables ***/
+ #if PCA_PD == 1
+     DEBUG_GREEN("PCA: double precision");
+@@ -259,8 +259,14 @@ __host__ int *computingClassification(AppConfig *config, uint16_t *dev_rawImage,
+                     (numberOfBands  + TILE_DIM - 1) / TILE_DIM);  // 3
+ 
+     TIMER_START(calibration_tiled, "calibration_tiled");
++    if (dev_calibratedImage != NULL) {
++        // SLIAFlow patch 0002: already calibrated, so only scaled and transposed.
++        scaleCalibratedAndConvertToBIP_Tiled<<<grid_tiled, block_tiled>>>(dev_calibrateImage, dev_calibratedImage,
++        numberOfBands, numberOfPixels);
++    } else {
+     calibrateAndConvertToBIP_Tiled<<<grid_tiled, block_tiled>>>(dev_calibrateImage, dev_rawImage, dev_darkRef, dev_whiteRef,
+     numberOfBands, numberOfPixels);
++    }
+     #if defined(PROFILE_MODE) 
+         cudaDeviceSynchronize();
+     #endif
+@@ -268,6 +274,7 @@ __host__ int *computingClassification(AppConfig *config, uint16_t *dev_rawImage,
+ 
+     cudaFree(dev_whiteRef);
+     cudaFree(dev_darkRef);
++    cudaFree(dev_calibratedImage);
+     cudaMalloc((void**)&dev_normalizedImage, mem_size_normalizedImage);
+     
+     int warpsPerBlock   = threadsPerBlock / 32;              // 8 pixels per block
+@@ -855,6 +862,40 @@ __global__ void calibrateAndConvertToBIP_Tiled(
+     }
+ }
+ 
++// SLIAFlow patch 0002. The same tiled BSQ-to-BIP transpose as
++// calibrateAndConvertToBIP_Tiled, for a cube that is already calibrated
++// reflectance (1.0 = the white reference). It is multiplied by 100, the scale
++// UC1's own calibration writes, so every later stage sees the units it
++// sees on a uint16 cube.
++__global__ void scaleCalibratedAndConvertToBIP_Tiled(
++    float       * __restrict__ calibrateImageBIPOut,
++    const float * __restrict__ calibratedBSQ,
++    size_t numberOfBands,
++    size_t numberOfPixels)
++{
++    __shared__ float tile[TILE_DIM][TILE_DIM + 1];
++
++    int pixelIdx = blockIdx.x * TILE_DIM + threadIdx.x;
++    int bandIdx  = blockIdx.y * TILE_DIM + threadIdx.y;
++
++    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
++        int b = bandIdx + j;
++        if (pixelIdx < numberOfPixels && b < numberOfBands) {
++            tile[threadIdx.y + j][threadIdx.x] = 100.0f * calibratedBSQ[(size_t)b * numberOfPixels + pixelIdx];
++        }
++    }
++    __syncthreads();
++
++    int bandWrite  = blockIdx.y * TILE_DIM + threadIdx.x;
++    int pixelWrite = blockIdx.x * TILE_DIM + threadIdx.y;
++
++    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
++        if ((pixelWrite + j) < numberOfPixels && bandWrite < numberOfBands) {
++            calibrateImageBIPOut[(size_t)(pixelWrite + j) * numberOfBands + bandWrite] = tile[threadIdx.x][threadIdx.y + j];
++        }
++    }
++}
++
+ /*PRE-PROCESSING --> Kernel that divides the rawImageLine over whiteRef*/
+ __global__ void divideKernel(float *rawImageLine, float *dev_whiteRef, int numberOfSamples, int numberOfBands) {
+     int i = blockIdx.x * blockDim.x + threadIdx.x; 
+diff --git a/functions_cuda.cuh b/functions_cuda.cuh
+--- a/functions_cuda.cuh
++++ b/functions_cuda.cuh
+@@ -15,7 +15,7 @@
+ #include "HySimeFilter/hysimefunc.h"
+ 
+ __host__ int checkCudaError(int line);
+-__host__ int *computingClassification(AppConfig *config, uint16_t *rawImage, uint16_t *whiteRef, uint16_t *darkRef, int numberOfLines, int numberOfSamples, int numberOfBands, int checkHySime, double eps, int bands_pca, float min_prob, float max_prob, float *w, float *svm_data, int bin_class, int classes, int svm_iters, float svm_epsilon, int windowsize_costant, float lambda, int distance_metric, int knn, int kmeans_k, float kmeans_minErr, int kmeans_maxIter);
++__host__ int *computingClassification(AppConfig *config, uint16_t *rawImage, uint16_t *whiteRef, uint16_t *darkRef, int numberOfLines, int numberOfSamples, int numberOfBands, int checkHySime, double eps, int bands_pca, float min_prob, float max_prob, float *w, float *svm_data, int bin_class, int classes, int svm_iters, float svm_epsilon, int windowsize_costant, float lambda, int distance_metric, int knn, int kmeans_k, float kmeans_minErr, int kmeans_maxIter, float *dev_calibratedImage);
+ /*PRE-PROCESSING*/
+ __global__ void calibrateImageKernel(float *rawImage, float *darkRef, float *whiteRef, int totalElements);
+ __global__ void divideKernel(float *rawImageLine, float *dev_whiteRef2, int numberOfSamples, int numberOfBands);
+@@ -27,6 +27,10 @@ __global__ void calibrateAndConvertToBIP_Kernel(float *calibrateImageBIPOut, con
+ __global__ void calibrateAndConvertToBIP_Tiled(float * __restrict__ calibrateImageBIPOut,const uint16_t * __restrict__ rawBSQ,
+                                                const uint16_t * __restrict__ darkBSQ, const uint16_t * __restrict__ whiteBSQ, 
+                                                size_t numberOfBands,size_t numberOfPixels);
++// SLIAFlow patch 0002: the float32 counterpart of calibrateAndConvertToBIP_Tiled.
++__global__ void scaleCalibratedAndConvertToBIP_Tiled(float * __restrict__ calibrateImageBIPOut,
++                                                     const float * __restrict__ calibratedBSQ,
++                                                     size_t numberOfBands, size_t numberOfPixels);
+ __global__ void normalizeImgKernel_optimized(const float * __restrict__ calibratedImage, float * __restrict__ normalizedImage,
+                                              int numberOfBands, int numberOfPixels);
+ 
+diff --git a/main.cu b/main.cu
+--- a/main.cu
++++ b/main.cu
+@@ -111,6 +111,9 @@ int main(int argc, char **argv) {
+ 
+ 	//float *dev_whiteRef = NULL, *dev_darkRef = NULL, *dev_rawImage = NULL;
+ 	uint16_t *dev_whiteRef = NULL, *dev_darkRef = NULL, *dev_rawImage = NULL;
++	// SLIAFlow patch 0002: a float32 cube is already calibrated, so it is read
++	// alone and the references are never opened.
++	float *dev_calibratedImage = NULL;
+ 	DEBUG("Uploading Images and references");
+ 	//___________________READ IMAGES__________________//
+ 
+@@ -118,7 +121,14 @@ int main(int argc, char **argv) {
+ 
+ 	TIMER_START(uploadImages, "Upload Images");
+ 	//uploadImages_cudaBSQ(&config, &dev_whiteRef, &dev_darkRef, &dev_rawImage);
+-	uploadImages_uint16(&config, &dev_whiteRef, &dev_darkRef, &dev_rawImage);
++	if (config.dataType == ENVI_DATA_TYPE_FLOAT32) {
++		if (!uploadCalibratedImage_float32(&config, &dev_calibratedImage)) {
++			fprintf(stderr, "Failed to read the calibrated float32 cube %s\n", config.hsi_path);
++			return EXIT_FAILURE;
++		}
++	} else {
++		uploadImages_uint16(&config, &dev_whiteRef, &dev_darkRef, &dev_rawImage);
++	}
+ 	TIMER_STOP(uploadImages, "Upload Images");
+ 
+ 	//__________READING THE SVM MODEL DATA ___________//
+@@ -168,7 +178,7 @@ int main(int argc, char **argv) {
+ 
+ 	int *mvMap = NULL;
+ 	DEBUG("Computing classification starts");
+-	mvMap = computingClassification(&config, dev_rawImage, dev_whiteRef, dev_darkRef, numberOfLines, numberOfSamples, numberOfBands, checkHySime, pca_epsilon, numberOfPcaBands, min_prob,max_prob, w_vector, dataMatlab, num_binary_classifiers, numberOfClasses, svm_iters,  svm_epsilon, windowsize_costant, lambda, distance_metric_flag, knn, kmeans_k, kmeans_minErr, kmeans_maxIter);
++	mvMap = computingClassification(&config, dev_rawImage, dev_whiteRef, dev_darkRef, numberOfLines, numberOfSamples, numberOfBands, checkHySime, pca_epsilon, numberOfPcaBands, min_prob,max_prob, w_vector, dataMatlab, num_binary_classifiers, numberOfClasses, svm_iters,  svm_epsilon, windowsize_costant, lambda, distance_metric_flag, knn, kmeans_k, kmeans_minErr, kmeans_maxIter, dev_calibratedImage);
+ 	DEBUG("Computing classification ends");
+ 	/*Stop Time*/
+ 	auto stop_time = std::chrono::high_resolution_clock::now();

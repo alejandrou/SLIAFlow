@@ -8,7 +8,7 @@ header under `input/`, where `002-04` lies. Nothing here writes to it.
 The checks are the ones ADR-0004 decision 6 lists for a float32 cube: the header
 and data file agree (data type 4, bsq, byte order 0, no header offset, size),
 and the wavelengths are present, one per band. The 109 -> 93 band mapping of
-decision 4 is UC1's check and belongs to SLIA-033; this module only displays.
+decision 4 is applied to the same cube for UC1 by `SLIAFlowUc1Input`.
 
 The values are handed back as stored: no resampling, smoothing or rescaling.
 """

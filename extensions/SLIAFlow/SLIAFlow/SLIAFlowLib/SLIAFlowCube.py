@@ -1,23 +1,17 @@
-"""Describe the one case folder a capture sends to UC1, and read its ground truth.
+"""Read ENVI headers, and the ground truth that may lie beside a cube.
 
-The acquisition is simulated: each Capture stands for a hyperspectral cube, and
-UC1 runs on the one configured folder (`SLIAFlowLogic.cubeFolder`), read where
-it lies under `input/`. Until SLIA-033 that folder is a recorded case of the HSI
-Human Brain Database kept as the UC1 reference (ADR-0004 decision 1). Nothing
-here writes to it. Describing the case reads only headers and file sizes. The
-HS Cube panel shows IUMA's calibrated cube instead (`SLIAFlowCalibratedCube`,
-SLIA-032), so the case's own `raw.dat` pixels are read only by UC1.
+The cube itself is read by `SLIAFlowCalibratedCube`, and handed to UC1 by
+`SLIAFlowUc1Input` (SLIA-033). What remains here is shared by both: the ENVI
+header parser, and the ground-truth map (`gtMap`) a cube may carry.
 
-A case is used only when UC1 can run on it without silently reading the wrong
-thing. `main.cu` trusts the header's band count when it reads the SVM model and
-never checks how much it read, and it reads the three data files without
-checking their sizes. So the checks are the ones `tools/simulators/stratum_sim`
-applies in `envi.loadDataset`, `envi.assertDataFilesMatchHeader`,
-`uc1_runner.assertRecordedCase` and `uc1_runner.Uc1Build.assertDatasetMatchesModel`,
-restated here because a Slicer module cannot import that tooling.
+A ground truth is offered only for a cube that has one (ADR-0004 decision 8).
+IUMA's `002-04` has none; the recorded cases of the HSI Human Brain Database
+do, as a `gtMap` pair in the case folder, and a cube laid out the same way is
+read the same way. It is someone's labelling of the scene, not a UC1 output, and
+it is only ever shown beside a result, never fed into a run. Nothing here writes
+next to the cube.
 """
 
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -28,18 +22,9 @@ except ImportError:  # Outside Slicer, messages stay in English.
     def _(text):
         return text
 
-# The staged SVM model is sized for this many bands (uc1_runner.UC1_MODEL_BAND_COUNT).
-UC1_MODEL_BAND_COUNT = 93
-
-# The three ENVI pairs UC1 opens, by stem.
-CASE_FILE_STEMS = ("raw", "darkReference", "whiteReference")
-# ENVI data type 12 is uint16, which is what UC1 reads.
+# gtMap is one band of uint16 class IDs (ENVI data type 12), stored bil.
 ENVI_DATA_TYPE_UINT16 = "12"
 BYTES_PER_SAMPLE = 2
-
-# envi.RECORDED_DATASET_MARKER and envi.GROUND_TRUTH_HEADER_FILE_NAME: the
-# database stamps its name into gtMap.hdr and nowhere else.
-RECORDED_DATASET_MARKER = "HSI Human Brain Database"
 GROUND_TRUTH_HEADER_FILE_NAME = "gtMap.hdr"
 GROUND_TRUTH_FILE_NAME = "gtMap"
 
@@ -70,25 +55,16 @@ HIGHEST_GROUND_TRUTH_CLASS_ID = max(classId for classId, _name, _colour in GROUN
 UNLABELLED_CLASS_ID = 0
 
 
-@dataclass(frozen=True)
-class RecordedCase:
-    name: str
-    folder: Path
-    samples: int
-    lines: int
-    bands: int
-
-
-class IncompatibleCaseError(ValueError):
-    """The folder is not a recorded case UC1 can run on."""
+class GroundTruthError(ValueError):
+    """The gtMap beside a cube cannot be laid over that cube's result."""
 
 
 def parseEnviHeader(text: str) -> dict[str, str]:
     """Return an ENVI header's key/value entries, lower-case keys.
 
     The brace-delimited wavelength block is consumed and not returned: a
-    recorded case closes it on its last value line and puts `lines` and
-    `samples` after it, so it must be skipped exactly, not line by line.
+    header may close it on its last value line and put `lines` and `samples`
+    after it, so it must be skipped exactly, not line by line.
     """
     values: dict[str, str] = {}
     insideBlock = False
@@ -111,140 +87,67 @@ def parseEnviHeader(text: str) -> dict[str, str]:
     return values
 
 
-def _headerDimensions(path: Path) -> tuple[int, int, int]:
-    if not path.is_file():
-        raise IncompatibleCaseError(_("{file} is missing.").format(file=path.name))
-    values = parseEnviHeader(path.read_text(encoding="ascii", errors="replace"))
-    missing = [key for key in ("samples", "lines", "bands") if key not in values]
-    if missing:
-        raise IncompatibleCaseError(_("{file} does not declare {keys}.").format(
-            file=path.name, keys=", ".join(missing)))
-    try:
-        dimensions = tuple(int(values[key]) for key in ("samples", "lines", "bands"))
-    except ValueError as error:
-        raise IncompatibleCaseError(_("{file} has a dimension that is not an integer.").format(
-            file=path.name)) from error
-    if any(value <= 0 for value in dimensions):
-        raise IncompatibleCaseError(_("{file} declares a dimension that is not positive.").format(
-            file=path.name))
-    if values.get("data type") != ENVI_DATA_TYPE_UINT16:
-        raise IncompatibleCaseError(_("{file} declares data type {value}, not 12 (uint16).").format(
-            file=path.name, value=values.get("data type")))
-    if values.get("interleave", "").lower() != "bsq":
-        raise IncompatibleCaseError(_("{file} declares interleave {value}, not bsq.").format(
-            file=path.name, value=values.get("interleave")))
-    if values.get("byte order") != "0":
-        raise IncompatibleCaseError(
-            _("{file} declares byte order {value}, not 0 (little-endian).").format(
-                file=path.name, value=values.get("byte order")))
-    if values.get("header offset", "0") != "0":
-        raise IncompatibleCaseError(_("{file} declares a header offset of {value}, not 0.").format(
-            file=path.name, value=values.get("header offset")))
-    return dimensions
+def hasGroundTruth(folder) -> bool:
+    """Whether a cube in `folder` carries a ground truth to offer.
 
-
-def loadRecordedCase(folder) -> RecordedCase:
-    """Describe a case folder UC1 can run on, or say why it cannot."""
+    Either file of the pair is enough to offer it: a pair with one half missing
+    is then refused by `readGroundTruth` with the reason, rather than silently
+    not offered.
+    """
     folder = Path(folder)
-    if not folder.is_dir():
-        raise IncompatibleCaseError(_("{folder} is not a folder.").format(folder=folder))
-
-    dimensions = None
-    firstHeader = None
-    for stem in CASE_FILE_STEMS:
-        headerPath = folder / f"{stem}.hdr"
-        current = _headerDimensions(headerPath)
-        if dimensions is None:
-            dimensions, firstHeader = current, headerPath.name
-        elif current != dimensions:
-            raise IncompatibleCaseError(_(
-                "{file} describes {samples} x {lines} x {bands} but {firstFile} describes "
-                "{firstSamples} x {firstLines} x {firstBands} (samples x lines x bands)."
-            ).format(file=headerPath.name, samples=current[0], lines=current[1],
-                     bands=current[2], firstFile=firstHeader, firstSamples=dimensions[0],
-                     firstLines=dimensions[1], firstBands=dimensions[2]))
-    samples, lines, bands = dimensions
-
-    if bands != UC1_MODEL_BAND_COUNT:
-        raise IncompatibleCaseError(_(
-            "The case has {bands} bands, but the staged SVM model is sized for {modelBands}. "
-            "UC1 would classify against truncated or uninitialised weights."
-        ).format(bands=bands, modelBands=UC1_MODEL_BAND_COUNT))
-
-    expectedBytes = samples * lines * bands * BYTES_PER_SAMPLE
-    for stem in CASE_FILE_STEMS:
-        dataPath = folder / f"{stem}.dat"
-        if not dataPath.is_file():
-            raise IncompatibleCaseError(_("{file} is missing.").format(file=dataPath.name))
-        actualBytes = dataPath.stat().st_size
-        if actualBytes != expectedBytes:
-            raise IncompatibleCaseError(
-                _("{file} is {actual} bytes but the headers describe {expected}.").format(
-                    file=dataPath.name, actual=actualBytes, expected=expectedBytes))
-
-    groundTruthHeader = folder / GROUND_TRUTH_HEADER_FILE_NAME
-    if not groundTruthHeader.is_file() or RECORDED_DATASET_MARKER not in groundTruthHeader.read_text(
-        encoding="ascii", errors="replace"
-    ):
-        raise IncompatibleCaseError(_(
-            "The folder does not identify as a case of the {dataset}: its {header} does not "
-            "carry that marker."
-        ).format(dataset=RECORDED_DATASET_MARKER, header=GROUND_TRUTH_HEADER_FILE_NAME))
-
-    return RecordedCase(folder.name, folder.resolve(), samples, lines, bands)
+    return (folder / GROUND_TRUTH_HEADER_FILE_NAME).is_file() or (
+        folder / GROUND_TRUTH_FILE_NAME).is_file()
 
 
-def _groundTruthHeaderDimensions(path: Path, case) -> tuple[int, int]:
-    """Check gtMap.hdr against the case, and return its (lines, samples).
+def _groundTruthHeaderDimensions(path: Path, samples: int, lines: int) -> None:
+    """Check gtMap.hdr against the cube it is to be laid over.
 
     gtMap has its own header, so its geometry is read from it rather than
-    assumed from raw.hdr, and then required to agree. A ground truth that does
+    assumed from the cube, and then required to agree. A ground truth that does
     not agree cannot be laid over a result at all, so it is refused instead of
     being stretched or cropped to fit.
     """
     if not path.is_file():
-        raise IncompatibleCaseError(_("{file} is missing.").format(file=path.name))
+        raise GroundTruthError(_("{file} is missing.").format(file=path.name))
     values = parseEnviHeader(path.read_text(encoding="ascii", errors="replace"))
     missing = [key for key in ("samples", "lines", "bands") if key not in values]
     if missing:
-        raise IncompatibleCaseError(_("{file} does not declare {keys}.").format(
+        raise GroundTruthError(_("{file} does not declare {keys}.").format(
             file=path.name, keys=", ".join(missing)))
     try:
-        samples, lines, bands = (int(values[key]) for key in ("samples", "lines", "bands"))
+        mapSamples, mapLines, bands = (int(values[key]) for key in ("samples", "lines", "bands"))
     except ValueError as error:
-        raise IncompatibleCaseError(_("{file} has a dimension that is not an integer.").format(
+        raise GroundTruthError(_("{file} has a dimension that is not an integer.").format(
             file=path.name)) from error
     if bands != GROUND_TRUTH_BAND_COUNT:
-        raise IncompatibleCaseError(
+        raise GroundTruthError(
             _("{file} declares {bands} bands, not {expected}: it is not a single map of "
               "labels.").format(file=path.name, bands=bands, expected=GROUND_TRUTH_BAND_COUNT))
-    if (samples, lines) != (case.samples, case.lines):
-        raise IncompatibleCaseError(_(
-            "{file} describes {samples} x {lines} but the case is {caseSamples} x {caseLines} "
+    if (mapSamples, mapLines) != (samples, lines):
+        raise GroundTruthError(_(
+            "{file} describes {samples} x {lines} but the cube is {cubeSamples} x {cubeLines} "
             "(samples x lines)."
-        ).format(file=path.name, samples=samples, lines=lines, caseSamples=case.samples,
-                 caseLines=case.lines))
+        ).format(file=path.name, samples=mapSamples, lines=mapLines, cubeSamples=samples,
+                 cubeLines=lines))
     if values.get("data type") != ENVI_DATA_TYPE_UINT16:
-        raise IncompatibleCaseError(_("{file} declares data type {value}, not 12 (uint16).").format(
+        raise GroundTruthError(_("{file} declares data type {value}, not 12 (uint16).").format(
             file=path.name, value=values.get("data type")))
     if values.get("interleave", "").lower() != ENVI_INTERLEAVE_BIL:
-        raise IncompatibleCaseError(_("{file} declares interleave {value}, not {expected}.").format(
+        raise GroundTruthError(_("{file} declares interleave {value}, not {expected}.").format(
             file=path.name, value=values.get("interleave"), expected=ENVI_INTERLEAVE_BIL))
     if values.get("byte order") != "0":
-        raise IncompatibleCaseError(
+        raise GroundTruthError(
             _("{file} declares byte order {value}, not 0 (little-endian).").format(
                 file=path.name, value=values.get("byte order")))
     if values.get("header offset", "0") != "0":
-        raise IncompatibleCaseError(_("{file} declares a header offset of {value}, not 0.").format(
+        raise GroundTruthError(_("{file} declares a header offset of {value}, not 0.").format(
             file=path.name, value=values.get("header offset")))
-    return lines, samples
 
 
-def readGroundTruth(case) -> np.ndarray:
-    """Return a case's ground truth as a (lines, samples) uint16 array of class IDs.
+def readGroundTruth(folder, samples: int, lines: int) -> np.ndarray:
+    """Return the gtMap in `folder` as a (lines, samples) uint16 array of class IDs.
 
-    This is the database's own labelling, not anything UC1 produced: it is read
-    only to be shown beside a result, never fed back into the run. One band of
+    `samples` and `lines` are the cube's, which the map must match. One band of
     bil is a plain row-major image, so the bytes are reshaped and never
     rearranged, which puts row 0 at the top -- the same way `readUc1Bmp` hands
     back a decoded output, so the two line up pixel for pixel.
@@ -252,15 +155,16 @@ def readGroundTruth(case) -> np.ndarray:
     A class ID outside the legend would index past the colour table, so the
     values are checked rather than clamped.
     """
-    headerPath = Path(case.folder) / GROUND_TRUTH_HEADER_FILE_NAME
-    lines, samples = _groundTruthHeaderDimensions(headerPath, case)
-    path = Path(case.folder) / GROUND_TRUTH_FILE_NAME
+    folder = Path(folder)
+    headerPath = folder / GROUND_TRUTH_HEADER_FILE_NAME
+    _groundTruthHeaderDimensions(headerPath, samples, lines)
+    path = folder / GROUND_TRUTH_FILE_NAME
     if not path.is_file():
-        raise IncompatibleCaseError(_("{file} is missing.").format(file=path.name))
+        raise GroundTruthError(_("{file} is missing.").format(file=path.name))
     expectedBytes = samples * lines * BYTES_PER_SAMPLE
     actualBytes = path.stat().st_size
     if actualBytes != expectedBytes:
-        raise IncompatibleCaseError(
+        raise GroundTruthError(
             _("{file} is {actual} bytes but {header} describes {expected}.").format(
                 file=path.name, actual=actualBytes, header=headerPath.name,
                 expected=expectedBytes))
@@ -268,32 +172,8 @@ def readGroundTruth(case) -> np.ndarray:
     labels = np.fromfile(path, dtype="<u2").reshape(lines, samples)
     highest = int(labels.max()) if labels.size else 0
     if highest > HIGHEST_GROUND_TRUTH_CLASS_ID:
-        raise IncompatibleCaseError(
+        raise GroundTruthError(
             _("{file} holds class ID {classId}, but {header} only legends 0 to {highest}.").format(
                 file=path.name, classId=highest, header=headerPath.name,
                 highest=HIGHEST_GROUND_TRUTH_CLASS_ID))
     return labels
-
-
-def assertCaseUnchanged(case: RecordedCase) -> None:
-    """Re-read the case folder and refuse the run if it no longer matches.
-
-    The case is described when Capture is pressed, and the run starts after
-    that. The folder lies outside the
-    repository and nothing here owns it, so it can be edited, truncated or
-    copied over in between, and UC1 reads the sizes from the headers without
-    checking what it got. Re-reading the folder immediately before the run is
-    the only point at which the description the operator was shown is known to
-    still be the cube on disk.
-
-    The run is refused rather than run on whatever the folder now holds: that
-    would stamp the result with a cube the operator never saw described.
-    """
-    current = loadRecordedCase(case.folder)
-    if current != case:
-        raise IncompatibleCaseError(_(
-            "Recorded case {case} changed on disk since Capture was pressed: it was "
-            "{samples} x {lines} x {bands} and is now {nowSamples} x {nowLines} x {nowBands} "
-            "(samples x lines x bands). Press Capture again to run on the case as it is now."
-        ).format(case=case.name, samples=case.samples, lines=case.lines, bands=case.bands,
-                 nowSamples=current.samples, nowLines=current.lines, nowBands=current.bands))

@@ -2,14 +2,17 @@
 
 This describes how the vendored UC1 CUDA pipeline is compiled and run on this
 machine, and what was actually measured when it was. Nothing in
-`workspace/components/` is modified: the sources are staged, built and executed
-somewhere else, and every build re-proves that property by hash.
+`workspace/components/` is modified: the sources are staged, patched, built and
+executed somewhere else, and every build re-proves by hash that the staged tree
+is the vendored one plus the versioned patches and nothing else.
 
-The pipeline runs on recorded cases of the public, anonymized HSI Human Brain
-Database. Calibration, PCA, SVM, KNN, K-means and majority voting are the
-vendored code doing real work on the local GPU. The acquisition event is
-simulated, so a result is marked `simulated` on the wire, and nothing it produces
-is a clinical result.
+Since `SLIA-033` the pipeline runs on IUMA's calibrated LCTF cube `002-04`, mapped
+onto the model's 93 bands, and still runs unchanged on the recorded reference
+case `020-01` of the HSI Human Brain Database. The patches, the band mapping and
+what each produced are recorded in [`uc1_changes.md`](uc1_changes.md).
+Calibration, PCA, SVM, KNN, K-means and majority voting are the vendored code
+doing real work on the local GPU. The acquisition event is simulated, so a
+result is marked `simulated`, and nothing it produces is a clinical result.
 
 ## Toolchain the binary was proven against
 
@@ -37,9 +40,16 @@ fallback. nvcc 12.9 accepts this MSVC, so `-allow-unsupported-compiler` must
 .\scripts\development\build-uc1.ps1 -Clean     # discard previous outputs first
 ```
 
-The script captures the toolchain, stages the sources, pre-creates the output
+The script captures the toolchain, stages the sources, applies the patches in
+`scripts/development/uc1-patches/` in name order, pre-creates the output
 directories, builds two binaries, checks each one's expected warnings, and
-asserts the staged tree still hashes identically to `workspace/components/`.
+asserts the staged tree hashes identically to `workspace/components/` plus the
+patches. Then check the result against the reference case and each patch's own
+check ([`uc1_changes.md`](uc1_changes.md)):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\development\check-uc1.py
+```
 
 | Binary | Command line | Used by |
 | --- | --- | --- |
@@ -53,13 +63,19 @@ literal relative path `../../svm_model/*.bin`, resolved against the working
 directory, so the model must sit exactly two levels above the source directory.
 
 ```text
-build/uc1/UC1/
-  svm_model/                  copied verbatim, 5 .bin files
-  gpu_single_bsq/source/      copied verbatim, 37 files including parameters.txt
-    output/rgb/               pre-created; the binary will not create it
-    output/<dataset>/         pre-created per run; likewise
-    stratum.opt.exe
-    stratum.opt.intermediate.exe
+build/uc1/
+  UC1/
+    svm_model/                copied verbatim, 5 .bin files
+    gpu_single_bsq/source/    37 files including parameters.txt, patched
+      output/rgb/             pre-created; the binary will not create it
+      output/<dataset>/       pre-created per run; likewise
+      stratum.opt.exe
+      stratum.opt.intermediate.exe
+    input/<cube>/             raw.dat and raw.hdr: the mapped cube SLIAFlow
+                              writes at every Capture and gives UC1
+  expected/                   vendored source plus patches, for the hash check
+  reference-unpatched/        a saved run of the unpatched build on 020-01,
+                              for check-uc1.py
 ```
 
 The binary is never built or run in place: `main.cu` writes its output into the
@@ -112,25 +128,37 @@ and is harmless; the toolset is still configured and the build succeeds.
 
 ### The hash assertion
 
-After every build, each staged file is compared by SHA-256 against its
-`workspace/components/` original, in both directions: a changed or missing file
-fails, and so does a staged file with no original that is not a known build
-product. That last check is what would catch an edit made by addition.
+After every build, the script rebuilds `build/uc1/expected/` from a fresh copy of
+the vendored source with the same patches applied, and compares each staged file
+against it by SHA-256, in both directions: a changed or missing file fails, and
+so does a staged file with no counterpart that is not a known build product.
+That last check is what would catch an edit made by addition. The model is
+compared against the vendored `svm_model/` directly; no patch touches it.
 
-Reference values from the proven build:
+The patches are applied with `git apply` run from the repository root with the
+staged folder as `--directory`. Run from inside the ignored staged folder,
+`git apply` reads the patch paths from the repository root, skips every file,
+prints `Skipped patch` and exits 0; the first version of the script passed that
+way at `SLIA-033`, with a vendored `main.cu` in the staged tree. The script now
+fails on any skipped patch.
+
+Reference value of the vendored source, printed on every build:
 
 | File | SHA-256 |
 | --- | --- |
-| `gpu_single_bsq/source/main.cu` | `63D0E9EE5E77B06876DFA7D76965B1F67719D841D7A4012742F85E2540C788C0` |
+| `gpu_single_bsq/source/main.cu`, vendored | `63D0E9EE5E77B06876DFA7D76965B1F67719D841D7A4012742F85E2540C788C0` |
 
-Modifying vendored UC1 source is out of scope for this project. If a build ever
-requires a source edit, that is a roadmap-boundary decision for the project
-owner, not a silent fix.
+UC1 is changed only through a patch in `scripts/development/uc1-patches/`,
+recorded in `uc1_changes.md` (`ADR-0004` decision 3). An edit anywhere else fails
+the hash assertion.
 
 ## The intermediate build SLIAFlow runs
 
-`stratum.opt.intermediate.exe` takes the case folder as its only argument and
-must run from `gpu_single_bsq/source`. Besides `imageRGB.bmp` and the three
+`stratum.opt.intermediate.exe` takes a folder holding `raw.hdr` and `raw.dat` as
+its only argument and must run from `gpu_single_bsq/source`. For a uint16
+`raw.hdr` it also reads `whiteReference.dat` and `darkReference.dat` there; for a
+float32 one (data type 4, patch 0002) it reads `raw.dat` alone as calibrated
+reflectance. SLIAFlow gives it `build/uc1/UC1/input/<cube>`. Besides `imageRGB.bmp` and the three
 `output/rgb/*.txt` channel files it writes per-stage images into
 `output/<case>/`:
 
@@ -275,6 +303,12 @@ making the K-means reduction bit-stable would mean editing vendored UC1 source. 
 run that moved pixels away from class boundaries, or moved appreciably more of
 them, would be a real regression.
 
+On the reference case `020-01` the unpatched build moved more than that: up to
+0.32 % of `kmeans.bmp` and 0.19 % of `imageRGB.bmp` pixels between two runs, while
+`pca.bmp`, `svm.bmp` and `knn.bmp` stayed byte-identical over seven runs
+(`SLIA-033`). `check-uc1.py` therefore compares those three byte for byte and
+bounds the K-means outputs at 1 % ([`uc1_changes.md`](uc1_changes.md)).
+
 ## A map that shows nothing
 
 UC1 min-max normalizes each pixel across its bands before the SVM
@@ -285,6 +319,9 @@ was trained on comes back as a single class.
 
 The classifier itself is never tuned, under any option. Changing
 `parameters.txt`, the SVM model, or vendored source to make a case produce a
-different map would make every future result meaningless. The retired runner
+different map would make every future result meaningless. The patches of
+`SLIA-033` are not that: they refuse a wrong band count, read a cube IUMA has
+already calibrated, and stop the PCA dividing by zero on identical bands; the
+reference case's classification is unchanged by them. The retired runner
 reported a uniform map loudly - `uniformClassWarning` on stderr - so an input the
 model did not recognise said so.

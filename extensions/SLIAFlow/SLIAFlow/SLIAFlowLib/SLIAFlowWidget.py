@@ -10,7 +10,6 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
 from .SLIAFlowCalibratedCube import CalibratedCubeError
-from .SLIAFlowCube import IncompatibleCaseError
 from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
     CAPTURE_ID_ATTRIBUTE,
@@ -127,33 +126,44 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     )
     CAPTURE_CAPTURING_STATUS = _("Capturing: LiveView is frozen and the frame is being saved.")
     CAPTURE_RUNNING_STATUS = _(
-        "Running UC1 on recorded case {case} (simulated acquisition)..."
+        "Running UC1 on recorded cube {case} (simulated acquisition)..."
     )
-    CAPTURE_VALIDATING_STATUS = _("Validating the UC1 outputs for recorded case {case}...")
+    CAPTURE_VALIDATING_STATUS = _("Validating the UC1 outputs for recorded cube {case}...")
+    # ADR-0004 decision 5: UC1's model was trained on another camera, so a
+    # result on the LCTF cube shows what the pipeline does, not how right it is.
+    # Every status that describes a result on screen says so, stale ones too.
     CAPTURE_DONE_STATUS = _(
-        "Done: UC1 results for recorded case {case} are shown. Snapshot saved as {snapshot}."
+        "Done: UC1 results for recorded cube {case} are shown. They are not validated: UC1's "
+        "model was trained on another camera. Snapshot saved as {snapshot}."
     )
     CAPTURE_FAILED_STATUS = _("Failed: {message} Press Capture to try again.")
     CAPTURE_FAILED_CASE_STATUS = _(
-        "Failed on recorded case {case}: {message} Press Capture to try again."
+        "Failed on recorded cube {case}: {message} Press Capture to try again."
     )
     RESULT_NONE_STATUS = _("No UC1 result yet. Press Capture.")
-    RESULT_STATUS = _("Recorded case {case} - simulated acquisition. Showing {file}.")
-    RESULT_STALE_STATUS = _(
-        "Previous result: recorded case {case}, simulated acquisition. It is not from "
-        "the current capture."
+    RESULT_STATUS = _(
+        "Recorded cube {case} - simulated acquisition. Showing {file}. UC1 results on this "
+        "cube are not validated."
     )
-    RESULT_SOURCE_TEXT = _("{file}, recorded case {case}, capture {captureId}")
+    RESULT_STALE_STATUS = _(
+        "Previous result: recorded cube {case}, simulated acquisition. It is not from "
+        "the current capture. UC1 results on this cube are not validated."
+    )
+    RESULT_SOURCE_TEXT = _("{file}, recorded cube {case}, capture {captureId}")
     GROUND_TRUTH_STATUS = _(
-        "Recorded case {case} - simulated acquisition. Showing {file} under the recorded "
-        "ground truth."
+        "Recorded cube {case} - simulated acquisition. Showing {file} under the recorded "
+        "ground truth. UC1 results on this cube are not validated."
     )
     GROUND_TRUTH_SOURCE_TEXT = _(
-        "{file} under {groundTruth}, recorded case {case}, capture {captureId}"
+        "{file} under {groundTruth}, recorded cube {case}, capture {captureId}"
     )
     GROUND_TRUTH_MISSING_STATUS = _(
-        "Recorded case {case} - simulated acquisition. Showing {file}. Its ground truth "
-        "could not be read."
+        "Recorded cube {case} - simulated acquisition. Showing {file}. Its ground truth "
+        "could not be read. UC1 results on this cube are not validated."
+    )
+    NO_GROUND_TRUTH_STATUS = _(
+        "Recorded cube {case} - simulated acquisition. Showing {file}. This cube has no ground "
+        "truth. UC1 results on this cube are not validated."
     )
     # The label layer is drawn over the result, so it is half transparent: both
     # the labelled class and the classification under it stay readable.
@@ -170,7 +180,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     PREVIEW_CAPTION = _(
         "R {red:g} nm, G {green:g} nm, B {blue:g} nm - band composite, not a photograph"
     )
-    RESULT_CAPTION = _("Result for recorded case {case}")
+    RESULT_CAPTION = _("Result for recorded cube {case}")
     CUBE_UNREADABLE_MESSAGE = _("The hyperspectral cube could not be shown.\n{reason}")
     CAPTION_FONT_SIZE = 13
     # Top of HS Cube; bottom of Tumour Delineation, whose top carries the stale line.
@@ -216,6 +226,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # The accepted result on screen, and whether it is from an earlier
         # capture than the one in progress or the one that failed.
         self._resultCaseName: str | None = None
+        # Whether the cube behind the result on screen has a gtMap beside it.
+        self._resultHasGroundTruth = False
         self._resultCaptureId: str | None = None
         # The result capture the Tumour Delineation view was last framed for.
         self._fittedCaptureId: str | None = None
@@ -368,7 +380,29 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             selector = getattr(getattr(self, "ui", None), name, None)
             if selector is not None:
                 selector.setEnabled(self._presentationActive)
+        self._refreshGroundTruthEntry()
         self._refreshCameraControls()
+
+    def _refreshGroundTruthEntry(self) -> None:
+        """Offer gtMap only while the result on screen has a ground truth.
+
+        ADR-0004 decision 8. The entry stays in the list, because the parameter
+        binding selects by position and removing it would shift every index.
+        It is hidden from the popup and disabled, which also keeps the keyboard
+        and the mouse wheel from choosing it. connectGui refills the box, so
+        this runs again after every binding.
+        """
+        selector = getattr(getattr(self, "ui", None), "resultOutputSelector", None)
+        if selector is None:
+            return
+        index = selector.findText(GROUND_TRUTH_VIEW_NAME)
+        if index < 0:
+            return
+        offered = self._resultCaseName is not None and self._resultHasGroundTruth
+        item = selector.model().item(index)
+        if item is not None:
+            item.setEnabled(offered)
+        selector.view().setRowHidden(index, not offered)
 
     # ------------------------------------------------------------------
     # Camera
@@ -518,9 +552,9 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ------------------------------------------------------------------
     # Capture (SLIA-027, ADR-0003)
     #
-    # Capture freezes LiveView and saves the frame, picks a recorded case, and
+    # Capture freezes LiveView and saves the frame, reads the configured cube, and
     # runs UC1 on it in the background. LiveView resumes when the run ends,
-    # whether it succeeded or not. A failed run picks no replacement case.
+    # whether it succeeded or not. A failed run is not retried on another cube.
     # ------------------------------------------------------------------
 
     @property
@@ -581,15 +615,15 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._showCapturedCube()
 
     def _startUc1(self) -> None:
-        """Start UC1 on the configured case folder, or end the capture saying why."""
+        """Start UC1 on the configured cube, or end the capture saying why."""
         try:
-            case = self.logic.loadConfiguredCube()
-        except (IncompatibleCaseError, Uc1RunError, OSError) as error:
+            case = self.logic.loadConfiguredUc1Input()
+        except (CalibratedCubeError, Uc1RunError, OSError) as error:
             self._failCapture(str(error))
             return
         self._captureCaseName = case.name
         logging.info(
-            "SLIAFlow: capture %s uses recorded case %s; snapshot %s",
+            "SLIAFlow: capture %s uses cube %s; snapshot %s",
             self._captureId, case.name, self._captureSnapshotName,
         )
 
@@ -601,9 +635,9 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _showCapturedCube(self) -> None:
         """Show the calibrated cube this capture stands for (SLIA-032).
 
-        Until SLIA-033 this is not the cube UC1 runs on, which is why both
-        panels name theirs. Reading it is not what UC1 needs: if the cube cannot
-        be read, HS Cube says why and the capture goes on.
+        It is the cube UC1 runs on (SLIA-033), and both panels name it. The
+        panel reads it separately from the run: if the cube cannot be shown,
+        HS Cube says why, and a run already started goes on.
         """
         if self.logic is None:
             return
@@ -629,7 +663,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._showCube()
 
     def _showGroundTruth(self, case) -> None:
-        """Load the recorded case's own labelling for the result just accepted.
+        """Load the cube's own labelling for the result just accepted.
 
         The ground truth is read once per result rather than per selection, and
         only after the outputs are accepted, so it always carries the capture ID
@@ -643,7 +677,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.logic.acceptGroundTruth(case, self._captureId)
         except Exception as error:
             logging.exception(
-                "SLIAFlow: the ground truth of recorded case %s could not be shown: %s",
+                "SLIAFlow: the ground truth of cube %s could not be shown: %s",
                 case.name, error,
             )
             self.logic.removeGroundTruthNode()
@@ -867,14 +901,21 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except Exception as error:
             # acceptOutputs leaves the previous result whole; the capture must
             # still end, or Capture stays disabled and LiveView frozen.
-            logging.exception("SLIAFlow: the outputs of recorded case %s could not be shown",
+            logging.exception("SLIAFlow: the outputs of cube %s could not be shown",
                               result.case.name)
             self._failCapture(_("The UC1 outputs could not be shown: {error}").format(error=error))
             return
-        self._showGroundTruth(result.case)
+        # A ground truth is offered only for a cube that has one (ADR-0004
+        # decision 8); the previous result's is not left behind for this one.
+        self._resultHasGroundTruth = result.case.hasGroundTruth
+        if self._resultHasGroundTruth:
+            self._showGroundTruth(result.case)
+        elif self.logic is not None:
+            self.logic.removeGroundTruthNode()
         self._resultCaseName = result.case.name
         self._resultCaptureId = self._captureId
         self._resultStale = False
+        self._refreshGroundTruthEntry()
         logging.info("SLIAFlow: %s", result.message)
         self._setStatus(
             self.CAPTURE_DONE_STATUS.format(
@@ -966,11 +1007,13 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.logic.removeGroundTruthNode()
         self._resultCaseName = None
         self._resultCaptureId = None
+        self._resultHasGroundTruth = False
         self._fittedCaptureId = None
         self._resultStale = False
         self._removeStaleLine()
         self._removePanelCaption(self.RESULT_VIEW_NAME)
         if hasattr(self, "ui"):
+            self._refreshGroundTruthEntry()
             self._updateResultStatus()
 
     def _updateResultStatus(self) -> None:
@@ -995,6 +1038,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 style = "color: #8A6D1D; font-weight: bold;"
             elif groundTruthShown:
                 text = self.GROUND_TRUTH_STATUS.format(case=self._resultCaseName, file=fileName)
+                style = "font-weight: bold;"
+            elif self._groundTruthSelected() and not self._resultHasGroundTruth:
+                # A gtMap selection kept from an earlier cube: this one has none
+                # to lay over, which is not the same as one that failed to read.
+                text = self.NO_GROUND_TRUTH_STATUS.format(case=self._resultCaseName, file=fileName)
                 style = "font-weight: bold;"
             elif self._groundTruthSelected():
                 # gtMap was asked for and is not there: say so rather than
@@ -1040,7 +1088,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 )
                 boundBefore = composite.GetBackgroundVolumeID()
                 composite.SetBackgroundVolumeID(node.GetID())
-                # Recorded cases differ in size, so every new result is framed
+                # Cubes can differ in size, so every new result is framed
                 # for its own; changing the selected output within one result
                 # binds a same-sized image, so the framing is left alone and
                 # the operator keeps the pan and zoom they were reading with.
@@ -1051,7 +1099,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     sliceLogic.FitSliceToBackground()
                     self._fittedCaptureId = self._resultCaptureId
                 composite.SetForegroundVolumeID(None)
-                # The recorded case's own labelling belongs over the output it
+                # The cube's own labelling belongs over the output it
                 # is read against, on the Label layer, so the layer's opacity
                 # slider and outline toggle work on it. _groundTruthNode()
                 # returns it only when it carries this result's capture ID.
