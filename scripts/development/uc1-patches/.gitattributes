@@ -1,0 +1,4 @@
+# The patches are applied with `git apply` to UC1 sources that use LF line
+# endings. With core.autocrlf on, a checkout would turn them into CRLF and
+# every hunk would stop matching, so they are never converted.
+*.patch -text

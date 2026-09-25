@@ -1,11 +1,12 @@
-"""Run the staged UC1 intermediate build on one recorded case, from inside Slicer.
+"""Run the staged UC1 intermediate build on the configured cube, from inside Slicer.
 
 Nothing here computes a classification. `stratum.opt.intermediate.exe` is the
-vendored UC1 pipeline, built unmodified by `scripts/development/build-uc1.ps1`;
-this module starts it as a background `QProcess` with no shell, waits for it,
-and reads back the five images it wrote. The checks around the run are the ones
-`tools/simulators/stratum_sim/uc1_runner.py` learned the hard way, restated here
-because a Slicer module cannot import that tooling:
+vendored UC1 pipeline plus the documented patches `scripts/development/build-uc1.ps1`
+applies (docs/development/uc1_changes.md). This module writes the cube UC1 is to
+read (`SLIAFlowUc1Input`), starts the binary as a background `QProcess` with no
+shell, waits for it, and reads back the five images it wrote. The checks
+around the run are the ones `tools/simulators/stratum_sim/uc1_runner.py` learned
+the hard way, restated here because a Slicer module cannot import that tooling:
 
 - The binary is bound to its working directory. It opens the SVM model as the
   literal relative path `../../svm_model/*.bin` and writes `output/<case>/`
@@ -32,10 +33,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .SLIAFlowBmpReader import BmpFormatError, readUc1Bmp
-from .SLIAFlowCube import (
+from .SLIAFlowCalibratedCube import CalibratedCubeError
+from .SLIAFlowUc1Input import (
+    INPUT_DATA_FILE_NAME,
+    INPUT_HEADER_FILE_NAME,
     UC1_MODEL_BAND_COUNT,
-    IncompatibleCaseError,
-    assertCaseUnchanged,
+    assertUc1InputUnchanged,
+    writeUc1Input,
 )
 
 try:
@@ -59,14 +63,17 @@ BUILD_SCRIPT_HINT = "scripts\\development\\build-uc1.ps1"
 # CalibratedImage_BIP.bmp is written without row padding and is never read.
 OUTPUT_FILE_NAMES = ("pca.bmp", "svm.bmp", "knn.bmp", "kmeans.bmp", "imageRGB.bmp")
 LONGEST_OUTPUT_FILE_NAME = "CalibratedImage_BIP.bmp"
-INPUT_FILE_NAMES = ("raw.dat", "darkReference.dat", "whiteReference.dat")
+# The mapped cube SLIAFlow writes into the folder UC1 is given. A calibrated
+# float32 cube needs no references (patch 0002).
+INPUT_DIRECTORY_NAME = "input"
+INPUT_FILE_NAMES = (INPUT_DATA_FILE_NAME, INPUT_HEADER_FILE_NAME)
 
 # data_loader.hpp. snprintf into this many bytes keeps at most 127 characters.
 MAX_PATH_LENGTH = 128
 PATH_TOO_LONG_MARKER = "Path too long"
 
-# SLIA-027, decided by the project owner. A run on a compatible case takes a
-# few seconds, including process start and CUDA setup.
+# SLIA-027, decided by the project owner. A run on the 1080 x 1080 LCTF cube
+# took 2.7 s at SLIA-033, including process start and CUDA setup.
 RUN_TIMEOUT_SEC = 60
 KILL_WAIT_MS = 5000
 
@@ -151,17 +158,26 @@ class Uc1Build:
     def lockPath(self) -> Path:
         return self.root / LOCK_FILE_NAME
 
+    @property
+    def inputDirectory(self) -> Path:
+        """Where the cube UC1 reads is written, one folder per cube (gitignored)."""
+        return self.root / INPUT_DIRECTORY_NAME
+
     def caseOutputDirectory(self, caseName: str) -> Path:
         return self.outputDirectory / caseName
 
     def assertRunnable(self, case) -> None:
-        """Name what is missing or unsafe before anything is started."""
-        # The case was described when Capture was pressed, not now. Re-read it
-        # here, the last moment before the lock is taken, so a case that was
+        """Name what is missing or unsafe before anything is started.
+
+        `case` is the `Uc1Input` of the run: the configured cube and the folder
+        its mapped copy is written to.
+        """
+        # The cube was described when Capture was pressed, not now. Re-read it
+        # here, the last moment before the lock is taken, so a cube that was
         # edited or truncated since is refused instead of run on.
         try:
-            assertCaseUnchanged(case)
-        except (IncompatibleCaseError, OSError) as error:
+            assertUc1InputUnchanged(case)
+        except (CalibratedCubeError, OSError) as error:
             raise Uc1RunError(str(error)) from error
         if not self.executablePath.is_file():
             raise Uc1RunError(_("{executable} is not in {directory}. Build it with {script}.").format(
@@ -189,7 +205,7 @@ class Uc1Build:
                          bands=UC1_MODEL_BAND_COUNT, script=BUILD_SCRIPT_HINT))
         if case.bands != UC1_MODEL_BAND_COUNT:
             raise Uc1RunError(_(
-                "Recorded case {case} has {bands} bands, but the staged SVM model is sized for "
+                "Cube {case} is mapped to {bands} bands, but the staged SVM model is sized for "
                 "{modelBands}."
             ).format(case=case.name, bands=case.bands, modelBands=UC1_MODEL_BAND_COUNT))
         # UC1 builds each path as "<argument>/<file>" and "output/<case>/<file>".
@@ -200,7 +216,7 @@ class Uc1Build:
                 raise Uc1RunError(_(
                     "The path {path} is {length} characters. UC1 keeps at most {limit} "
                     "({bufferSize}-byte buffers) and would read or write a truncated path without "
-                    "failing. Move the recorded cases to a shorter folder."
+                    "failing. Move the repository, or give the cube's folder a shorter name."
                 ).format(path=path, length=len(path), limit=MAX_PATH_LENGTH - 1,
                          bufferSize=MAX_PATH_LENGTH))
 
@@ -257,6 +273,13 @@ class Uc1Build:
                 pass
         self.rgbOutputDirectory.mkdir(parents=True, exist_ok=True)
 
+    def prepareInput(self, case) -> None:
+        """Write the mapped cube UC1 is given, or refuse the run saying why."""
+        try:
+            writeUc1Input(case)
+        except CalibratedCubeError as error:
+            raise Uc1RunError(str(error)) from error
+
 
 def collectOutputs(build: Uc1Build, case, runStartTime: float) -> dict:
     """Read all five outputs of one run, or refuse the run as a whole.
@@ -269,13 +292,13 @@ def collectOutputs(build: Uc1Build, case, runStartTime: float) -> dict:
     for fileName in OUTPUT_FILE_NAMES:
         path = outputDirectory / fileName
         if not path.is_file():
-            raise Uc1RunError(_("UC1 did not write {file} for recorded case {case} ({path}).").format(
+            raise Uc1RunError(_("UC1 did not write {file} for cube {case} ({path}).").format(
                 file=fileName, case=case.name, path=path
             ))
         modifiedTime = path.stat().st_mtime
         if modifiedTime < runStartTime:
             raise Uc1RunError(_(
-                "{file} for recorded case {case} was last written {seconds} s before this run "
+                "{file} for cube {case} was last written {seconds} s before this run "
                 "started, so it belongs to an earlier run."
             ).format(file=fileName, case=case.name, seconds=f"{runStartTime - modifiedTime:.1f}"))
         try:
@@ -283,7 +306,7 @@ def collectOutputs(build: Uc1Build, case, runStartTime: float) -> dict:
         except (BmpFormatError, OSError) as error:
             # The reader's own detail names header fields and byte counts; it
             # is kept as written, inside a translated sentence.
-            raise Uc1RunError(_("{file} for recorded case {case} is not a valid UC1 image: {error}").format(
+            raise Uc1RunError(_("{file} for cube {case} is not a valid UC1 image: {error}").format(
                 file=fileName, case=case.name, error=error
             )) from error
     return outputs
@@ -448,7 +471,7 @@ class Uc1RunResult:
 
 
 class Uc1Run:
-    """One UC1 run on one recorded case: checks, lock, process and outputs.
+    """One UC1 run on the configured cube: input, checks, lock, process and outputs.
 
     `start` raises Uc1RunError when the run is refused, and nothing is left
     behind. Otherwise `onFinished` is called exactly once with a Uc1RunResult,
@@ -482,6 +505,8 @@ class Uc1Run:
         self._lockHeld = True
         try:
             self.build.prepareOutputs(self.case)
+            # Written under the lock, so two runs never write one folder at once.
+            self.build.prepareInput(self.case)
             self._runStartTime = self.build.stampLock()
             self._startedAt = time.monotonic()
             self._process = OwnedProcess(
@@ -497,7 +522,7 @@ class Uc1Run:
             )
         except OSError as error:
             self._abandon()
-            raise Uc1RunError(_("The UC1 run on recorded case {case} could not be prepared: {error}").format(
+            raise Uc1RunError(_("The UC1 run on cube {case} could not be prepared: {error}").format(
                 case=self.case.name, error=error
             )) from error
         except Exception:
@@ -535,7 +560,7 @@ class Uc1Run:
                 self._stage(self.STAGE_VALIDATING)
                 try:
                     outputs = collectOutputs(self.build, self.case, self._runStartTime)
-                    message = _("UC1 finished on recorded case {case} in {seconds} s.").format(
+                    message = _("UC1 finished on cube {case} in {seconds} s.").format(
                         case=self.case.name, seconds=f"{elapsed:.1f}"
                     )
                 except Uc1RunError as error:
@@ -550,11 +575,11 @@ class Uc1Run:
             # module would stay in its capturing state with LiveView frozen for
             # the rest of the session. Report it as a failed run instead.
             logging.exception(
-                "SLIAFlow: the outputs of recorded case %s could not be validated", self.case.name
+                "SLIAFlow: the outputs of cube %s could not be validated", self.case.name
             )
             outputs = None
             message = _(
-                "UC1 finished on recorded case {case}, but its outputs could not be checked: "
+                "UC1 finished on cube {case}, but its outputs could not be checked: "
                 "{error}"
             ).format(case=self.case.name, error=error)
         finally:
@@ -574,24 +599,24 @@ class Uc1Run:
         name = self.case.name
         if outcome.failedToStart:
             return _(
-                "UC1 could not be started for recorded case {case}. Check that {executable} exists "
+                "UC1 could not be started for cube {case}. Check that {executable} exists "
                 "and runs; build it with {script}."
             ).format(case=name, executable=self.build.executablePath, script=BUILD_SCRIPT_HINT)
         if outcome.timedOut:
-            return _("UC1 timed out after {seconds} s on recorded case {case} and was stopped.").format(
+            return _("UC1 timed out after {seconds} s on cube {case} and was stopped.").format(
                 seconds=f"{self._timeoutSec:g}", case=name
             )
         if outcome.crashed:
-            return _("UC1 crashed on recorded case {case}. {lastError}").format(
+            return _("UC1 crashed on cube {case}. {lastError}").format(
                 case=name, lastError=self._lastErrorLine(outcome)
             ).strip()
         if outcome.exitCode != 0:
-            return _("UC1 exited with code {code} on recorded case {case}. {lastError}").format(
+            return _("UC1 exited with code {code} on cube {case}. {lastError}").format(
                 code=outcome.exitCode, case=name, lastError=self._lastErrorLine(outcome)
             ).strip()
         if PATH_TOO_LONG_MARKER in outcome.stdout or PATH_TOO_LONG_MARKER in outcome.stderr:
             return _(
-                "UC1 reported '{marker}' on recorded case {case} and continued with a truncated "
+                "UC1 reported '{marker}' on cube {case} and continued with a truncated "
                 "path, so its outputs cannot be trusted. Paths are limited to {limit} characters."
             ).format(marker=PATH_TOO_LONG_MARKER, case=name, limit=MAX_PATH_LENGTH - 1)
         return None

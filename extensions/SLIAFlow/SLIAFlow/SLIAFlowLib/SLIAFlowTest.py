@@ -1,6 +1,7 @@
 import contextlib
 import importlib
 import io
+import os
 import time
 import unittest
 from pathlib import Path
@@ -832,15 +833,17 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         "rho.bin": 6 * 4,
         "label.bin": 4 * 4,
     }
-    # envi.RECORDED_DATASET_MARKER, carried by a recorded case's gtMap.hdr.
-    RECORDED_DATASET_MARKER = "HSI Human Brain Database"
     # SLIA-027: the run timeout and the wording.
     UC1_RUN_TIMEOUT_SEC = 60
     STALE_RESULT_LINE = "PREVIOUS RESULT - not from the current capture"
     STALE_STATUS_FRAGMENT = "not from the current capture"
-    # contract.recordedCaseDetail("real UC1 pipeline", case).
-    RECORDED_DETAIL_FORMAT = "real UC1 pipeline, recorded HSI case {case} (simulated acquisition)"
-    RESULT_STATUS_FORMAT = "Recorded case {case} - simulated acquisition"
+    # ADR-0004 decision 7: the UC1 pipeline's producer name, then the cube's own
+    # detail, in the wording the SLIA-032 card fixes for the cube.
+    UC1_RESULT_DETAIL = ("real UC1 pipeline, recorded IUMA LCTF capture 002-04, calibrated by "
+                         "IUMA (simulated acquisition)")
+    RESULT_STATUS_FORMAT = "Recorded cube {case} - simulated acquisition"
+    # ADR-0004 decision 5: results on the LCTF cube are behavioural only.
+    NOT_VALIDATED_FRAGMENT = "not validated"
     SNAPSHOT_NAME_PATTERN = r"^output_laptop_camera_\d{8}-\d{6}(-\d+)?\.png$"
 
     @staticmethod
@@ -852,55 +855,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         """
         return importlib.import_module(f".{name}", __package__)
 
-    @staticmethod
-    def _enviHeaderText(samples, lines, bands, *, dataType=12, interleave="bsq",
-                        byteOrder=0, headerOffset=0):
-        # Laid out like a recorded case's header: the wavelength block first,
-        # closed on its last value line, with samples and lines after it.
-        wavelengths = ", ".join(str(440 + 5 * index) for index in range(bands))
-        return (
-            "ENVI\n"
-            f"bands = {bands}\n"
-            f"data type = {dataType}\n"
-            f"interleave = {interleave}\n"
-            f"header offset = {headerOffset}\n"
-            "wavelength units = Nanometers\n"
-            f"byte order = {byteOrder}\n"
-            f"wavelength = {{{wavelengths}}}\n"
-            f"lines = {lines}\n"
-            f"samples = {samples}\n"
-        )
-
-    def _writeFixtureCase(self, inputRoot: Path, name: str, *, samples=4, lines=3,
-                          bands=UC1_MODEL_BAND_COUNT, omit=(), headerOverrides=None,
-                          dataBytes=None, marker=True, groundTruthOverrides=None,
-                          groundTruthLabels=None) -> Path:
-        """Write a placeholder case folder laid out like a recorded case."""
-        folder = inputRoot / name
+    def _writeFixtureGroundTruth(self, folder: Path, *, samples=4, lines=3, omit=(),
+                                 groundTruthOverrides=None, groundTruthLabels=None) -> Path:
+        """Write a placeholder gtMap pair beside a cube, laid out like a recorded case's."""
         folder.mkdir(parents=True, exist_ok=True)
-        headerOverrides = headerOverrides or {}
-        for stem in ("raw", "darkReference", "whiteReference"):
-            header = dict(samples=samples, lines=lines, bands=bands)
-            header.update(headerOverrides.get(stem, {}))
-            options = {
-                key: header.pop(key)
-                for key in ("dataType", "interleave", "byteOrder", "headerOffset")
-                if key in header
-            }
-            if f"{stem}.hdr" not in omit:
-                (folder / f"{stem}.hdr").write_text(
-                    self._enviHeaderText(header["samples"], header["lines"], header["bands"],
-                                         **options),
-                    encoding="ascii",
-                )
-            if f"{stem}.dat" not in omit:
-                size = samples * lines * bands * 2 if dataBytes is None else dataBytes
-                (folder / f"{stem}.dat").write_bytes(b"\0" * size)
         classes = self._helperModule("SLIAFlowCube").GROUND_TRUTH_CLASSES
-        groundTruth = "ENVI\ndescription = {test fixture"
-        if marker:
-            groundTruth += f", {self.RECORDED_DATASET_MARKER}"
-        groundTruth += "}\n"
+        groundTruth = "ENVI\ndescription = {test fixture}\n"
         if "gtMap.hdr" not in omit:
             header = dict(samples=samples, lines=lines, bands=1, dataType="12",
                           interleave="bil", byteOrder="0", headerOffset="0")
@@ -986,16 +946,24 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             (folder / f"{self.CALIBRATED_CUBE_STEM}{dataSuffix}").write_bytes(data)
         return header, values
 
-    def _makeFixtureRepository(self, root: Path, caseNames=("004-02",), **caseOptions) -> dict:
-        """A repository-shaped placeholder tree: markers, input cases, staged build."""
+    # SLIA-033: where SLIAFlow writes the cube UC1 reads, under the staged build.
+    UC1_INPUT_RELATIVE_PATH = Path("build") / "uc1" / "UC1" / "input"
+
+    def _makeFixtureRepository(self, root: Path, *, cube=True, groundTruth=False) -> dict:
+        """A repository-shaped placeholder tree: markers, the calibrated cube, staged build.
+
+        The cube lies where the configured one does, input/002-04. With
+        `groundTruth`, a gtMap pair lies beside it; `cube=False` writes no cube.
+        """
         (root / "AGENTS.md").write_text("test fixture\n", encoding="ascii")
         (root / "extensions" / "SLIAFlow").mkdir(parents=True)
-        inputRoot = root / "input" / "reference_hsi_brain_db"
-        inputRoot.mkdir(parents=True)
-        for name in caseNames:
-            self._writeFixtureCase(inputRoot, name, **caseOptions)
-        calibratedHeader, calibratedValues = self._writeFixtureCalibratedCube(
-            root / "input" / self.CALIBRATED_CUBE_NAME)
+        cubeFolder = root / "input" / self.CALIBRATED_CUBE_NAME
+        calibratedHeader = cubeFolder / f"{self.CALIBRATED_CUBE_STEM}.hdr"
+        calibratedValues = None
+        if cube:
+            calibratedHeader, calibratedValues = self._writeFixtureCalibratedCube(cubeFolder)
+        if groundTruth:
+            self._writeFixtureGroundTruth(cubeFolder)
         buildRoot = root / "build" / "uc1" / "UC1"
         source = buildRoot / "gpu_single_bsq" / "source"
         (source / "output" / "rgb").mkdir(parents=True)
@@ -1006,7 +974,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             (model / fileName).write_bytes(b"\0" * size)
         return {
             "root": root,
-            "inputRoot": inputRoot,
+            "cubeFolder": cubeFolder,
             "buildRoot": buildRoot,
             "source": source,
             "executable": source / "stratum.opt.intermediate.exe",
@@ -1014,6 +982,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             "captures": root / "workspace" / "captures",
             "calibratedHeader": calibratedHeader,
             "calibratedValues": calibratedValues,
+            "runFolder": root / self.UC1_INPUT_RELATIVE_PATH / self.CALIBRATED_CUBE_NAME,
         }
 
     @staticmethod
@@ -1165,18 +1134,25 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         import tempfile
 
         # A short prefix: UC1 keeps at most 127 characters of a path, and the
-        # fixture cube lies at input/reference_hsi_brain_db/<case> under this.
+        # cube UC1 reads lies at build/uc1/UC1/input/<cube> under this.
         root = Path(tempfile.mkdtemp(prefix="slia-fx-"))
         try:
             yield root
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def _startRun(self, fixture, caseName="004-02", **runOptions):
-        """Start a Uc1Run on a fixture case with a fake process."""
-        cubeModule = self._helperModule("SLIAFlowCube")
+    def _describeUc1Input(self, header, buildRoot):
+        """What Capture hands UC1: the calibrated cube behind `header`, on the model bands."""
+        calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
+        inputModule = self._helperModule("SLIAFlowUc1Input")
         uc1Run = self._helperModule("SLIAFlowUc1Run")
-        case = cubeModule.loadRecordedCase(fixture["inputRoot"] / caseName)
+        return inputModule.describeUc1Input(calibratedModule.loadCalibratedCube(header),
+                                            uc1Run.Uc1Build(buildRoot).inputDirectory)
+
+    def _startRun(self, fixture, header=None, **runOptions):
+        """Prepare a Uc1Run on the fixture cube (or `header`) with a fake process."""
+        uc1Run = self._helperModule("SLIAFlowUc1Run")
+        case = self._describeUc1Input(header or fixture["calibratedHeader"], fixture["buildRoot"])
         build = uc1Run.Uc1Build(fixture["buildRoot"])
         factory, processes = self._fakeProcessFactory()
         results = []
@@ -1275,68 +1251,51 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         """
         cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
-            inputRoot = root / "input" / "reference_hsi_brain_db"
             labels = [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0]
-            self._writeFixtureCase(inputRoot, "004-02", samples=4, lines=3,
-                                   groundTruthLabels=labels)
-            case = cubeModule.loadRecordedCase(inputRoot / "004-02")
-            groundTruth = cubeModule.readGroundTruth(case)
-            self.assertEqual(groundTruth.shape, (case.lines, case.samples))
+            folder = self._writeFixtureGroundTruth(root / self.CALIBRATED_CUBE_NAME,
+                                                   groundTruthLabels=labels)
+            groundTruth = cubeModule.readGroundTruth(folder, samples=4, lines=3)
+            self.assertEqual(groundTruth.shape, (3, 4))
             self.assertEqual(groundTruth.dtype, np.dtype("uint16"))
             self.assertEqual(groundTruth[0].tolist(), [1, 2, 3, 4])
             self.assertEqual(groundTruth[1].tolist(), [0, 0, 0, 0])
 
     def test_groundTruthIsRefusedRatherThanReshaped(self) -> None:
-        """A gtMap that does not describe this case is refused, not fitted to it."""
+        """A gtMap that does not describe this cube is refused, not fitted to it."""
         cubeModule = self._helperModule("SLIAFlowCube")
         rejections = {
-            # gtMap.hdr carries the marker loadRecordedCase needs, so it is
-            # removed after the case loads rather than never written.
-            "no gtMap.hdr": (dict(), "gtMap.hdr", "is missing"),
-            "no gtMap": (dict(omit=("gtMap",)), None, "is missing"),
-            "other dimensions": (
-                dict(groundTruthOverrides={"samples": 9}), None, "but the case is"),
-            "more than one band": (
-                dict(groundTruthOverrides={"bands": 2}), None, "single map of labels"),
-            "wrong data type": (
-                dict(groundTruthOverrides={"dataType": "4"}), None, "not 12 (uint16)"),
-            "wrong interleave": (
-                dict(groundTruthOverrides={"interleave": "bsq"}), None, "not bil"),
+            "no gtMap.hdr": (dict(omit=("gtMap.hdr",)), "is missing"),
+            "no gtMap": (dict(omit=("gtMap",)), "is missing"),
+            "other dimensions": (dict(groundTruthOverrides={"samples": 9}), "but the cube is"),
+            "more than one band": (dict(groundTruthOverrides={"bands": 2}), "single map of labels"),
+            "wrong data type": (dict(groundTruthOverrides={"dataType": "4"}), "not 12 (uint16)"),
+            "wrong interleave": (dict(groundTruthOverrides={"interleave": "bsq"}), "not bil"),
             "wrong byte order": (
-                dict(groundTruthOverrides={"byteOrder": "1"}), None, "not 0 (little-endian)"),
-            "a header offset": (
-                dict(groundTruthOverrides={"headerOffset": "64"}), None, "header offset"),
-            "a class outside the legend": (
-                dict(groundTruthLabels=[5] + [0] * 11), None, "only legends"),
-            "a short gtMap": (
-                dict(groundTruthLabels=[1, 2, 3]), None, "bytes but"),
+                dict(groundTruthOverrides={"byteOrder": "1"}), "not 0 (little-endian)"),
+            "a header offset": (dict(groundTruthOverrides={"headerOffset": "64"}), "header offset"),
+            "a class outside the legend": (dict(groundTruthLabels=[5] + [0] * 11), "only legends"),
+            "a short gtMap": (dict(groundTruthLabels=[1, 2, 3]), "bytes but"),
         }
-        for reason, (options, removeAfterLoad, message) in rejections.items():
+        for reason, (options, message) in rejections.items():
             with self.subTest(reason=reason):
                 with self._fixtureDirectory() as root:
-                    inputRoot = root / "input" / "reference_hsi_brain_db"
-                    # loadRecordedCase reads only raw/dark/white and the marker,
-                    # so the case still loads and only readGroundTruth refuses.
-                    folder = self._writeFixtureCase(inputRoot, "004-02", samples=4, lines=3,
-                                                    **options)
-                    case = cubeModule.loadRecordedCase(folder)
-                    if removeAfterLoad is not None:
-                        (folder / removeAfterLoad).unlink()
-                    with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
-                        cubeModule.readGroundTruth(case)
+                    folder = self._writeFixtureGroundTruth(root / self.CALIBRATED_CUBE_NAME,
+                                                           **options)
+                    with self.assertRaises(cubeModule.GroundTruthError) as raised:
+                        cubeModule.readGroundTruth(folder, samples=4, lines=3)
                     self.assertIn(message, str(raised.exception))
 
     def test_groundTruthReadingDoesNotWriteToInput(self) -> None:
-        """Reading a ground truth leaves the case folder byte for byte as it was."""
+        """Reading a ground truth leaves the cube's folder byte for byte as it was."""
         cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
-            inputRoot = root / "input" / "reference_hsi_brain_db"
-            self._writeFixtureCase(inputRoot, "004-02", samples=4, lines=3)
-            folder = inputRoot / "004-02"
+            folder = root / self.CALIBRATED_CUBE_NAME
+            self._writeFixtureCalibratedCube(folder)
+            self._writeFixtureGroundTruth(folder)
             before = {path.name: (path.stat().st_size, path.read_bytes())
                       for path in sorted(folder.iterdir())}
-            case = cubeModule.loadRecordedCase(folder)
-            cubeModule.readGroundTruth(case)
+            self.assertTrue(cubeModule.hasGroundTruth(folder))
+            cubeModule.readGroundTruth(folder, samples=4, lines=3)
             after = {path.name: (path.stat().st_size, path.read_bytes())
                      for path in sorted(folder.iterdir())}
             self.assertEqual(before, after)
@@ -1354,138 +1313,197 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         # ground truth laid over one.
         self.assertIn(parameterModule.DEFAULT_RESULT_OUTPUT, self.UC1_OUTPUT_FILE_NAMES)
 
-    # --- The configured cube (SLIA-031, ADR-0004 decision 1) ---------------
+    # --- The configured cube (SLIA-031, SLIA-033, ADR-0004 decisions 1, 4, 6) -
 
-    def test_cubeFolderRejectsIncompatibleContents(self) -> None:
-        """A cube folder UC1 would misread is refused, each time with a reason."""
-        cubeModule = self._helperModule("SLIAFlowCube")
-        with self._fixtureDirectory() as root:
-            good = cubeModule.loadRecordedCase(self._writeFixtureCase(root, "good"))
-            self.assertEqual((good.samples, good.lines, good.bands), (4, 3, self.UC1_MODEL_BAND_COUNT))
-            defects = {
-                "missing-header": dict(omit=("darkReference.hdr",)),
-                "missing-data": dict(omit=("whiteReference.dat",)),
-                "samples-disagree": dict(headerOverrides={"whiteReference": {"samples": 5}}),
-                "wrong-bands": dict(bands=92),
-                "wrong-data-type": dict(headerOverrides={"raw": {"dataType": 4}}),
-                "wrong-interleave": dict(headerOverrides={"raw": {"interleave": "bip"}}),
-                "wrong-byte-order": dict(headerOverrides={"darkReference": {"byteOrder": 1}}),
-                "header-offset": dict(headerOverrides={"raw": {"headerOffset": 10}}),
-                "wrong-data-size": dict(dataBytes=10),
-                "not-recorded": dict(marker=False),
-            }
-            for name, options in defects.items():
-                with self.subTest(defect=name):
-                    folder = self._writeFixtureCase(root, name, **options)
-                    with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
-                        cubeModule.loadRecordedCase(folder)
-                    self.assertTrue(str(raised.exception).strip(),
-                                    f"{name} was refused without a reason")
-            with self.assertRaises(cubeModule.IncompatibleCaseError):
-                cubeModule.loadRecordedCase(root / "absent")
+    # ADR-0004 decision 4, restated from its text rather than from the module:
+    # the staged model's 93 bands lie at 440-900 nm in 5 nm steps (the band
+    # grid of the HSI Human Brain Database it was trained on). 460-900 nm feed
+    # them one to one, 440-455 nm take the 460 nm band, 905-1000 nm are dropped.
+    MODEL_WAVELENGTHS_NM = tuple(range(440, 901, 5))
+    LOWEST_LCTF_WAVELENGTH_NM = 460
 
-    def test_cubeReadingDoesNotWriteToInput(self) -> None:
-        """Describing, reading and re-checking a cube leaves input/ as it was."""
-        cubeModule = self._helperModule("SLIAFlowCube")
+    def test_bandMappingFeedsEachModelBandFromTheDocumentedSource(self) -> None:
+        """Each of the 93 model bands is fed from the source band ADR-0004 names."""
+        inputModule = self._helperModule("SLIAFlowUc1Input")
+        self.assertEqual(len(self.MODEL_WAVELENGTHS_NM), self.UC1_MODEL_BAND_COUNT)
+        self.assertEqual(inputModule.UC1_MODEL_BAND_COUNT, self.UC1_MODEL_BAND_COUNT)
+        sources = inputModule.modelBandSources(
+            tuple(float(value) for value in self.LCTF_WAVELENGTHS_NM), "the cube")
+        self.assertEqual(len(sources), self.UC1_MODEL_BAND_COUNT)
+        for modelBand, modelWavelength in enumerate(self.MODEL_WAVELENGTHS_NM):
+            expected = max(modelWavelength, self.LOWEST_LCTF_WAVELENGTH_NM)
+            with self.subTest(modelBand=modelBand + 1, wavelength=modelWavelength):
+                self.assertEqual(self.LCTF_WAVELENGTHS_NM[sources[modelBand]], expected)
+        used = set(sources)
+        self.assertEqual(
+            [self.LCTF_WAVELENGTHS_NM[index] for index in range(len(self.LCTF_WAVELENGTHS_NM))
+             if index not in used],
+            list(range(905, 1001, 5)),
+            "Exactly 905-1000 nm are dropped",
+        )
 
-        def snapshot(root):
-            return sorted(
-                (str(path.relative_to(root)), path.is_dir(), path.stat().st_size,
-                 path.stat().st_mtime_ns)
-                for path in root.rglob("*")
-            )
-
+    def test_bandMappingRefusesACubeOffTheLctfGrid(self) -> None:
+        """The mapping is defined for the LCTF grid only; anything else is refused."""
+        inputModule = self._helperModule("SLIAFlowUc1Input")
         calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
+        oneOff = list(self.LCTF_WAVELENGTHS_NM)
+        oneOff[40] += 1
+        grids = {
+            "the HSI 440-900 nm grid": tuple(range(440, 901, 5)),
+            "460-900 nm only": tuple(range(460, 901, 5)),
+            "shifted by 5 nm": tuple(range(465, 1006, 5)),
+            "one band 1 nm off": tuple(oneOff),
+        }
+        for label, wavelengths in grids.items():
+            with self.subTest(grid=label):
+                with self.assertRaises(inputModule.BandMappingError) as raised:
+                    inputModule.modelBandSources(tuple(float(value) for value in wavelengths),
+                                                 "cube.hdr")
+                self.assertIsInstance(raised.exception, calibratedModule.CalibratedCubeError)
+                self.assertIn("cube.hdr", str(raised.exception))
+                self.assertIn("460", str(raised.exception))
+
+    def test_uc1InputIsTheMappedCubeWrittenOutsideInput(self) -> None:
+        """UC1 reads the mapped cube from the build, and input/ is left as it was.
+
+        The oracle is the fixture's own values taken at the ADR-0004 source
+        bands: raw.dat must be exactly those bytes, band after band, and raw.hdr
+        must describe a 93-band float32 cube UC1 reads as calibrated.
+        """
+        cubeModule = self._helperModule("SLIAFlowCube")
+
+        def snapshot(folder):
+            return sorted((str(path.relative_to(folder)), path.stat().st_size,
+                           path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else b"")
+                          for path in folder.rglob("*"))
+
         with self._fixtureDirectory() as root:
-            folder = self._writeFixtureCase(root, "004-02")
-            broken = self._writeFixtureCase(root, "broken", dataBytes=3)
-            calibratedHeader, _values = self._writeFixtureCalibratedCube(root / "002-04")
-            brokenCalibrated, _values = self._writeFixtureCalibratedCube(
-                root / "broken-calibrated", dataBytes=5)
-            before = snapshot(root)
-            case = cubeModule.loadRecordedCase(folder)
-            cubeModule.readGroundTruth(case)
-            cubeModule.assertCaseUnchanged(case)
-            with self.assertRaises(cubeModule.IncompatibleCaseError):
-                cubeModule.loadRecordedCase(broken)
-            calibrated = calibratedModule.loadCalibratedCube(calibratedHeader)
-            calibratedModule.readCalibratedCube(calibrated)
-            with self.assertRaises(calibratedModule.CalibratedCubeError):
-                calibratedModule.loadCalibratedCube(brokenCalibrated)
-            self.assertEqual(snapshot(root), before)
+            fixture = self._makeFixtureRepository(root, groundTruth=True)
+            inputFolder = root / "input"
+            before = snapshot(inputFolder)
+            run, case, build, processes, results = self._startRun(fixture)
+            self.assertEqual(case.folder, fixture["runFolder"].resolve())
+            run.start()
+            try:
+                self.assertEqual(processes[0].arguments, [str(fixture["runFolder"].resolve())])
+                values = fixture["calibratedValues"]
+                sourceBands = [self.LCTF_WAVELENGTHS_NM.index(
+                    max(wavelength, self.LOWEST_LCTF_WAVELENGTH_NM))
+                    for wavelength in self.MODEL_WAVELENGTHS_NM]
+                expected = np.ascontiguousarray(values[sourceBands]).astype("<f4").tobytes()
+                written = (fixture["runFolder"] / "raw.dat").read_bytes()
+                self.assertEqual(len(written), len(expected))
+                self.assertEqual(written, expected, "raw.dat is not the mapped cube")
+
+                header = cubeModule.parseEnviHeader(
+                    (fixture["runFolder"] / "raw.hdr").read_text(encoding="ascii"))
+                self.assertEqual(
+                    {key: header.get(key) for key in ("samples", "lines", "bands", "data type",
+                                                      "interleave", "byte order",
+                                                      "header offset")},
+                    {"samples": "4", "lines": "3", "bands": "93", "data type": "4",
+                     "interleave": "bsq", "byte order": "0", "header offset": "0"},
+                )
+            finally:
+                run.cancel()
+            self.assertEqual(snapshot(inputFolder), before, "Something was written into input/")
 
     def test_moduleHasNoCasePool(self) -> None:
-        """One configured cube: no pool, no shuffling, no deferred-case list."""
+        """One configured cube: no pool, no shuffling, no recorded case run in place."""
         with self.assertRaises(ModuleNotFoundError):
             self._helperModule("SLIAFlowCasePool")
         cubeModule = self._helperModule("SLIAFlowCube")
         for name in ("CasePool", "discoverCases", "DEFERRED_CASES", "DEFERRED_REASON",
-                     "NoCompatibleCaseError", "random"):
+                     "NoCompatibleCaseError", "random", "loadRecordedCase",
+                     "assertCaseUnchanged", "RecordedCase"):
             self.assertFalse(hasattr(cubeModule, name), f"SLIAFlowCube still has {name}")
         logic = SLIAFlowLogic()
-        for name in ("casePool", "inputRoot", "INPUT_RELATIVE_PATH"):
+        for name in ("casePool", "inputRoot", "INPUT_RELATIVE_PATH", "cubeFolder",
+                     "CUBE_RELATIVE_PATH", "loadConfiguredCube"):
             self.assertFalse(hasattr(logic, name), f"SLIAFlowLogic still has {name}")
 
-    def test_captureUsesTheConfiguredCube(self) -> None:
-        """Every Capture runs UC1 on the one configured cube folder, and no other.
+    def test_captureRunsUc1OnTheConfiguredCalibratedCube(self) -> None:
+        """Every Capture runs UC1 on the configured calibrated cube, and no other.
 
-        The default is the reference case the project owner chose at the
-        specification of SLIA-031: input/reference_hsi_brain_db/020-01.
+        The cube is the one the HS Cube panel shows (ADR-0004 decision 1),
+        handed to UC1 as the mapped copy in the staged build's input folder.
         """
         with self._captureSession() as session:
             widget = session["widget"]
             root = session["root"]
-            reference = self._writeFixtureCase(root / "input" / "reference_hsi_brain_db", "020-01")
-            archive = root / "input" / "archive_hsi_brain_db_93_bands" / "bin"
-            archived = self._writeFixtureCase(archive, "053-01")
-            self._writeFixtureCase(archive, "056-01")
-
-            widget.logic.cubeFolder = None
-            self.assertEqual(widget.logic.cubeFolder,
-                             root / "input" / "reference_hsi_brain_db" / "020-01")
+            self.assertEqual(widget.logic.calibratedCubeHeader,
+                             root / "input" / self.CALIBRATED_CUBE_NAME
+                             / f"{self.CALIBRATED_CUBE_STEM}.hdr")
+            other, _values = self._writeFixtureCalibratedCube(root / "input" / "other-cube")
             self._startFakeCamera(session)
-            for configured in (reference, reference, archived, archived):
-                if configured == archived:
-                    widget.logic.cubeFolder = archived
+            expectedFolders = [session["runFolder"]] * 2 + [
+                root / self.UC1_INPUT_RELATIVE_PATH / "other-cube"] * 2
+            for index, expectedFolder in enumerate(expectedFolders):
+                if index == 2:
+                    widget.logic.calibratedCubeHeader = other
                 self._showFrame(session, 40)
                 widget._onCaptureClicked()
                 case, _ = self._finishCapture(session)
-                self.assertEqual(case.folder, configured.resolve())
-                self.assertEqual(session["processes"][-1].arguments, [str(configured.resolve())])
+                self.assertEqual(case.folder, expectedFolder.resolve())
+                self.assertEqual(session["processes"][-1].arguments,
+                                 [str(expectedFolder.resolve())])
+                self.assertTrue((expectedFolder / "raw.dat").is_file())
             self.assertEqual(len(session["processes"]), 4)
 
     def test_configuredCubeIsRefusedWithItsReason(self) -> None:
-        """A cube folder that cannot be used ends the Capture, naming it and why."""
+        """A cube UC1 cannot run on ends the Capture, naming it and why."""
         with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
-            configured = session["cube"]
-            missing = session["root"] / "input" / "reference_hsi_brain_db" / "absent"
-            for label, prepare, folder, reason in (
-                ("missing", lambda: None, missing, "is not a folder"),
+            root = session["root"]
+            configured = session["calibratedHeader"]
+            offGrid, _values = self._writeFixtureCalibratedCube(
+                root / "input" / "off-grid", wavelengths=tuple(range(440, 901, 5)))
+            missing = root / "input" / "absent" / f"{self.CALIBRATED_CUBE_STEM}.hdr"
+            for label, prepare, header, reason in (
+                ("missing", lambda: None, missing, "is missing"),
+                ("off the LCTF grid", lambda: None, offGrid, "460"),
                 ("inconsistent",
-                 lambda: (configured / "raw.dat").write_bytes(b"\0" * 10),
-                 configured, "raw.dat is 10 bytes"),
+                 lambda: configured.with_suffix(".dat").write_bytes(b"\0" * 10),
+                 configured, "is 10 bytes"),
             ):
                 with self.subTest(defect=label):
                     prepare()
-                    widget.logic.cubeFolder = folder
+                    widget.logic.calibratedCubeHeader = header
                     self._showFrame(session, 50)
                     widget._onCaptureClicked()
                     status = widget.ui.statusLabel.text
-                    self.assertIn(str(folder), status)
+                    self.assertIn(str(header), status)
                     self.assertIn(reason, status)
                     self.assertEqual(session["processes"], [], "UC1 started on a refused cube")
                     self.assertIsNone(widget.logic.currentRun)
                     self.assertFalse(widget.captureInProgress)
                     self.assertFalse(widget.liveViewFrozen, "LiveView stayed frozen")
 
+    def test_runEnvironmentChangeRestoresTheDefaultCube(self) -> None:
+        """A cube chosen in one run environment does not carry into the next."""
+        logic = SLIAFlowLogic()
+        with self._fixtureDirectory() as first, self._fixtureDirectory() as second:
+            try:
+                logic.setRunEnvironment(repositoryRoot=first)
+                logic.calibratedCubeHeader = first / "input" / "elsewhere" / "cube.hdr"
+                logic.setRunEnvironment(repositoryRoot=second)
+                self.assertEqual(logic.calibratedCubeHeader,
+                                 second / logic.CALIBRATED_CUBE_RELATIVE_PATH)
+                logic.calibratedCubeHeader = second / "input" / "elsewhere" / "cube.hdr"
+                logic.setRunEnvironment()
+                self.assertEqual(logic.calibratedCubeHeader,
+                                 logic.repositoryRoot / logic.CALIBRATED_CUBE_RELATIVE_PATH)
+            finally:
+                logic.calibratedCubeHeader = None
+                logic.setRunEnvironment()
+
     def test_cubeRefusalReasonsAreTranslated(self) -> None:
         """The reason a cube is refused is translated, not only the sentence around it.
 
         The status bar shows the reason after the translated "The configured
         cube ... cannot be used" prefix, so an untranslated reason would still
-        reach the operator in English. Every refusal the module raises is
+        reach the operator in English. Every refusal the modules raise is
         checked in the source, and a sample of them is checked at run time.
         """
         import ast
@@ -1500,14 +1518,16 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
         cubeModule = self._helperModule("SLIAFlowCube")
         calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
-        for module, errorName in ((cubeModule, "IncompatibleCaseError"),
-                                  (calibratedModule, "CalibratedCubeError")):
+        inputModule = self._helperModule("SLIAFlowUc1Input")
+        for module, errorNames in ((cubeModule, ("GroundTruthError",)),
+                                   (calibratedModule, ("CalibratedCubeError",)),
+                                   (inputModule, ("BandMappingError", "CalibratedCubeError"))):
             with self.subTest(module=module.__name__):
                 tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
                 raises, untranslated = 0, []
                 for node in ast.walk(tree):
                     if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
-                            and getattr(node.exc.func, "id", None) == errorName):
+                            and getattr(node.exc.func, "id", None) in errorNames):
                         continue
                     raises += 1
                     message = node.exc.args[0] if node.exc.args else None
@@ -1524,26 +1544,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         messages = {}
         with mock.patch.object(slicer.i18n, "translate", translate), \
                 self._fixtureDirectory() as root:
-            for name, options in (("missing-header", dict(omit=("darkReference.hdr",))),
-                                  ("wrong-bands", dict(bands=92)),
-                                  ("wrong-data-size", dict(dataBytes=10)),
-                                  ("not-recorded", dict(marker=False))):
-                with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
-                    cubeModule.loadRecordedCase(self._writeFixtureCase(root, name, **options))
-                messages[name] = str(raised.exception)
-            with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
-                cubeModule.loadRecordedCase(root / "absent")
-            messages["absent"] = str(raised.exception)
-
-            folder = self._writeFixtureCase(root, "changed")
-            case = cubeModule.loadRecordedCase(folder)
-            self._writeFixtureCase(root, "changed", samples=5)
-            with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
-                cubeModule.assertCaseUnchanged(case)
-            messages["changed on disk"] = str(raised.exception)
-            (folder / "gtMap").unlink()
-            with self.assertRaises(cubeModule.IncompatibleCaseError) as raised:
-                cubeModule.readGroundTruth(cubeModule.loadRecordedCase(folder))
+            folder = self._writeFixtureGroundTruth(root / "no-map", omit=("gtMap",))
+            with self.assertRaises(cubeModule.GroundTruthError) as raised:
+                cubeModule.readGroundTruth(folder, samples=4, lines=3)
             messages["ground truth missing"] = str(raised.exception)
 
             for name, options in (("calibrated uint16", dict(dataType=12)),
@@ -1554,26 +1557,22 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                     calibratedModule.loadCalibratedCube(header)
                 messages[name] = str(raised.exception)
 
+            header, _values = self._writeFixtureCalibratedCube(
+                root / "off-grid", wavelengths=tuple(range(440, 901, 5)))
+            with self.assertRaises(inputModule.BandMappingError) as raised:
+                self._describeUc1Input(header, root / "build")
+            messages["off the LCTF grid"] = str(raised.exception)
+
+            header, _values = self._writeFixtureCalibratedCube(root / "changed")
+            case = self._describeUc1Input(header, root / "build")
+            self._writeFixtureCalibratedCube(root / "changed", samples=5)
+            with self.assertRaises(calibratedModule.CalibratedCubeError) as raised:
+                inputModule.assertUc1InputUnchanged(case)
+            messages["changed on disk"] = str(raised.exception)
+
         for label, message in messages.items():
             with self.subTest(refusal=label):
                 self.assertTrue(message.startswith(marker), f"Not translated: {message!r}")
-
-    def test_runEnvironmentChangeRestoresTheDefaultCube(self) -> None:
-        """A cube folder chosen in one run environment does not carry into the next."""
-        logic = SLIAFlowLogic()
-        with self._fixtureDirectory() as first, self._fixtureDirectory() as second:
-            try:
-                logic.setRunEnvironment(repositoryRoot=first)
-                logic.cubeFolder = first / "input" / "elsewhere"
-                logic.setRunEnvironment(repositoryRoot=second)
-                self.assertEqual(logic.cubeFolder, second / logic.CUBE_RELATIVE_PATH)
-                logic.cubeFolder = second / "input" / "elsewhere"
-                logic.setRunEnvironment()
-                self.assertEqual(logic.cubeFolder,
-                                 logic.repositoryRoot / logic.CUBE_RELATIVE_PATH)
-            finally:
-                logic.cubeFolder = None
-                logic.setRunEnvironment()
 
     # --- UC1 run ----------------------------------------------------------
 
@@ -1590,7 +1589,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         )
 
         with self._fixtureDirectory() as fixtureRoot:
-            fixture = self._makeFixtureRepository(fixtureRoot, caseNames=())
+            fixture = self._makeFixtureRepository(fixtureRoot, cube=False)
             nested = fixtureRoot / "build" / "SLIAFlow" / "lib" / "qt-scripted-modules" / "SLIAFlowLib"
             nested.mkdir(parents=True)
             # Resolved on both sides: the temporary folder may be an 8.3 short path.
@@ -1606,7 +1605,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         self.assertEqual(tuple(uc1Run.OUTPUT_FILE_NAMES), self.UC1_OUTPUT_FILE_NAMES)
         with self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root)
-            leftover = fixture["source"] / "output" / "004-02" / "pca.bmp"
+            leftover = fixture["source"] / "output" / self.CALIBRATED_CUBE_NAME / "pca.bmp"
             leftover.parent.mkdir(parents=True)
             leftover.write_bytes(b"left by an earlier run")
             (fixture["source"] / "output" / "rgb").rmdir()
@@ -1632,13 +1631,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def test_uc1PreRunChecksRefuseBeforeStarting(self) -> None:
         uc1Run = self._helperModule("SLIAFlowUc1Run")
-        cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root)
 
-            def refused(expectedFragment, caseName="004-02", inputRoot=None):
-                folder = (inputRoot or fixture["inputRoot"]) / caseName
-                case = cubeModule.loadRecordedCase(folder)
+            def refused(expectedFragment, header=None):
+                case = self._describeUc1Input(header or fixture["calibratedHeader"],
+                                              fixture["buildRoot"])
                 factory, processes = self._fakeProcessFactory()
                 run = uc1Run.Uc1Run(uc1Run.Uc1Build(fixture["buildRoot"]), case, lambda result: None,
                                     processFactory=factory)
@@ -1660,9 +1658,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 weights.write_bytes(b"\0" * self.UC1_MODEL_FILE_SIZES["w_vector.bin"])
 
             with self.subTest(defect="input path too long"):
-                deepInput = root / ("d" * 60) / ("e" * 60)
-                self._writeFixtureCase(deepInput, "004-02")
-                refused("128", inputRoot=deepInput)
+                # The run folder is named after the cube, so a long cube name
+                # makes the path UC1 is given too long for its buffers.
+                header, _values = self._writeFixtureCalibratedCube(root / "input" / ("c" * 90))
+                refused("128", header=header)
+                self.assertFalse((root / self.UC1_INPUT_RELATIVE_PATH / ("c" * 90)).exists(),
+                                 "The cube was written for a run that was refused")
 
     def test_uc1RunRefusesWhileLockIsHeld(self) -> None:
         uc1Run = self._helperModule("SLIAFlowUc1Run")
@@ -1702,38 +1703,109 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertTrue(fixture["lock"].is_file())
             build.releaseLock()
 
-    def test_caseChangedOnDiskIsRefusedRatherThanRunOn(self) -> None:
-        """The case is re-read immediately before the run, not trusted from Capture.
+    def test_cubeChangedOnDiskIsRefusedRatherThanRunOn(self) -> None:
+        """The cube is re-read immediately before the run, not trusted from Capture.
 
-        Capture describes the configured cube, then reads its pixels for the
-        HS Cube panel before the run starts. The folder lies outside the
-        repository and nothing here owns it, so it can be edited or truncated
-        in between, and UC1 reads the sizes from the headers without checking
-        what it got. The run is refused rather than moved to another case: a
-        silent replacement would stamp the result with a case the operator
-        never saw chosen.
+        Capture describes the configured cube, then the run maps it into the
+        build. The cube lies outside the repository and nothing here owns it,
+        so it can be edited or truncated in between, with or without changing
+        its size. The run is refused rather than run on whatever the file now
+        holds: that would stamp the result with a cube the operator never saw
+        described.
         """
+        from unittest import mock
+
         uc1Run = self._helperModule("SLIAFlowUc1Run")
+        inputModule = self._helperModule("SLIAFlowUc1Input")
+        calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
         with self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root)
 
-            # Still a valid case, but no longer the one that was chosen.
+            # Still a valid cube, but no longer the one that was described.
             run, case, build, processes, results = self._startRun(fixture)
-            self._writeFixtureCase(fixture["inputRoot"], case.name, samples=6, lines=5)
+            self._writeFixtureCalibratedCube(fixture["cubeFolder"], samples=6, lines=5)
             with self.assertRaises(uc1Run.Uc1RunError) as raised:
                 run.start()
             self.assertIn("changed on disk", str(raised.exception))
-            self.assertEqual(processes, [], "UC1 was started on a case that had changed")
+            self.assertEqual(processes, [], "UC1 was started on a cube that had changed")
             self.assertFalse(fixture["lock"].is_file(), "A refused run left the build locked")
+            self.assertFalse((fixture["runFolder"] / "raw.dat").exists(),
+                             "A cube that had changed was written for UC1")
 
-            # A case that no longer loads at all.
+            # A cube that no longer loads at all.
+            self._writeFixtureCalibratedCube(fixture["cubeFolder"])
             run, case, build, processes, results = self._startRun(fixture)
-            (fixture["inputRoot"] / case.name / "darkReference.dat").write_bytes(b"")
+            fixture["calibratedHeader"].with_suffix(".dat").write_bytes(b"")
             with self.assertRaises(uc1Run.Uc1RunError) as raised:
                 run.start()
-            self.assertIn("darkReference.dat", str(raised.exception))
-            self.assertEqual(processes, [], "UC1 was started on a truncated case")
+            self.assertIn(f"{self.CALIBRATED_CUBE_STEM}.dat", str(raised.exception))
+            self.assertEqual(processes, [], "UC1 was started on a truncated cube")
             self.assertFalse(fixture["lock"].is_file(), "A refused run left the build locked")
+
+            # Other values of the same size. The header still describes the
+            # file exactly, so only the file's own stamps can tell. The write
+            # time is set explicitly: a rewrite within one tick of the file
+            # system clock would otherwise keep it, and this test would be
+            # timing dependent.
+            data = fixture["calibratedHeader"].with_suffix(".dat")
+            self._writeFixtureCalibratedCube(fixture["cubeFolder"])
+            run, case, build, processes, results = self._startRun(fixture)
+            described = data.stat()
+            data.write_bytes(bytes(reversed(data.read_bytes())))
+            os.utime(data, ns=(described.st_atime_ns, described.st_mtime_ns + 1_000_000_000))
+            self.assertEqual(data.stat().st_size, described.st_size)
+            with self.assertRaises(uc1Run.Uc1RunError) as raised:
+                run.start()
+            self.assertIn("changed on disk", str(raised.exception))
+            self.assertIn(data.name, str(raised.exception))
+            self.assertEqual(processes, [], "UC1 was started on a cube rewritten in place")
+            self.assertFalse(fixture["lock"].is_file(), "A refused run left the build locked")
+
+            # Another file of the same size, with the same write time, moved
+            # over the cube, as a copy that keeps timestamps leaves it.
+            self._writeFixtureCalibratedCube(fixture["cubeFolder"])
+            run, case, build, processes, results = self._startRun(fixture)
+            described = data.stat()
+            replacement = data.with_name("replacement.bin")
+            replacement.write_bytes(bytes(reversed(data.read_bytes())))
+            os.utime(replacement, ns=(described.st_atime_ns, described.st_mtime_ns))
+            os.replace(replacement, data)
+            self.assertEqual((data.stat().st_size, data.stat().st_mtime_ns),
+                             (described.st_size, described.st_mtime_ns))
+            with self.assertRaises(uc1Run.Uc1RunError) as raised:
+                run.start()
+            self.assertIn("changed on disk", str(raised.exception))
+            self.assertEqual(processes, [], "UC1 was started on a cube replaced by another")
+
+            # Written to while it was being copied for UC1: checked again after
+            # the copy, and the half-made copy is removed.
+            self._writeFixtureCalibratedCube(fixture["cubeFolder"])
+            case = self._describeUc1Input(fixture["calibratedHeader"], fixture["buildRoot"])
+            realStamps = inputModule.fileStamps
+            calls = []
+
+            def stampsThatChangeAfterTheCopy(cube):
+                calls.append(cube)
+                header, (size, writeTime, fileId) = realStamps(cube)
+                if len(calls) > 1:
+                    writeTime += 1  # The data file was written to during the copy.
+                return header, (size, writeTime, fileId)
+
+            with mock.patch.object(inputModule, "fileStamps", stampsThatChangeAfterTheCopy), \
+                    self.assertRaises(calibratedModule.CalibratedCubeError) as raised:
+                inputModule.writeUc1Input(case)
+            self.assertEqual(len(calls), 2, "The cube was not checked again after the copy")
+            self.assertIn("changed on disk", str(raised.exception))
+            self.assertEqual(sorted(path.name for path in case.folder.iterdir()), [],
+                             "A copy refused after it was made was left for UC1")
+
+            # The cube as described still runs.
+            run, case, build, processes, results = self._startRun(fixture)
+            run.start()
+            try:
+                self.assertEqual(len(processes), 1, "UC1 was not started on an unchanged cube")
+            finally:
+                run.cancel()
 
     def test_unexpectedValidationFailureStillReportsTheRun(self) -> None:
         """An error the output checks did not foresee still ends the capture.
@@ -1909,10 +1981,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         import os
 
         uc1Run = self._helperModule("SLIAFlowUc1Run")
-        cubeModule = self._helperModule("SLIAFlowCube")
         with self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root)
-            case = cubeModule.loadRecordedCase(fixture["inputRoot"] / "004-02")
+            case = self._describeUc1Input(fixture["calibratedHeader"], fixture["buildRoot"])
             build = uc1Run.Uc1Build(fixture["buildRoot"])
             outputDirectory = build.caseOutputDirectory(case.name)
             runStart = time.time() - 60.0
@@ -2003,33 +2074,31 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         return frame
 
     @contextlib.contextmanager
-    def _captureSession(self, caseName="004-02"):
+    def _captureSession(self, *, cube=True, groundTruth=False):
         """The module widget wired to a fixture repository, a fake camera and fake UC1.
 
-        The configured cube is the fixture case `caseName`. With `None` no case
-        is written, so the configured folder does not exist.
+        The configured cube is the fixture calibrated cube at its default place,
+        input/002-04. With `cube=False` it is not written, so the configured
+        header does not exist; with `groundTruth` a gtMap lies beside it.
         """
         _, widget = self._moduleRepresentationAndWidget()
         widget.initializeParameterNode()
         with self._fixtureDirectory() as root:
-            caseNames = () if caseName is None else (caseName,)
-            fixture = self._makeFixtureRepository(root, caseNames=caseNames)
+            fixture = self._makeFixtureRepository(root, cube=cube, groundTruth=groundTruth)
             factory, processes = self._fakeProcessFactory()
             widget.logic.setRunEnvironment(repositoryRoot=root, processFactory=factory)
-            cube = fixture["inputRoot"] / (caseName or "004-02")
-            widget.logic.cubeFolder = cube
             capture = self._FakeCameraCapture()
             timer = self._FakeCameraTimer()
             session = dict(fixture, widget=widget, processes=processes, capture=capture,
-                           timer=timer, cube=cube)
+                           timer=timer, cube=fixture["cubeFolder"])
             try:
                 yield session
             finally:
                 widget._cancelCapture()
                 widget._stopCamera(clearLiveView=True)
-                widget.logic.removeOutputNodes()
+                widget._forgetResult()
                 widget._forgetCube()
-                widget.logic.cubeFolder = None
+                widget.logic.calibratedCubeHeader = None
                 widget.logic.setRunEnvironment(repositoryRoot=None, processFactory=None)
 
     def _startFakeCamera(self, session) -> None:
@@ -2235,10 +2304,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                         self.assertEqual(node.GetAttribute("SLIAFlow.OutputFile"), fileName)
                         self.assertEqual(node.GetAttribute("SLIAFlow.RecordedCase"), case.name)
                         self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "simulated")
-                        self.assertEqual(
-                            node.GetAttribute("SLIAFlow.SimulationDetail"),
-                            self.RECORDED_DETAIL_FORMAT.format(case=case.name),
-                        )
+                        self.assertEqual(node.GetAttribute("SLIAFlow.SimulationDetail"),
+                                         self.UC1_RESULT_DETAIL)
                         self.assertFalse(node.GetSaveWithScene())
                         ids.add(node.GetAttribute("SLIAFlow.CaptureId"))
                 self.assertEqual(len(ids), 1, "The five outputs of one run carry different IDs")
@@ -2369,7 +2436,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 firstFieldOfView = tuple(sliceNode.GetFieldOfView())
 
                 # The configured cube is replaced on disk by a wider one.
-                self._writeFixtureCase(session["inputRoot"], "004-02", samples=12, lines=5)
+                self._writeFixtureCalibratedCube(session["cubeFolder"], samples=12, lines=5)
                 self._showFrame(session, 31)
                 widget._onCaptureClicked()
                 case, _ = self._finishCapture(session, seed=2)
@@ -2501,12 +2568,11 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             return marker + text
 
         uc1Run = self._helperModule("SLIAFlowUc1Run")
-        cubeModule = self._helperModule("SLIAFlowCube")
         messages = {}
         with mock.patch.object(slicer.i18n, "translate", translate), \
                 self._fixtureDirectory() as root:
             fixture = self._makeFixtureRepository(root)
-            case = cubeModule.loadRecordedCase(fixture["inputRoot"] / "004-02")
+            case = self._describeUc1Input(fixture["calibratedHeader"], fixture["buildRoot"])
 
             def refusal(label):
                 run, *_ = self._startRun(fixture)
@@ -2561,7 +2627,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 self.assertTrue(message.startswith(marker), f"Not translated: {message!r}")
 
         with mock.patch.object(slicer.i18n, "translate", translate), \
-                self._captureSession(caseName=None) as session:
+                self._captureSession(cube=False) as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2569,7 +2635,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             with self.subTest(failure="configured cube refused"):
                 status = widget.ui.statusLabel.text
                 self.assertIn(marker + "The configured cube", status)
-                self.assertIn(marker + f"{widget.logic.cubeFolder} is not a folder", status)
+                self.assertIn(marker + f"{self.CALIBRATED_CUBE_STEM}.hdr is missing", status)
 
     # --- Panel ------------------------------------------------------------
 
@@ -2612,6 +2678,100 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             tuple(selector.itemText(index) for index in range(selector.count)),
             (*self.UC1_OUTPUT_FILE_NAMES, "gtMap"),
         )
+
+    def _groundTruthEntryOffered(self, widget) -> tuple:
+        """(enabled, visible in the popup) of the gtMap entry in Delineation output."""
+        selector = widget.ui.resultOutputSelector
+        index = selector.findText("gtMap")
+        self.assertGreaterEqual(index, 0, "The gtMap entry is not in the list at all")
+        return bool(selector.model().item(index).isEnabled()), not selector.view().isRowHidden(index)
+
+    def test_groundTruthEntryIsOfferedOnlyForACubeThatHasOne(self) -> None:
+        """ADR-0004 decision 8: gtMap is offered only for a cube that carries one.
+
+        002-04 has no gtMap. The entry stays in the list, because the panel's
+        parameter binding selects by position, but it is hidden and cannot be
+        chosen; a stored gtMap selection says the cube has no ground truth
+        rather than that one could not be read.
+        """
+        for hasGroundTruth in (False, True):
+            with self.subTest(groundTruth=hasGroundTruth), \
+                    self._captureSession(groundTruth=hasGroundTruth) as session:
+                widget = session["widget"]
+                self.assertEqual(self._groundTruthEntryOffered(widget), (False, False),
+                                 "gtMap is offered before there is a result")
+                self._startFakeCamera(session)
+                self._showFrame(session, 30)
+                widget._onCaptureClicked()
+                self._finishCapture(session, seed=15)
+                self.assertEqual(self._groundTruthEntryOffered(widget),
+                                 (hasGroundTruth, hasGroundTruth))
+                try:
+                    widget._parameterNode.resultOutput = "gtMap"
+                    widget._onResultOutputChanged()
+                    status = widget.ui.resultStatusLabel.text
+                    if hasGroundTruth:
+                        self.assertIsNotNone(widget._groundTruthNode())
+                        self.assertIn("under the recorded ground truth", status)
+                    else:
+                        self.assertIsNone(widget.logic.groundTruthNode())
+                        self.assertIn("has no ground truth", status)
+                        self.assertNotIn("could not be read", status)
+                        self.assertIn(widget._selectedOutput(), status)
+                finally:
+                    widget._parameterNode.resultOutput = parameterModule.DEFAULT_RESULT_OUTPUT
+                    widget._onResultOutputChanged()
+                widget._forgetResult()
+                self.assertEqual(self._groundTruthEntryOffered(widget), (False, False),
+                                 "gtMap is still offered after the result is gone")
+
+    def test_resultStatusSaysLctfResultsAreNotValidated(self) -> None:
+        """ADR-0004 decision 5: a UC1 result on the LCTF cube is behavioural only.
+
+        Every line that describes a result on screen says so: a fresh one, one
+        under its ground truth, one whose ground truth could not be read, and
+        the previous result kept while a capture runs and after it fails.
+        """
+        with self._captureSession(groundTruth=True) as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            case, _ = self._finishCapture(session, seed=16)
+            shown = {"capture status": widget.ui.statusLabel.text,
+                     "result status": widget.ui.resultStatusLabel.text}
+            try:
+                widget._parameterNode.resultOutput = "gtMap"
+                widget._onResultOutputChanged()
+                self.assertIsNotNone(widget._groundTruthNode())
+                shown["result under its ground truth"] = widget.ui.resultStatusLabel.text
+                widget.logic.groundTruthNode().SetAttribute(
+                    "SLIAFlow.CaptureId", "a-capture-that-is-not-this-one")
+                widget._updateResultStatus()
+                self.assertIn("could not be read", widget.ui.resultStatusLabel.text)
+                shown["ground truth unreadable"] = widget.ui.resultStatusLabel.text
+
+                widget._parameterNode.resultOutput = parameterModule.DEFAULT_RESULT_OUTPUT
+                widget._onResultOutputChanged()
+                widget._onCaptureClicked()
+                self.assertIn(self.STALE_STATUS_FRAGMENT, widget.ui.resultStatusLabel.text)
+                shown["previous result while processing"] = widget.ui.resultStatusLabel.text
+                self._finishCapture(session, exitCode=2)
+                self.assertIn(self.STALE_STATUS_FRAGMENT, widget.ui.resultStatusLabel.text)
+                shown["previous result after a failed capture"] = widget.ui.resultStatusLabel.text
+            finally:
+                widget._forgetResult()
+            # Including the one for a cube without ground truth, which this
+            # fixture's cube cannot reach.
+            for name in ("CAPTURE_DONE_STATUS", "RESULT_STATUS", "RESULT_STALE_STATUS",
+                         "GROUND_TRUTH_STATUS", "GROUND_TRUTH_MISSING_STATUS",
+                         "NO_GROUND_TRUTH_STATUS"):
+                shown[name] = getattr(widget, name).format(
+                    case=case.name, file="svm.bmp", snapshot="snapshot.png")
+        for label, text in shown.items():
+            with self.subTest(status=label):
+                self.assertIn(case.name, text)
+                self.assertIn(self.NOT_VALIDATED_FRAGMENT, text)
 
     def test_bindingThePanelKeepsTheDeclaredDefaultOutput(self) -> None:
         """Manual step 6, 2026-09-17: the first result was shown as pca.bmp.
@@ -2715,9 +2875,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         """The HS Cube panel shows the calibrated cube the capture stands for.
 
         SLIA-032: it is IUMA's calibrated float32 cube, shown with its stored
-        values unchanged, while UC1 still runs on the reference case folder
-        until SLIA-033. Its third axis is the band, which is what makes the
-        panel scrollable, and it carries ADR-0004 decision 7 provenance.
+        values unchanged. Since SLIA-033 it is also the cube UC1 runs on. Its
+        third axis is the band, which is what makes the panel scrollable, and it
+        carries ADR-0004 decision 7 provenance.
         """
         with self._captureSession() as session:
             widget = session["widget"]
@@ -2725,8 +2885,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self._showFrame(session, 30)
             widget._onCaptureClicked()
             case = widget.logic.currentRun.case
-            self.assertEqual(case.folder, session["cube"].resolve(),
-                             "UC1 left the reference case before SLIA-033")
+            self.assertEqual(case.name, self.CALIBRATED_CUBE_NAME,
+                             "UC1 ran on another cube than the one HS Cube shows")
+            self.assertEqual(case.cube.headerPath, session["calibratedHeader"].resolve())
             try:
                 node = widget.logic.cubeNode()
                 self.assertIsNotNone(node, "No cube reached the scene")
@@ -2769,7 +2930,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         given zero opacity in the colour table rather than painted white.
         """
         cubeModule = self._helperModule("SLIAFlowCube")
-        with self._captureSession() as session:
+        with self._captureSession(groundTruth=True) as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2821,7 +2982,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         The comparison is between a classification and the labelling, so
         selecting gtMap must not take the classification off the screen.
         """
-        with self._captureSession() as session:
+        with self._captureSession(groundTruth=True) as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2861,7 +3022,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.skipTest("Requires the maintained headful Slicer test target")
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession() as session:
+        with self._captureSession(groundTruth=True) as session:
             widget = session["widget"]
             try:
                 self.assertTrue(widget._activatePresentation())
@@ -2911,7 +3072,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.skipTest("Requires the maintained headful Slicer test target")
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession() as session:
+        with self._captureSession(groundTruth=True) as session:
             widget = session["widget"]
             try:
                 self.assertTrue(widget._activatePresentation())
@@ -2946,7 +3107,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         Laying one case's labelling over another case's result would read as
         agreement or disagreement that was never measured.
         """
-        with self._captureSession() as session:
+        with self._captureSession(groundTruth=True) as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2967,7 +3128,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def test_unreadableGroundTruthDoesNotFailTheCapture(self) -> None:
         """Reading the ground truth is for the panel; the result does not need it."""
-        with self._captureSession() as session:
+        with self._captureSession(groundTruth=True) as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -3209,16 +3370,15 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 widget._forgetCube()
 
     def test_cubeIsShownEvenWhenUc1IsRefused(self) -> None:
-        """The cube does not need UC1: a refused UC1 case still shows it."""
+        """The cube does not need UC1: a refused UC1 run still shows it."""
         with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
-            missing = session["root"] / "input" / "reference_hsi_brain_db" / "absent"
-            widget.logic.cubeFolder = missing
+            session["executable"].unlink()
             self._showFrame(session, 30)
             widget._onCaptureClicked()
-            self.assertIn("is not a folder", widget.ui.statusLabel.text)
-            self.assertEqual(session["processes"], [], "UC1 started on a refused case")
+            self.assertIn("build-uc1.ps1", widget.ui.statusLabel.text)
+            self.assertEqual(session["processes"], [], "UC1 started without its executable")
             node = widget.logic.cubeNode()
             self.assertIsNotNone(node, "A refused UC1 case kept the cube off the panel")
             self.assertEqual(node.GetAttribute("SLIAFlow.CaptureId"), widget._captureId)
@@ -3347,15 +3507,13 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                                           "A click outside the cube replaced the spectrum")
 
     def test_panelsNameTheCubeTheyShow(self) -> None:
-        """HS Cube names its cube and Tumour Delineation its case, in operator words."""
+        """HS Cube and Tumour Delineation both name the one cube, in operator words."""
         with self._capturedPresentation() as (session, layoutManager):
             widget = session["widget"]
-            caseName = session["cube"].name
             self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME,
                                  (self.CALIBRATED_CUBE_NAME,))
-            self._waitForCaption(widget, layoutManager, widget.RESULT_VIEW_NAME, (caseName,))
-            self.assertNotIn(self.CALIBRATED_CUBE_NAME,
-                             widget.panelCaption(widget.RESULT_VIEW_NAME))
+            self._waitForCaption(widget, layoutManager, widget.RESULT_VIEW_NAME,
+                                 (self.CALIBRATED_CUBE_NAME,))
             for viewName in (widget.CUBE_VIEW_NAME, widget.RESULT_VIEW_NAME):
                 lowered = widget.panelCaption(viewName).lower()
                 for word in self.PANEL_TEXT_FORBIDDEN_WORDS:
@@ -3363,7 +3521,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                         self.assertNotIn(word, lowered)
 
     def test_unreadableCubeIsExplainedOnThePanel(self) -> None:
-        """A cube that cannot be shown says why on HS Cube, and UC1 still runs."""
+        """A cube that cannot be read says why on HS Cube, and UC1 is not run on it."""
         def truncate(session):
             data = session["calibratedHeader"].with_suffix(".dat")
             data.write_bytes(data.read_bytes()[:-4])
@@ -3371,7 +3529,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         with self._capturedPresentation(finish=False, prepare=truncate) as (session, _layout):
             widget = session["widget"]
             self.assertIsNone(widget.logic.cubeNode())
-            self.assertEqual(len(session["processes"]), 1, "UC1 did not run without the cube")
+            self.assertEqual(session["processes"], [], "UC1 ran on a cube that cannot be read")
+            self.assertIn(f"{self.CALIBRATED_CUBE_STEM}.dat", widget.ui.statusLabel.text)
             message = widget.panelMessage(widget.CUBE_VIEW_NAME)
             self.assertIn(f"{self.CALIBRATED_CUBE_STEM}.dat", message)
             self.assertIn("bytes", message)
