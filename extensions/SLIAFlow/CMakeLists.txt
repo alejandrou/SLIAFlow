@@ -9,11 +9,11 @@ set(EXTENSION_CONTRIBUTORS "STRATUM project contributors")
 set(EXTENSION_DESCRIPTION "Non-clinical STRATUM visualization prototype for 3D Slicer")
 set(EXTENSION_ICONURL "")
 set(EXTENSION_SCREENSHOTURLS "")
-# No extension dependency. SLIAFlow creates no OpenIGTLink connector and
-# reads no OpenIGTLink node (ADR-0003 decision 2); depending on
-# SlicerOpenIGTLink would make it unavailable wherever that extension is
-# not built for the Slicer revision in use.
-set(EXTENSION_DEPENDS "NA")
+# The Connections section connects to IUMA's acquisition app as an OpenIGTLink
+# client (ADR-0004 decision 2, SLIA-035). Declaring the dependency is what puts
+# the pinned SlicerOpenIGTLink build into the generated launcher. The module
+# still loads without it and says OpenIGTLink is not available.
+set(EXTENSION_DEPENDS "SlicerOpenIGTLink")
 
 find_package(Slicer REQUIRED)
 include(${Slicer_USE_FILE})

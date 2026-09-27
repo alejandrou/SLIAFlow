@@ -16,6 +16,8 @@ $configPath = Join-Path $repositoryRoot "config\local.json"
 $moduleSourcePath = Join-Path $repositoryRoot "extensions\SLIAFlow\SLIAFlow"
 $buildRootPath = Join-Path $repositoryRoot "build\SLIAFlow"
 $launcherPath = Join-Path $buildRootPath "SlicerWithSLIAFlow.exe"
+# The pinned SlicerOpenIGTLink build (docs/development/openigtlink_setup.md).
+$openIGTLinkBuildPath = Join-Path $repositoryRoot "build\SlicerOpenIGTLink\inner-build"
 $testName = "SLIAFlow"
 
 function Stop-WithError {
@@ -74,6 +76,31 @@ if ($Target -eq "Source") {
     $slicerExecutable = Get-ConfiguredSlicerExecutable
     $modulePaths = @($moduleSourcePath)
     $expectedModuleRoot = $moduleSourcePath
+
+    # SLIAFlow's Connections section needs OpenIGTLinkIF (SLIA-035). The
+    # configured Slicer does not carry it, so the pinned build is loaded the way
+    # the SLIAFlow launcher loads it: its launcher settings put its libraries on
+    # the path, and its module directories are added. A missing build fails the
+    # run rather than letting the connector tests fail one by one.
+    $openIGTLinkSettings = Join-Path $openIGTLinkBuildPath "AdditionalLauncherSettings.ini"
+    if (-not (Test-Path -LiteralPath $openIGTLinkSettings -PathType Leaf)) {
+        Stop-WithError "The SlicerOpenIGTLink build is missing: $openIGTLinkSettings. Build it as docs/development/openigtlink_setup.md describes."
+    }
+    $openIGTLinkLibRoots = @(Get-ChildItem -LiteralPath (Join-Path $openIGTLinkBuildPath "lib") -Directory -Filter "Slicer-*" -ErrorAction SilentlyContinue)
+    if ($openIGTLinkLibRoots.Count -ne 1) {
+        Stop-WithError "Expected exactly one lib\Slicer-* folder under $openIGTLinkBuildPath, found $($openIGTLinkLibRoots.Count)."
+    }
+    $openIGTLinkModulePaths = @(
+        (Join-Path $openIGTLinkLibRoots[0].FullName "qt-loadable-modules\Release"),
+        (Join-Path $openIGTLinkLibRoots[0].FullName "qt-scripted-modules")
+    )
+    foreach ($path in $openIGTLinkModulePaths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+            Stop-WithError "The SlicerOpenIGTLink module folder is missing: $path."
+        }
+    }
+    $modulePaths += $openIGTLinkModulePaths
+    $launcherSettings = $openIGTLinkSettings
 }
 else {
     if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
@@ -82,6 +109,8 @@ else {
     $slicerExecutable = $launcherPath
     $modulePaths = @()
     $expectedModuleRoot = $buildRootPath
+    # The launcher passes its own dependency settings.
+    $launcherSettings = $null
 }
 
 # Fail loudly when the module that Slicer actually loaded is not the one this
@@ -101,7 +130,13 @@ $pythonStatements = @(
 )
 $pythonCode = $pythonStatements -join "; "
 
-$slicerArguments = @(
+$slicerArguments = @()
+if ($null -ne $launcherSettings) {
+    # A launcher option, so it comes first.
+    $slicerArguments += "--launcher-additional-settings"
+    $slicerArguments += $launcherSettings
+}
+$slicerArguments += @(
     "--testing",
     "--no-splash",
     "--disable-cli-modules"
@@ -155,6 +190,9 @@ Write-Host "Target:            $Target"
 Write-Host "Window mode:       $(if ($Headful) { 'headful' } else { 'headless' })"
 Write-Host "Slicer executable: $slicerExecutable"
 Write-Host "Expected module:   $expectedModuleRoot"
+if ($null -ne $launcherSettings) {
+    Write-Host "OpenIGTLinkIF:     $openIGTLinkBuildPath"
+}
 Write-Host "Test:              $testName"
 
 $process = [System.Diagnostics.Process]::new()

@@ -148,6 +148,13 @@ executable configured in `config/local.json` with `--additional-module-paths`
 pointing at `extensions/SLIAFlow/SLIAFlow`, so it exercises the files currently
 being edited.
 
+It also loads the pinned OpenIGTLinkIF build from
+`build\SlicerOpenIGTLink\inner-build`, which the Connections section needs
+(`SLIA-035`, `docs/development/openigtlink_setup.md`), and fails naming that
+folder when it is missing. The connector tests start the stand-in for IUMA's
+app from the repository `.venv` on free local ports, with a placeholder cube
+written by the test.
+
 Before running any test, the runner prints the path the `SLIAFlow` module was
 actually loaded from and fails if that path is not the one the selected target
 requires. This guard exists because `build\SLIAFlow\SlicerWithSLIAFlow.exe`
@@ -208,7 +215,7 @@ your edits: before a demonstration, before manual verification, and before
 `run-slicer-tests.ps1 -Target Build`.
 
 1. Edit and test against the working tree as above.
-2. Run `.\scripts\developmentuild-sliaflow.ps1` from the repository root.
+2. Run `.\scripts\development\build-sliaflow.ps1` from the repository root.
 3. Read the `Verify` section; every module file must be listed as `ok`.
 4. On `not deployed`, add that file to `MODULE_PYTHON_SCRIPTS` or
    `MODULE_PYTHON_RESOURCES` in the module `CMakeLists.txt` and run it again.
