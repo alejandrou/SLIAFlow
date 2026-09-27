@@ -3,6 +3,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 import numpy as np
+import qt
 import slicer
 import vtk
 from slicer.i18n import tr as _
@@ -10,6 +11,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModuleWidget
 from slicer.util import VTKObservationMixin
 
 from .SLIAFlowCalibratedCube import CalibratedCubeError
+from .SLIAFlowConnections import CHANNEL_HS_CUBE, CHANNEL_LIVE_VIEW, CHANNEL_STEREO
 from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
     CAPTURE_ID_ATTRIBUTE,
@@ -195,6 +197,22 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     )
     CUSTOM_LAYOUT_DESCRIPTION = _layoutDescription(VIEW_ROWS)
 
+    # SLIA-035: the Connections section.
+    CONNECTIONS_REFRESH_MS = 500
+    CONNECT_TEXT = _("Connect")
+    DISCONNECT_TEXT = _("Disconnect")
+    OPENIGTLINKIF_MODULE = "OpenIGTLinkIF"
+    OPENIGTLINKIF_UNAVAILABLE_STATUS = _(
+        "OpenIGTLinkIF could not be opened: {reason}"
+    )
+    CONNECTION_SETTING_CONTROLS = (
+        "connectionsHostLineEdit",
+        "liveViewPortSpinBox",
+        "stereoPortSpinBox",
+        "hsCubePortSpinBox",
+        "expectedBandsSpinBox",
+    )
+
     def __init__(self, parent=None) -> None:
         ScriptedLoadableModuleWidget.__init__(self, parent)
         VTKObservationMixin.__init__(self)
@@ -253,6 +271,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # truth over this one rather than replacing it, so it is remembered
         # across a gtMap selection.
         self._backgroundOutput = DEFAULT_RESULT_OUTPUT
+        # SLIA-035. The settings last given to the connections, so that an
+        # unchanged setting does not rebuild the rows and lose their errors.
+        self._appliedConnectionSettings = None
+        self._connectionsTimer = None
+        self._observedParameterNode = None
 
     def setup(self) -> None:
         super().setup()
@@ -291,9 +314,17 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._spectrumPlotWidget.setMRMLScene(slicer.mrmlScene)
         self.ui.spectrumPlotContainer.layout().addWidget(self._spectrumPlotWidget)
         self.ui.spectrumLabel.setText(self.SPECTRUM_PROMPT)
+        self.ui.connectButton.connect("clicked()", self._onConnectClicked)
+        self.ui.openIGTLinkIFButton.connect("clicked()", self._onOpenInOpenIGTLinkIFClicked)
+        header = self.ui.connectionsTable.horizontalHeader()
+        header.setSectionResizeMode(qt.QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        self._connectionsTimer = qt.QTimer()
+        self._connectionsTimer.setInterval(self.CONNECTIONS_REFRESH_MS)
+        self._connectionsTimer.connect("timeout()", self._refreshConnections)
         # Module cleanup is not guaranteed to run before the process exits, and
-        # a UC1 process left behind would hold the build lock.
-        slicer.app.connect("aboutToQuit()", self._cancelCapture)
+        # a UC1 process or a connector left behind would outlive the module.
+        slicer.app.connect("aboutToQuit()", self._onAboutToQuit)
         self.initializeParameterNode()
         self._setCameraSupportState(self.logic.openCVAvailable())
         self._updateResultStatus()
@@ -304,10 +335,13 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def cleanup(self) -> None:
         try:
-            slicer.app.disconnect("aboutToQuit()", self._cancelCapture)
+            slicer.app.disconnect("aboutToQuit()", self._onAboutToQuit)
         except Exception:
             pass
         self._cancelCapture()
+        self._releaseConnections()
+        if self._connectionsTimer is not None:
+            self._connectionsTimer.stop()
         self._stopCamera(clearLiveView=True)
         self._deactivatePresentation(restore=True)
         self._forgetResult()
@@ -322,6 +356,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._setCameraSupportState(self.logic.openCVAvailable())
 
     def exit(self) -> None:
+        # The connections are left as they are, so that OpenIGTLinkIF, or any
+        # module listing connectors, shows them (SLIA-035, owner request).
         self._cancelCapture()
         self._stopCamera(clearLiveView=True)
         self._deactivatePresentation(restore=True)
@@ -330,6 +366,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.setParameterNode(None)
 
     def onSceneStartClose(self, caller=None, event=None) -> None:
+        self._releaseConnections()
         self._cancelCapture()
         self._rememberLayoutBeforeSceneClose()
         self._stopCamera(clearLiveView=True)
@@ -343,6 +380,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._setCameraSupportState(self.logic.openCVAvailable())
 
     def onSceneEndClose(self, caller=None, event=None) -> None:
+        # The closed scene took the connectors; the new one lists them again,
+        # whichever module is on screen.
+        if self.logic is not None:
+            self.logic.connections.listConnectors()
         if getattr(self.parent, "isEntered", False):
             self.initializeParameterNode()
             self._activatePresentation()
@@ -374,6 +415,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._configureResultControls()
         self._updateResultStatus()
         self._showResult()
+        self._observeConnectionSettings()
+        self._refreshConnections()
+        if self._parameterNode is not None and self.logic is not None:
+            # OpenIGTLinkIF lists the app's ports from the moment SLIAFlow opens.
+            self.logic.connections.listConnectors()
 
     def _configureResultControls(self) -> None:
         for name in ("resultOutputSelector", "cubeDisplaySelector"):
@@ -1163,6 +1209,120 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         statusLabel = getattr(getattr(self, "ui", None), "statusLabel", None)
         if statusLabel is not None:
             statusLabel.setText(message)
+
+    # ------------------------------------------------------------------
+    # Connections (SLIA-035, ADR-0004 decision 2)
+    #
+    # One row per configured port of IUMA's acquisition app. The rows are built
+    # by SLIAFlowConnections from the connectors' state and the nodes they fill;
+    # this section only shows them and locks the settings while connected. The
+    # connectors stay listed, stopped, while disconnected, whichever module is
+    # on screen, and no connector outlives the scene or the module.
+    # ------------------------------------------------------------------
+
+    def _connectionSettings(self):
+        parameters = self._parameterNode
+        if parameters is None:
+            return None
+        return (
+            parameters.igtlHost,
+            ((CHANNEL_LIVE_VIEW, parameters.liveViewPort),
+             (CHANNEL_STEREO, parameters.stereoPort),
+             (CHANNEL_HS_CUBE, parameters.hsCubePort)),
+            parameters.expectedBands,
+        )
+
+    def _applyConnectionSettings(self) -> None:
+        """Give the parameter-node settings to the connections, while disconnected."""
+        if self.logic is None or self.logic.connections.connected:
+            return
+        settings = self._connectionSettings()
+        if settings is None or settings == self._appliedConnectionSettings:
+            return
+        host, ports, expectedBands = settings
+        # Listed connectors are listed again for the new settings.
+        self.logic.connections.configure(host, dict(ports), expectedBands)
+        self._appliedConnectionSettings = settings
+
+    def _observeConnectionSettings(self) -> None:
+        node = self._parameterNode.parameterNode if self._parameterNode is not None else None
+        if node is self._observedParameterNode:
+            return
+        if self._observedParameterNode is not None:
+            self.removeObserver(self._observedParameterNode, vtk.vtkCommand.ModifiedEvent,
+                                self._onConnectionSettingsModified)
+        self._observedParameterNode = node
+        if node is not None:
+            self.addObserver(node, vtk.vtkCommand.ModifiedEvent,
+                             self._onConnectionSettingsModified)
+
+    def _onConnectionSettingsModified(self, caller=None, event=None) -> None:
+        self._refreshConnections()
+
+    def _refreshConnections(self) -> None:
+        """Redraw the rows, the detail line and the controls from the connections."""
+        if self.logic is None or not hasattr(self, "ui"):
+            return
+        self._applyConnectionSettings()
+        connections = self.logic.connections
+        rows = connections.rows()
+        table = self.ui.connectionsTable
+        if table.rowCount != len(rows):
+            table.setRowCount(len(rows))
+        for rowIndex, row in enumerate(rows):
+            for column, text in enumerate((row.port, row.channel, row.state, row.lastMessage,
+                                           row.received)):
+                item = table.item(rowIndex, column)
+                if item is None:
+                    item = qt.QTableWidgetItem()
+                    table.setItem(rowIndex, column, item)
+                if item.text() != text:
+                    item.setText(text)
+        details = [f"{row.channel}: {row.detail}" for row in rows if row.detail]
+        if not rows and connections.lastError:
+            details.append(connections.lastError)
+        self.ui.connectionsDetailLabel.setText("\n".join(details))
+        connected = connections.connected
+        self.ui.connectButton.setText(self.DISCONNECT_TEXT if connected else self.CONNECT_TEXT)
+        for name in self.CONNECTION_SETTING_CONTROLS:
+            getattr(self.ui, name).setEnabled(not connected)
+
+    def _onConnectClicked(self) -> None:
+        if self.logic is None:
+            return
+        connections = self.logic.connections
+        if connections.connected:
+            if self._connectionsTimer is not None:
+                self._connectionsTimer.stop()
+            connections.disconnect()
+            self._refreshConnections()
+            return
+        self._applyConnectionSettings()
+        if connections.connect() and self._connectionsTimer is not None:
+            self._connectionsTimer.start()
+        self._refreshConnections()
+
+    def _releaseConnections(self) -> None:
+        """Stop and remove every module connector and what it received."""
+        if self._connectionsTimer is not None:
+            self._connectionsTimer.stop()
+        if self.logic is not None:
+            self.logic.connections.release()
+        self._refreshConnections()
+
+    def _onAboutToQuit(self) -> None:
+        self._cancelCapture()
+        self._releaseConnections()
+
+    def _onOpenInOpenIGTLinkIFClicked(self) -> None:
+        if slicer.app.moduleManager().module(self.OPENIGTLINKIF_MODULE) is None:
+            self._setStatus(self.OPENIGTLINKIF_UNAVAILABLE_STATUS.format(
+                reason=_("the module is not loaded in this Slicer.")))
+            return
+        try:
+            slicer.util.selectModule(self.OPENIGTLINKIF_MODULE)
+        except RuntimeError as error:
+            self._setStatus(self.OPENIGTLINKIF_UNAVAILABLE_STATUS.format(reason=error))
 
     # ------------------------------------------------------------------
     # Layout

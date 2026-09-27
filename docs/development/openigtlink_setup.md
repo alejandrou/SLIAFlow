@@ -1,11 +1,12 @@
 # Building the SlicerOpenIGTLink dependency
 
-> **Not used by the operator workflow since `SLIA-027`.** SLIAFlow now captures
-> and runs UC1 inside Slicer and creates no OpenIGTLink connector
-> (`docs/architecture/decisions/ADR-0003-integrated-capture-and-uc1-in-slicer.md`).
-> Ports 18944, 18945, 18946, 18947 and 18950 and their messages are not used by
-> the module. This page is kept because links return for external hardware or
-> UC2 in `SLIA-030`.
+> **Used again since `SLIA-035`.** Capture and UC1 still run inside Slicer with
+> no network hop (`ADR-0003`), but the **Connections** section connects to IUMA's
+> acquisition app on 18944, 18945 and 18946 as an OpenIGTLink client (`ADR-0004`
+> decision 2), so SLIAFlow declares this dependency again. Received data is not
+> yet used by the module; `SLIA-030` receives the cube. The Connections section
+> is described in `extensions/SLIAFlow/README.md`, and the stand-in for the app in
+> `tools/simulators/README.md`.
 
 SLIAFlow will carry `LiveView` frames and UC1 image maps over OpenIGTLink as
 independent TCP/IP streams. That transport comes from the official
@@ -16,8 +17,8 @@ The base Slicer application under `apps/SR` is not moved, edited, or rebuilt.
 The dependency is a second extension build that the SLIAFlow launcher is told
 about at configure time.
 
-This page covers the build and the discovery wiring only. Connectors, senders,
-and received-image behaviour belong to SLIA-008.
+This page covers the build and the discovery wiring only. The connectors and
+what they receive belong to the Connections section (`SLIA-035`).
 
 ## Canonical paths
 
@@ -130,7 +131,13 @@ extension package with the module tree and the extension config file.
 
 Reconfiguring is required because the launcher argument list is generated at
 configure time. Rebuilding without it leaves a launcher that still knows nothing
-about OpenIGTLink.
+about OpenIGTLink. `scripts\development\build-sliaflow.ps1 -Configure`
+does this with the `SlicerOpenIGTLink_DIR` already in `build\SLIAFlow`'s CMake
+cache.
+
+`SLIA-027` set `EXTENSION_DEPENDS` to `NA`, and a launcher configured then does
+not load OpenIGTLinkIF; `SLIA-035` declares the dependency again, so such a
+build must be reconfigured.
 
 ## How the runtime libraries are found
 
@@ -185,6 +192,39 @@ $code = "import slicer; print(slicer.vtkMRMLIGTLConnectorNode().GetClassName())"
 ```
 
 This must print `vtkMRMLIGTLConnectorNode`.
+
+## Tests against the working tree
+
+`scripts\development\run-slicer-tests.ps1` (the Source target) runs the
+configured `Slicer.exe`, which does not carry this dependency. It therefore
+passes `--launcher-additional-settings
+build\SlicerOpenIGTLink\inner-build\AdditionalLauncherSettings.ini` for the
+libraries and adds the build's `qt-loadable-modules\Release` and
+`qt-scripted-modules` folders to the module paths, and it stops with an error
+naming the folder when the build is missing. `SLIAFlowTest.test_openIGTLinkIFIsLoaded`
+fails if OpenIGTLinkIF did not load, so the connector tests can never pass by
+being skipped.
+
+## Client connectors on Windows
+
+Measured on this laptop for `SLIA-035`:
+
+- A client connector retries every 100 ms and does not log a failed attempt.
+- `Stop()` waits for the attempt in progress. With nothing listening, Windows
+  takes about 2 s to refuse a connection to a closed local port, so stopping a
+  waiting connector blocks for 1.0 to 2.1 s; a connected one stops in about
+  15 ms.
+- A connector can be stopped and started again. When the node a device wrote
+  into has been removed, the next message of that device creates a new one
+  (`ProcessIncomingDeviceModifiedEvent`), so SLIAFlow keeps its connectors
+  listed while disconnected and removes only what they received.
+- When a device's first image arrives, Slicer warns that the image geometry is
+  not the identity (`vtkMRMLVolumeNode::SetAndObserveImageData`). OpenIGTLinkIF
+  resets the geometry right after, so the warning appears once per received
+  device, not once per message: 2 warnings for 100 LiveView frames.
+- A connector receiving an IMAGE device takes the first scene volume of that
+  class whose name is the device name. SLIAFlow's camera volume is therefore
+  named `Laptop camera`, not `LiveView`.
 
 ## Regression gate
 

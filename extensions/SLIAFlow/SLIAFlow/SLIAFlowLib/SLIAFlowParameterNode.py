@@ -8,6 +8,14 @@ from slicer.parameterNodeWrapper import (
     parameterNodeWrapper,
 )
 
+from .SLIAFlowConnections import (
+    CHANNEL_HS_CUBE,
+    CHANNEL_LIVE_VIEW,
+    CHANNEL_STEREO,
+    DEFAULT_EXPECTED_BANDS,
+    DEFAULT_HOST,
+    DEFAULT_PORTS,
+)
 from .SLIAFlowCube import GROUND_TRUTH_FILE_NAME
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES
 
@@ -60,3 +68,9 @@ class SLIAFlowParameterNode:
     resultOutput: Annotated[
         str, Choice(list(RESULT_VIEW_NAMES)), Default(DEFAULT_RESULT_OUTPUT)
     ]
+    # SLIA-035: where the Connections section connects. Port 0 leaves a channel out.
+    igtlHost: Annotated[str, Default(DEFAULT_HOST)]
+    liveViewPort: Annotated[int, WithinRange(0, 65535), Default(DEFAULT_PORTS[CHANNEL_LIVE_VIEW])]
+    stereoPort: Annotated[int, WithinRange(0, 65535), Default(DEFAULT_PORTS[CHANNEL_STEREO])]
+    hsCubePort: Annotated[int, WithinRange(0, 65535), Default(DEFAULT_PORTS[CHANNEL_HS_CUBE])]
+    expectedBands: Annotated[int, WithinRange(1, 10000), Default(DEFAULT_EXPECTED_BANDS)]

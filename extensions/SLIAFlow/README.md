@@ -100,3 +100,79 @@ acquisition)` (`ADR-0004` decision 7).
 
 The staged build's `.uc1-runner.lock` keeps one UC1 run at a time, and a
 Capture while the lock is held is refused with the lock path in the message.
+
+## Connections: the acquisition app's ports (SLIA-035)
+
+The **Connections** section connects to IUMA's acquisition app as an
+OpenIGTLink client (`ADR-0004` decision 2) and shows, per port, whether it is
+connected and what arrives. It only receives: nothing is sent to the app, and
+nothing received is shown in the panels or used by Capture yet (`SLIA-030`).
+
+- **Settings**: host (default `127.0.0.1`), the LiveView, Stereo and HS Cube
+  ports (18944, 18945 and 18946, as the app serves them; 0 leaves a channel
+  out) and the expected bands of one cube (109, as `002-04` has). They can be
+  changed only while disconnected.
+- **The ports are listed in OpenIGTLinkIF from the start.** As soon as SLIAFlow
+  opens, it puts one client connector per configured port in the scene, stopped
+  and named `SLIAFlow <channel> (<port>)`, so **IGT > OpenIGTLinkIF** (and the
+  Connector list of **IGT > OpenIGTLink Remote**) shows them, off, before
+  anything is connected. Changing a port lists them again for the new port.
+- **Connect** starts those connectors and becomes **Disconnect**, which stops
+  them. Each row shows Port, Channel, State, the Last message (device
+  name, message type, size, data type, band and wavelength when the message
+  says them, and how long ago it arrived) and what was Received (frames or bands
+  per second over the last 5 s; for HS Cube, the bands of the current cube out
+  of the expected bands). The line under the table says what the table has no
+  room for.
+- **States**: `Not connected`; `Waiting for the app`, then `App not running`
+  after 3 s, naming the host and port; `Connected` with no message in the last
+  2 s; `Receiving`; for HS Cube, `Cube complete` or `Cube incomplete` with the
+  missing band numbers once nothing has arrived for 10 s; `Error` with its
+  reason. A row whose messages say `SLIAFlow.DataOrigin = simulated` adds
+  `(stand-in)`.
+- **A new connection starts empty.** When the app, or the stand-in, stops and
+  a sender connects to the port again, the row forgets the previous
+  connection: its state, bands and `(stand-in)` mark do not carry over.
+  OpenIGTLinkIF copies a message's metadata onto its node but never removes a
+  key a later message leaves out, so when a connection is lost SLIAFlow removes
+  the `OpenIGTLink.SLIAFlow.*` band and origin attributes from the nodes it
+  received. The last image stays on its node without them.
+- **Bands** are counted as they reach Slicer. OpenIGTLinkIF keeps a buffer of 3
+  per device name and reads it every 5 ms, so bands arriving faster than that
+  can be lost before SLIAFlow sees them; the count shows it. Missing bands are
+  named only when each message says which band it is; otherwise the line says
+  they cannot be named. A new cube starts when a band number repeats, after 10 s
+  of silence, or, without band numbers, after a full count.
+- **Open in OpenIGTLinkIF** opens Slicer's own view of the connectors and every
+  device they received; **IGT > OpenIGTLinkIF** in the Modules menu is the same
+  module. Leaving SLIAFlow for any module leaves the connections as they are:
+  they stay connected until **Disconnect**.
+- **What a connection received does not stay.** Disconnect, closing the scene,
+  Reload and quitting Slicer stop the connectors and remove the nodes they
+  created. A node that existed before Connect is kept. Closing the scene and
+  Reload also replace the connectors with new, stopped ones; quitting removes
+  them.
+- A connector switched on from OpenIGTLinkIF's own Active checkbox while
+  SLIAFlow is disconnected is not followed by the rows; **Connect** takes it
+  over.
+- **Disconnecting can pause Slicer** for up to about 2 s per port while the app
+  is not running: OpenIGTLink's `Stop()` waits for the connection attempt in
+  progress, and Windows takes about 2 s to refuse one to a closed local port.
+  With the app running it takes a fraction of a second.
+- When a device's first image arrives, Slicer logs one warning that the image
+  geometry is not the identity; it comes from OpenIGTLinkIF, once per received
+  device, not once per message.
+- The laptop camera volume is named `Laptop camera`, so that no connector can
+  take it for the app's `LiveView` device.
+
+Without IUMA's app, use the stand-in in `tools\simulators` (it says it is a
+stand-in in everything it prints and sends):
+
+```powershell
+cd tools\simulators
+..\..\.venv\Scripts\python.exe -m stratum_sim.iuma_app_standin
+```
+
+`--drop-bands 5,17,80-84` leaves bands out, to see them named as missing.
+`tools\simulators\README.md` lists what the stand-in assumes about the real
+app.

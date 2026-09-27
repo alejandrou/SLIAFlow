@@ -26,4 +26,5 @@ if sys.version_info < MINIMUM_PYTHON_VERSION:  # pragma: no cover - guard, not b
 __all__ = [
     "contract",
     "igtl_transport",
+    "iuma_app_standin",
 ]

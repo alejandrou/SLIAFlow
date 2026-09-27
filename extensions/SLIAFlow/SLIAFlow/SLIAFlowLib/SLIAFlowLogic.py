@@ -19,6 +19,7 @@ from .SLIAFlowCalibratedCube import (
     nearestBand,
     readCalibratedCube,
 )
+from .SLIAFlowConnections import SLIAFlowConnections
 from .SLIAFlowCube import (
     GROUND_TRUTH_CLASSES,
     GROUND_TRUTH_FILE_NAME,
@@ -43,15 +44,17 @@ from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES, Uc1Build, Uc1Run, findRepositoryR
 
 
 class SLIAFlowLogic(ScriptedLoadableModuleLogic):
-    """Own the camera, the capture snapshot, the UC1 run and its output nodes."""
+    """Own the camera, the capture snapshot, the UC1 run, its output nodes and the connections."""
 
     OPENCV_REQUIREMENT = "opencv-python-headless==5.0.0.93"
     CAMERA_WIDTH_PX = 640
     CAMERA_HEIGHT_PX = 480
     CAMERA_TIMER_INTERVAL_MS = 66
     # The panels show a volume by name, so the name is the thing itself and
-    # nothing else: the camera stream, or the output file it was decoded from.
-    LIVE_VOLUME_NAME = "LiveView"
+    # nothing else: the camera, or the output file it was decoded from. Not
+    # "LiveView": an OpenIGTLink connector receiving the app's LiveView device
+    # adopts the first vector volume of that name and writes into it (SLIA-035).
+    LIVE_VOLUME_NAME = "Laptop camera"
     # Row-major IJK-to-RAS directions. See _applyLiveVolumeGeometry.
     LIVE_VOLUME_DIRECTIONS = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
 
@@ -120,6 +123,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         # a real QProcess; a test points both somewhere else.
         self._repositoryRootOverride = None
         self._processFactory = None
+        # SLIA-035: the client connectors to IUMA's acquisition app.
+        self.connections = SLIAFlowConnections()
         self._calibratedCubeHeaderOverride = None
         self.currentRun: Uc1Run | None = None
 

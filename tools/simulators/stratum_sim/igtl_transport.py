@@ -536,6 +536,27 @@ class _DepartureAwareServer(pyigtl.OpenIGTLinkServer):
 
     allow_reuse_address = False
 
+    def __init__(self, *args, **kwargs) -> None:
+        # Messages written to a client in full. pyigtl takes a message off its
+        # queue before writing it, so an empty queue does not mean the last
+        # message went out: the write may have failed as the client left.
+        self.writtenMessageCount = 0
+        super().__init__(*args, **kwargs)
+
+    def _send_queued_message_from_socket(self, ssocket: socket.socket) -> bool:
+        written = super()._send_queued_message_from_socket(ssocket)
+        if written:
+            with self.lock_outgoing_messages:
+                self.writtenMessageCount += 1
+        return written
+
+    def _communication_error_occurred(self) -> None:
+        # The client left. pyigtl would keep what was queued for it and write
+        # that to the next client, ahead of what is queued for the next one.
+        with self.lock_outgoing_messages:
+            self.outgoing_messages.clear()
+        super()._communication_error_occurred()
+
     def _receive_message_from_socket(self, ssocket: socket.socket) -> bool:
         try:
             peeked = ssocket.recv(1, socket.MSG_PEEK)
@@ -629,6 +650,34 @@ class ImageStreamServer:
     @property
     def isConnected(self) -> bool:
         return self._server is not None and bool(self._server.is_connected())
+
+    @property
+    def pendingMessageCount(self) -> int:
+        """Messages queued by `sendImage` or `sendString` and not yet taken for writing.
+
+        pyigtl queues outgoing messages in a `deque(maxlen=100)` and drops the
+        oldest without a word once it is full, so a producer that must not lose
+        a message queues the next one only after the last was written
+        (`writtenMessageCount`). A message being written is no longer pending.
+        What was queued for a client that leaves is dropped.
+        """
+        if self._server is None:
+            return 0
+        with self._server.lock_outgoing_messages:
+            return len(self._server.outgoing_messages)
+
+    @property
+    def writtenMessageCount(self) -> int:
+        """Messages written to a client in full since this server socket started.
+
+        Only this proves a message left: pyigtl dequeues a message before its
+        write, so `pendingMessageCount` reaches 0 even when the write fails. A
+        restart after a failed send starts the count again from 0.
+        """
+        if self._server is None:
+            return 0
+        with self._server.lock_outgoing_messages:
+            return self._server.writtenMessageCount
 
     def sendImage(self, image: numpy.ndarray, deviceName: str, metadata: dict[str, str]) -> bool:
         """Queue one image message for sending.

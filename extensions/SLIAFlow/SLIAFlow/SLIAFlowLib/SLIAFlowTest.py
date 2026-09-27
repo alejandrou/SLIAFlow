@@ -3536,3 +3536,728 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertIn("bytes", message)
             for word in self.PANEL_TEXT_FORBIDDEN_WORDS:
                 self.assertNotIn(word, message.lower())
+
+    # ----------------------------------------------------------------------
+    # SLIA-035: the Connections section
+    #
+    # The state words, the defaults and the wording checked here are the ones
+    # the SLIA-035 card specifies; they are written out rather than imported,
+    # so the module and its tests cannot drift together. Every cube is a test
+    # fixture that stands for no imagery.
+    # ----------------------------------------------------------------------
+
+    STATE_NOT_CONNECTED = "Not connected"
+    STATE_WAITING = "Waiting for the app"
+    STATE_NOT_RUNNING = "App not running"
+    STATE_CONNECTED = "Connected"
+    STATE_RECEIVING = "Receiving"
+    STATE_CUBE_COMPLETE = "Cube complete"
+    STATE_CUBE_INCOMPLETE = "Cube incomplete"
+    STATE_ERROR = "Error"
+    STAND_IN_MARK = " (stand-in)"
+    # docs/hardware/acquisition_app_and_hardware.md section 4.
+    APP_PORTS = {"LiveView": 18944, "Stereo": 18945, "HS Cube": 18946}
+    # The band count of 002-04 (ADR-0004 decision 1).
+    DEFAULT_EXPECTED_BANDS = 109
+    # vtkMRMLIGTLConnectorNode.h at the pinned commit: StateOff, StateWaitConnection,
+    # StateConnected; TypeNotDefined, TypeServer, TypeClient.
+    IGTL_STATE_OFF, IGTL_STATE_WAITING, IGTL_STATE_CONNECTED = 0, 1, 2
+    IGTL_TYPE_CLIENT = 2
+    CONNECTION_TIMEOUT_SEC = 20.0
+
+    def _connectionsModule(self):
+        return self._helperModule("SLIAFlowConnections")
+
+    def _observation(self, moment, *, name="HsCube", size=(4, 3, 1), components=1,
+                     scalarType="float32", band=None, wavelength=None, simulated=False,
+                     messageType="IMAGE"):
+        return self._connectionsModule().MessageObservation(
+            time=moment, deviceName=name, messageType=messageType, size=size,
+            components=components, scalarType=scalarType, bandNumber=band,
+            wavelengthNm=wavelength, simulated=simulated)
+
+    def _monitor(self, channel="HS Cube", *, expectedBands=5, host="127.0.0.1", port=18946):
+        return self._connectionsModule().ChannelMonitor(
+            channel, host, port, expectedBands=expectedBands)
+
+    def _connectedMonitor(self, channel="HS Cube", **options):
+        monitor = self._monitor(channel, **options)
+        monitor.setConnectorState(self.IGTL_STATE_CONNECTED, now=0.0)
+        return monitor
+
+    # --- The row model, without a network --------------------------------
+
+    def test_channelMonitorStatesFollowTheConnector(self) -> None:
+        monitor = self._monitor("LiveView", port=18944)
+        self.assertEqual(monitor.row(now=0.0).state, self.STATE_NOT_CONNECTED)
+
+        monitor.setConnectorState(self.IGTL_STATE_WAITING, now=10.0)
+        self.assertEqual(monitor.row(now=12.9).state, self.STATE_WAITING)
+        row = monitor.row(now=13.0)
+        self.assertEqual(row.state, self.STATE_NOT_RUNNING)
+        self.assertIn("127.0.0.1:18944", row.detail)
+        self.assertIn("keeps trying", row.detail)
+
+        monitor.setConnectorState(self.IGTL_STATE_CONNECTED, now=14.0)
+        self.assertEqual(monitor.row(now=14.0).state, self.STATE_CONNECTED)
+        monitor.messageReceived(self._observation(15.0, name="LiveView", components=3,
+                                                  scalarType="uint8"))
+        self.assertEqual(monitor.row(now=16.9).state, self.STATE_RECEIVING)
+        self.assertEqual(monitor.row(now=17.1).state, self.STATE_CONNECTED)
+
+        # A lost connection is waiting again, timed from when it was lost.
+        monitor.setConnectorState(self.IGTL_STATE_WAITING, now=20.0)
+        self.assertEqual(monitor.row(now=21.0).state, self.STATE_WAITING)
+        self.assertEqual(monitor.row(now=23.5).state, self.STATE_NOT_RUNNING)
+
+        monitor.setConnectorState(self.IGTL_STATE_OFF, now=30.0)
+        self.assertEqual(monitor.row(now=30.0).state, self.STATE_NOT_CONNECTED)
+
+    def test_channelMonitorDescribesTheLastMessage(self) -> None:
+        live = self._connectedMonitor("LiveView", port=18944)
+        live.messageReceived(self._observation(10.0, name="LiveView", size=(1080, 1080, 1),
+                                               components=3, scalarType="uint8"))
+        row = live.row(now=10.3)
+        self.assertEqual((row.port, row.channel), ("18944", "LiveView"))
+        self.assertEqual(row.lastMessage, "LiveView - IMAGE 1080 x 1080 x 3 uint8 - 0.3 s ago")
+
+        cube = self._connectedMonitor(expectedBands=109)
+        cube.messageReceived(self._observation(10.0, size=(1080, 1080, 1), band=57,
+                                               wavelength=740.0))
+        self.assertEqual(cube.row(now=10.3).lastMessage,
+                         "HsCube - IMAGE 1080 x 1080 float32 - band 57, 740 nm - 0.3 s ago")
+
+    def test_channelMonitorRefusesAnythingButBandsOnHsCube(self) -> None:
+        cube = self._connectedMonitor()
+        cube.messageReceived(self._observation(1.0, components=3, scalarType="uint8"))
+        row = cube.row(now=1.1)
+        self.assertEqual(row.state, self.STATE_ERROR)
+        self.assertIn("single-component IMAGE", row.detail)
+        # LiveView carries colour frames, which are not an error there.
+        live = self._connectedMonitor("LiveView", port=18944)
+        live.messageReceived(self._observation(1.0, components=3, scalarType="uint8"))
+        self.assertEqual(live.row(now=1.1).state, self.STATE_RECEIVING)
+
+    def test_channelMonitorMeasuresTheMessageRate(self) -> None:
+        live = self._connectedMonitor("LiveView", port=18944)
+        self.assertEqual(live.row(now=0.0).received, "-")
+        for index in range(10):
+            live.messageReceived(self._observation(index * 0.1, name="LiveView", components=3,
+                                                   scalarType="uint8"))
+        self.assertEqual(live.row(now=0.95).received, "10.0 frames/s")
+        # Only the last 5 s count.
+        self.assertEqual(live.row(now=7.0).received, "-")
+
+        cube = self._connectedMonitor(expectedBands=109)
+        for index in range(5):
+            cube.messageReceived(self._observation(index * 0.5, band=index + 1))
+        self.assertEqual(cube.row(now=2.1).received, "5 / 109 bands - 2.0 bands/s")
+
+    def test_channelMonitorNamesMissingBands(self) -> None:
+        cube = self._connectedMonitor(expectedBands=12)
+        for moment, band in enumerate((1, 2, 4, 6, 7, 8, 12)):
+            cube.messageReceived(self._observation(float(moment), band=band))
+        receiving = cube.row(now=6.5)
+        self.assertEqual(receiving.state, self.STATE_RECEIVING)
+        self.assertTrue(receiving.received.startswith("7 / 12 bands"), receiving.received)
+
+        incomplete = cube.row(now=16.0)
+        self.assertEqual(incomplete.state, self.STATE_CUBE_INCOMPLETE)
+        self.assertIn("Missing bands: 3, 5, 9-11", incomplete.detail)
+
+        complete = self._connectedMonitor(expectedBands=3)
+        for band in (1, 2, 3):
+            complete.messageReceived(self._observation(float(band), band=band))
+        row = complete.row(now=3.1)
+        self.assertEqual(row.state, self.STATE_CUBE_COMPLETE)
+        self.assertEqual(row.detail, "")
+        self.assertTrue(row.received.startswith("3 / 3 bands"), row.received)
+
+    def test_channelMonitorCountsBandsItCannotName(self) -> None:
+        cube = self._connectedMonitor(expectedBands=4)
+        for index in range(3):
+            cube.messageReceived(self._observation(float(index)))
+        row = cube.row(now=13.0)
+        self.assertEqual(row.state, self.STATE_CUBE_INCOMPLETE)
+        self.assertTrue(row.received.startswith("3 / 4 bands"), row.received)
+        self.assertIn("do not say which band they are", row.detail)
+        self.assertNotIn("Missing bands", row.detail)
+        cube.messageReceived(self._observation(13.5))
+        self.assertEqual(cube.row(now=13.6).state, self.STATE_RECEIVING)
+        self.assertTrue(cube.row(now=13.6).received.startswith("1 / 4 bands"))
+
+    def test_channelMonitorStartsANewCube(self) -> None:
+        cube = self._connectedMonitor(expectedBands=5)
+        for band in (1, 2, 3):
+            cube.messageReceived(self._observation(float(band), band=band))
+        # A band number the current cube already has starts the next cube.
+        cube.messageReceived(self._observation(4.0, band=2))
+        self.assertTrue(cube.row(now=4.1).received.startswith("1 / 5 bands"))
+
+        # So does a message after 10 s without any, and not one before.
+        cube.messageReceived(self._observation(13.9, band=3))
+        self.assertTrue(cube.row(now=14.0).received.startswith("2 / 5 bands"))
+        cube.messageReceived(self._observation(24.5, band=4))
+        self.assertTrue(cube.row(now=24.6).received.startswith("1 / 5 bands"))
+
+        # Without band numbers, a message after a full count starts the next cube.
+        unnamed = self._connectedMonitor(expectedBands=2)
+        for index in range(3):
+            unnamed.messageReceived(self._observation(float(index)))
+        self.assertTrue(unnamed.row(now=2.1).received.startswith("1 / 2 bands"))
+
+    def test_channelMonitorMarksTheStandIn(self) -> None:
+        live = self._connectedMonitor("LiveView", port=18944)
+        live.messageReceived(self._observation(1.0, name="LiveView", components=3,
+                                               scalarType="uint8", simulated=True))
+        self.assertEqual(live.row(now=1.1).state, self.STATE_RECEIVING + self.STAND_IN_MARK)
+        live.messageReceived(self._observation(2.0, name="LiveView", components=3,
+                                               scalarType="uint8"))
+        self.assertEqual(live.row(now=2.1).state, self.STATE_RECEIVING)
+
+    def test_channelMonitorForgetsThePreviousConnection(self) -> None:
+        cube = self._connectedMonitor(expectedBands=3)
+        for band in (1, 2, 3):
+            cube.messageReceived(self._observation(float(band), band=band, simulated=True))
+        self.assertEqual(cube.row(now=3.1).state, self.STATE_CUBE_COMPLETE + self.STAND_IN_MARK)
+
+        # A lost connection still shows what it last delivered.
+        cube.setConnectorState(self.IGTL_STATE_WAITING, now=4.0)
+        self.assertTrue(cube.row(now=4.1).received.startswith("3 / 3 bands"))
+
+        # A new connection may be another sender, so nothing is carried over.
+        cube.setConnectorState(self.IGTL_STATE_CONNECTED, now=8.0)
+        row = cube.row(now=8.1)
+        self.assertEqual(row.state, self.STATE_CONNECTED)
+        self.assertEqual(row.lastMessage, "-")
+        self.assertEqual(row.received, "0 / 3 bands")
+        cube.messageReceived(self._observation(9.0))
+        row = cube.row(now=9.1)
+        self.assertEqual(row.state, self.STATE_RECEIVING)
+        self.assertEqual(row.received, "1 / 3 bands")
+
+        live = self._connectedMonitor("LiveView", port=18944)
+        live.messageReceived(self._observation(1.0, name="LiveView", components=3,
+                                               scalarType="uint8", simulated=True))
+        live.setConnectorState(self.IGTL_STATE_WAITING, now=2.0)
+        live.setConnectorState(self.IGTL_STATE_CONNECTED, now=6.0)
+        self.assertEqual(live.row(now=6.1).state, self.STATE_CONNECTED)
+
+    def test_connectionsWithoutOpenIGTLinkSayWhy(self) -> None:
+        connections = self._connectionsModule().SLIAFlowConnections(
+            openIGTLinkAvailable=lambda: False)
+        connections.configure("127.0.0.1", dict(self.APP_PORTS), self.DEFAULT_EXPECTED_BANDS)
+        self.assertFalse(connections.connect())
+        self.assertFalse(connections.connected)
+        rows = connections.rows()
+        self.assertEqual([row.channel for row in rows], list(self.APP_PORTS))
+        for row in rows:
+            with self.subTest(channel=row.channel):
+                self.assertEqual(row.state, self.STATE_ERROR)
+                self.assertIn("OpenIGTLink is not available", row.detail)
+
+    def test_connectionsRefuseConflictingSettings(self) -> None:
+        self.assertTrue(hasattr(slicer, "vtkMRMLIGTLConnectorNode"),
+                        "OpenIGTLinkIF is not loaded; run-slicer-tests.ps1 must load it")
+        connections = self._connectionsModule().SLIAFlowConnections()
+        for host, ports, fragment in (
+            ("127.0.0.1", {"LiveView": 18944, "Stereo": 18944, "HS Cube": 18946}, "18944"),
+            ("  ", dict(self.APP_PORTS), "host"),
+        ):
+            with self.subTest(host=host, ports=ports):
+                connections.configure(host, ports, self.DEFAULT_EXPECTED_BANDS)
+                self.assertFalse(connections.connect())
+                self.assertEqual(connections.connectorNodes(), [])
+                self.assertEqual(
+                    [node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLIGTLConnectorNode")
+                     if node.GetState() != self.IGTL_STATE_OFF], [])
+                self.assertIn(self.STATE_ERROR, {row.state for row in connections.rows()})
+                self.assertTrue(any(fragment in row.detail for row in connections.rows()))
+
+    # --- Real connectors ---------------------------------------------------
+
+    def test_openIGTLinkIFIsLoaded(self) -> None:
+        """The connector tests below must run, never pass by being skipped."""
+        self.assertTrue(hasattr(slicer, "vtkMRMLIGTLConnectorNode"),
+                        "OpenIGTLinkIF is not loaded in this Slicer")
+        self.assertIn("OpenIGTLinkIF", slicer.util.modulePath("OpenIGTLinkIF"))
+
+    @staticmethod
+    def _freeBasePort() -> int:
+        """A port P such that P, P + 1 and P + 2 are free at this moment."""
+        import socket
+        for _attempt in range(50):
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                base = probe.getsockname()[1]
+            if base + 2 > 65535:
+                continue
+            held = []
+            try:
+                for offset in range(3):
+                    candidate = socket.socket()
+                    held.append(candidate)
+                    candidate.bind(("127.0.0.1", base + offset))
+            except OSError:
+                continue
+            finally:
+                for candidate in held:
+                    candidate.close()
+            return base
+        raise AssertionError("No three consecutive free local ports were found.")
+
+    @contextlib.contextmanager
+    def _runningVenvPython(self, arguments, description):
+        """A process of the repository .venv Python, from once it printed "ready" to the block's end."""
+        import subprocess
+        import threading
+
+        uc1Run = self._helperModule("SLIAFlowUc1Run")
+        root = uc1Run.findRepositoryRoot(Path(__file__))
+        python = root / ".venv" / "Scripts" / "python.exe"
+        if not python.is_file():
+            self.fail(f"{description} runs under the repository .venv, and {python} is missing.")
+        # Slicer's own PYTHONHOME and PYTHONPATH would make the .venv
+        # interpreter load Slicer's standard library.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.upper().startswith("PYTHON")}
+        environment["PYTHONUNBUFFERED"] = "1"
+        process = subprocess.Popen(
+            [str(python)] + arguments, cwd=str(root / "tools" / "simulators"),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=environment,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        output = []
+        reader = threading.Thread(target=lambda: output.extend(process.stdout), daemon=True)
+        reader.start()
+        try:
+            deadline = time.monotonic() + self.CONNECTION_TIMEOUT_SEC
+            while not any("ready" in line for line in output):
+                if process.poll() is not None or time.monotonic() > deadline:
+                    self.fail(f"{description} did not start:\n" + "".join(output))
+                time.sleep(0.05)
+            yield output
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
+
+    @contextlib.contextmanager
+    def _runningStandIn(self, *, bands=5, dropBands="", bandInterval=0.05, frameRate=20):
+        """The stand-in for IUMA's app, from the repository .venv, on free ports."""
+        with self._fixtureDirectory() as folder:
+            header, values = self._writeFixtureCalibratedCube(
+                folder / "cube", wavelengths=self.LCTF_WAVELENGTHS_NM[:bands])
+            basePort = self._freeBasePort()
+            arguments = ["-m", "stratum_sim.iuma_app_standin", "--cube", str(header),
+                         "--base-port", str(basePort), "--frame-rate", str(frameRate),
+                         "--band-interval", str(bandInterval), "--cube-interval", "600"]
+            if dropBands:
+                arguments += ["--drop-bands", dropBands]
+            with self._runningVenvPython(arguments, "The stand-in") as output:
+                yield {"basePort": basePort, "values": values, "output": output}
+
+    # A sender that, like an app nothing is known about, sends no SLIAFlow
+    # metadata: one 4 x 3 float32 HsCube image, `delay` seconds after a client
+    # connects.
+    PLAIN_SENDER_SCRIPT = (
+        "import sys, time, numpy, pyigtl\n"
+        "server = pyigtl.OpenIGTLinkServer(port=int(sys.argv[1]), local_server=True)\n"
+        "print('ready', flush=True)\n"
+        "while not server.is_connected():\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(float(sys.argv[2]))\n"
+        "image = numpy.zeros((1, 3, 4), dtype=numpy.float32)\n"
+        "server.send_message(pyigtl.ImageMessage(image, device_name='HsCube'), wait=False)\n"
+        "time.sleep(3600)\n"
+    )
+
+    def _runningPlainSender(self, port, delay):
+        return self._runningVenvPython(["-c", self.PLAIN_SENDER_SCRIPT, str(port), str(delay)],
+                                       "The plain sender")
+
+    @contextlib.contextmanager
+    def _connectionSettings(self, widget, **values):
+        """Set the Connections settings for one test and put the previous ones back."""
+        widget.initializeParameterNode()
+        parameters = widget._parameterNode
+        names = ("igtlHost", "liveViewPort", "stereoPort", "hsCubePort", "expectedBands")
+        previous = {name: getattr(parameters, name) for name in names}
+        connections = widget.logic.connections
+        timings = {name: getattr(connections, name)
+                   for name in ("notRunningGraceSec", "cubeIdleSec")}
+        try:
+            for name, value in values.items():
+                if name in timings:
+                    setattr(connections, name, value)
+                else:
+                    setattr(parameters, name, value)
+            widget._refreshConnections()
+            yield parameters
+        finally:
+            if connections.connected:
+                widget._onConnectClicked()
+            for name, value in timings.items():
+                setattr(connections, name, value)
+            widget.initializeParameterNode()
+            for name, value in previous.items():
+                setattr(widget._parameterNode, name, value)
+            widget._refreshConnections()
+
+    @staticmethod
+    def _standInSettings(standIn, **values):
+        base = standIn["basePort"]
+        values.setdefault("liveViewPort", base)
+        values.setdefault("stereoPort", base + 1)
+        values.setdefault("hsCubePort", base + 2)
+        values.setdefault("expectedBands", 5)
+        return values
+
+    @staticmethod
+    def _connectionRows(widget) -> list:
+        table = widget.ui.connectionsTable
+        keys = ("port", "channel", "state", "lastMessage", "received")
+        rows = []
+        for row in range(table.rowCount):
+            cells = [table.item(row, column) for column in range(len(keys))]
+            rows.append({key: (cell.text() if cell is not None else "")
+                         for key, cell in zip(keys, cells, strict=True)})
+        return rows
+
+    def _rowFor(self, widget, channel):
+        for row in self._connectionRows(widget):
+            if row["channel"] == channel:
+                return row
+        return None
+
+    def _waitForRow(self, widget, channel, predicate, description):
+        deadline = time.monotonic() + self.CONNECTION_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            slicer.app.processEvents()
+            widget._refreshConnections()
+            row = self._rowFor(widget, channel)
+            if row is not None and predicate(row):
+                return row
+            time.sleep(0.01)
+        self.fail(f"Timed out waiting for {description}; rows: {self._connectionRows(widget)}; "
+                  f"detail: {widget.ui.connectionsDetailLabel.text}")
+
+    @staticmethod
+    def _moduleConnectors():
+        return [node for node in slicer.util.getNodesByClass("vtkMRMLIGTLConnectorNode")
+                if node.GetAttribute("SLIAFlow.Owner") == "Connections"]
+
+    @staticmethod
+    def _incomingNodeIds(connectors) -> list:
+        return [connector.GetIncomingMRMLNode(index).GetID()
+                for connector in connectors
+                for index in range(connector.GetNumberOfIncomingMRMLNodes())]
+
+    def test_connectionsCreateOneClientPerConfiguredPort(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        with self._runningStandIn() as standIn, self._connectionSettings(
+                widget, **self._standInSettings(standIn, stereoPort=0)):
+            base = standIn["basePort"]
+            rows = self._connectionRows(widget)
+            self.assertEqual([(row["port"], row["channel"]) for row in rows],
+                             [(str(base), "LiveView"), (str(base + 2), "HS Cube")])
+            self.assertEqual({row["state"] for row in rows}, {self.STATE_NOT_CONNECTED})
+            # Listed, stopped, before Connect, so that OpenIGTLinkIF shows the
+            # ports while disconnected (owner request, 2026-09-25).
+            listed = self._moduleConnectors()
+            self.assertEqual(sorted(node.GetServerPort() for node in listed), [base, base + 2],
+                             "The connectors are not listed before Connect")
+            self.assertEqual({node.GetState() for node in listed}, {self.IGTL_STATE_OFF})
+            self.assertEqual(
+                sorted(node.GetName() for node in listed),
+                [f"SLIAFlow HS Cube ({base + 2})", f"SLIAFlow LiveView ({base})"])
+
+            widget._onConnectClicked()
+            connectors = self._moduleConnectors()
+            self.assertEqual({node.GetID() for node in connectors},
+                             {node.GetID() for node in listed},
+                             "Connect did not start the listed connectors")
+            self.assertEqual(sorted(node.GetServerPort() for node in connectors),
+                             [base, base + 2])
+            for node in connectors:
+                with self.subTest(port=node.GetServerPort()):
+                    self.assertEqual(node.GetType(), self.IGTL_TYPE_CLIENT)
+                    self.assertEqual(node.GetServerHostname(), "127.0.0.1")
+                    self.assertFalse(node.GetSaveWithScene())
+            for control in ("connectionsHostLineEdit", "liveViewPortSpinBox",
+                            "stereoPortSpinBox", "hsCubePortSpinBox", "expectedBandsSpinBox"):
+                with self.subTest(control=control):
+                    self.assertFalse(getattr(widget.ui, control).enabled,
+                                     "A setting can be edited while connected")
+            self.assertEqual(widget.ui.connectButton.text, "Disconnect")
+            self._waitForRow(widget, "LiveView",
+                             lambda row: row["state"].startswith(self.STATE_RECEIVING),
+                             "LiveView to receive")
+
+    def test_connectTakesOverAConnectorStartedInOpenIGTLinkIF(self) -> None:
+        """A listed connector switched on in OpenIGTLinkIF does not make Connect fail."""
+        _, widget = self._moduleRepresentationAndWidget()
+        with self._runningStandIn() as standIn, self._connectionSettings(
+                widget, **self._standInSettings(standIn, stereoPort=0, hsCubePort=0)):
+            (listed,) = self._moduleConnectors()
+            self.assertTrue(listed.Start())
+            widget._onConnectClicked()
+            row = self._waitForRow(widget, "LiveView",
+                                   lambda row: row["state"] != self.STATE_WAITING,
+                                   "LiveView to leave Waiting")
+            self.assertTrue(row["state"].startswith(self.STATE_RECEIVING)
+                            or row["state"].startswith(self.STATE_CONNECTED),
+                            f"{row['state']}: {widget.ui.connectionsDetailLabel.text}")
+            self.assertEqual(self._moduleConnectors(), [listed])
+
+    def test_connectionsSayTheAppIsNotRunning(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        port = self._freeBasePort()
+        with self._connectionSettings(widget, liveViewPort=port, stereoPort=0, hsCubePort=0,
+                                      notRunningGraceSec=0.5):
+            widget._onConnectClicked()
+            self.assertEqual(self._rowFor(widget, "LiveView")["state"], self.STATE_WAITING)
+            self._waitForRow(widget, "LiveView",
+                             lambda row: row["state"] == self.STATE_NOT_RUNNING,
+                             "LiveView to say the app is not running")
+            self.assertIn(f"127.0.0.1:{port}", widget.ui.connectionsDetailLabel.text)
+
+    def test_connectionsRowsFollowTheStandIn(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        with self._runningStandIn() as standIn, self._connectionSettings(
+                widget, **self._standInSettings(standIn)):
+            widget._onConnectClicked()
+            cube = self._waitForRow(
+                widget, "HS Cube",
+                lambda row: row["state"] == self.STATE_CUBE_COMPLETE + self.STAND_IN_MARK,
+                "HS Cube to complete")
+            self.assertTrue(cube["received"].startswith("5 / 5 bands"), cube["received"])
+            self.assertTrue(cube["lastMessage"].startswith(
+                "HsCube - IMAGE 4 x 3 float32 - band 5, 480 nm - "), cube["lastMessage"])
+            for channel, expected in (("LiveView", "LiveView - IMAGE 4 x 3 x 3 uint8 - "),
+                                      ("Stereo", "Steroscopic - IMAGE 8 x 3 x 3 uint8 - ")):
+                with self.subTest(channel=channel):
+                    row = self._waitForRow(
+                        widget, channel,
+                        lambda row: row["state"] == self.STATE_RECEIVING + self.STAND_IN_MARK
+                        and row["received"].endswith("frames/s"),
+                        f"{channel} to receive frames")
+                    self.assertTrue(row["lastMessage"].startswith(expected), row["lastMessage"])
+
+    def test_connectionsCountBandsTheStandInDrops(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        with self._runningStandIn(dropBands="3") as standIn, self._connectionSettings(
+                widget, cubeIdleSec=1.0, **self._standInSettings(standIn)):
+            widget._onConnectClicked()
+            cube = self._waitForRow(
+                widget, "HS Cube",
+                lambda row: row["state"] == self.STATE_CUBE_INCOMPLETE + self.STAND_IN_MARK,
+                "HS Cube to report an incomplete cube")
+            self.assertTrue(cube["received"].startswith("4 / 5 bands"), cube["received"])
+            self.assertIn("Missing bands: 3", widget.ui.connectionsDetailLabel.text)
+
+    def test_connectionsForgetASenderThatLeft(self) -> None:
+        """The stand-in leaves and a sender without SLIAFlow metadata takes its port."""
+        _, widget = self._moduleRepresentationAndWidget()
+        bandKeys = ("OpenIGTLink.SLIAFlow.BandNumber", "OpenIGTLink.SLIAFlow.WavelengthNm",
+                    "OpenIGTLink.SLIAFlow.DataOrigin")
+        standInRun = self._runningStandIn()
+        standIn = standInRun.__enter__()
+        try:
+            port = standIn["basePort"] + 2
+            with self._connectionSettings(widget, **self._standInSettings(
+                    standIn, liveViewPort=0, stereoPort=0)):
+                widget._onConnectClicked()
+                self._waitForRow(
+                    widget, "HS Cube",
+                    lambda row: row["state"] == self.STATE_CUBE_COMPLETE + self.STAND_IN_MARK,
+                    "HS Cube to complete")
+                standInRun.__exit__(None, None, None)
+                standInRun = None
+                self._waitForRow(
+                    widget, "HS Cube",
+                    lambda row: row["state"] in (self.STATE_WAITING, self.STATE_NOT_RUNNING),
+                    "HS Cube to lose the stand-in")
+                (cubeNode,) = [slicer.mrmlScene.GetNodeByID(nodeId)
+                               for nodeId in self._incomingNodeIds(self._moduleConnectors())]
+                for key in bandKeys:
+                    with self.subTest(key=key):
+                        self.assertIsNone(cubeNode.GetAttribute(key),
+                                          "The stand-in's metadata outlived its connection")
+
+                with self._runningPlainSender(port, delay=1.5):
+                    connected = self._waitForRow(
+                        widget, "HS Cube",
+                        lambda row: row["state"] not in (self.STATE_WAITING,
+                                                         self.STATE_NOT_RUNNING),
+                        "HS Cube to reach the plain sender")
+                    self.assertEqual(connected["state"], self.STATE_CONNECTED)
+                    self.assertEqual(connected["lastMessage"], "-")
+                    self.assertEqual(connected["received"], "0 / 5 bands")
+
+                    row = self._waitForRow(widget, "HS Cube",
+                                           lambda row: row["lastMessage"] != "-",
+                                           "the plain sender's image")
+                    self.assertEqual(row["state"], self.STATE_RECEIVING)
+                    self.assertTrue(row["lastMessage"].startswith(
+                        "HsCube - IMAGE 4 x 3 float32 - "), row["lastMessage"])
+                    self.assertNotIn("band", row["lastMessage"])
+                    self.assertTrue(row["received"].startswith("1 / 5 bands"), row["received"])
+                    (cubeNode,) = [slicer.mrmlScene.GetNodeByID(nodeId)
+                                   for nodeId in self._incomingNodeIds(self._moduleConnectors())]
+                    for key in bandKeys:
+                        with self.subTest(key=key, sender="plain"):
+                            self.assertIsNone(cubeNode.GetAttribute(key))
+        finally:
+            if standInRun is not None:
+                standInRun.__exit__(None, None, None)
+
+    def test_connectionsCloseOnEveryPath(self) -> None:
+        """Disconnect stops the listed connectors, scene close lists new ones, quit removes them."""
+        _, widget = self._moduleRepresentationAndWidget()
+
+        def disconnectButton():
+            widget._onConnectClicked()
+
+        def sceneClose():
+            slicer.mrmlScene.Clear()
+            widget.initializeParameterNode()
+
+        def applicationQuit():
+            widget._onAboutToQuit()
+
+        for path in (disconnectButton, sceneClose, applicationQuit):
+            with self.subTest(path=path.__name__), self._runningStandIn() as standIn, (
+                    self._connectionSettings(widget, **self._standInSettings(standIn))):
+                existing = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "HsCube")
+                existingId = existing.GetID()
+                try:
+                    self._assertConnectionsClose(widget, path, existingId,
+                                                 keepsConnectors=path is disconnectButton,
+                                                 closesScene=path is sceneClose)
+                finally:
+                    # The next path's own HsCube node must be the first by that name.
+                    if slicer.mrmlScene.GetNodeByID(existingId) is not None:
+                        slicer.mrmlScene.RemoveNode(slicer.mrmlScene.GetNodeByID(existingId))
+
+    def _assertConnectionsClose(self, widget, path, existingId, *, keepsConnectors,
+                                closesScene) -> None:
+        """Connect to the stand-in, take `path`, and check what it left."""
+        widget._onConnectClicked()
+        self._waitForRow(widget, "HS Cube",
+                         lambda row: row["state"].startswith(self.STATE_CUBE_COMPLETE),
+                         "HS Cube to complete")
+        self._waitForRow(widget, "LiveView",
+                         lambda row: row["state"].startswith(self.STATE_RECEIVING),
+                         "LiveView to receive")
+        before = self._moduleConnectors()
+        received = self._incomingNodeIds(before)
+        self.assertIn(existingId, received, "The connector did not take the HsCube node")
+        path()
+        self.assertFalse(widget.logic.connections.connected)
+        after = self._moduleConnectors()
+        self.assertEqual([node.GetName() for node in after
+                          if node.GetState() != self.IGTL_STATE_OFF], [],
+                         "A connector is still running")
+        if keepsConnectors:
+            self.assertEqual({node.GetID() for node in after}, {node.GetID() for node in before},
+                             "Disconnect removed the listed connectors")
+        elif closesScene:
+            self.assertFalse(any(slicer.mrmlScene.IsNodePresent(node) for node in before),
+                             "A connector outlived the scene")
+            self.assertEqual(len(after), 3, "The connectors were not listed again")
+        else:
+            self.assertEqual(after, [], "A connector outlived the application")
+        if not closesScene:
+            kept = slicer.mrmlScene.GetNodeByID(existingId)
+            self.assertIsNotNone(kept, "A node that existed before Connect was removed")
+            for key in ("OpenIGTLink.SLIAFlow.BandNumber",
+                        "OpenIGTLink.SLIAFlow.WavelengthNm",
+                        "OpenIGTLink.SLIAFlow.DataOrigin"):
+                self.assertIsNone(kept.GetAttribute(key),
+                                  f"The kept node still carries the sender's {key}")
+        for nodeId in set(received) - {existingId}:
+            self.assertIsNone(slicer.mrmlScene.GetNodeByID(nodeId),
+                              f"{nodeId}, received while connected, was left behind")
+        widget._refreshConnections()
+        for row in self._connectionRows(widget):
+            self.assertEqual(row["state"], self.STATE_NOT_CONNECTED)
+
+    def test_leavingSLIAFlowKeepsTheConnections(self) -> None:
+        """Another module can show the connections while SLIAFlow is not on screen."""
+        _, widget = self._moduleRepresentationAndWidget()
+        with self._runningStandIn() as standIn, self._connectionSettings(
+                widget, **self._standInSettings(standIn)):
+            widget._onConnectClicked()
+            self._waitForRow(widget, "LiveView",
+                             lambda row: row["state"].startswith(self.STATE_RECEIVING),
+                             "LiveView to receive")
+            connectorIds = [node.GetID() for node in self._moduleConnectors()]
+            widget.exit()
+            self.assertEqual([node.GetID() for node in self._moduleConnectors()], connectorIds,
+                             "Leaving SLIAFlow closed the connections")
+            self.assertTrue(widget.logic.connections.connected)
+            (liveView,) = [node for node in self._moduleConnectors()
+                           if node.GetName().startswith("SLIAFlow LiveView")]
+            self.assertEqual(liveView.GetState(), self.IGTL_STATE_CONNECTED)
+            widget.enter()
+            self._waitForRow(widget, "LiveView",
+                             lambda row: row["state"].startswith(self.STATE_RECEIVING),
+                             "LiveView to still receive on coming back")
+            self.assertEqual([node.GetID() for node in self._moduleConnectors()], connectorIds)
+
+    def test_igtModulesShowTheConnectors(self) -> None:
+        """IGT > OpenIGTLinkIF lists the ports before Connect, and every module keeps them."""
+        if slicer.util.mainWindow() is None:
+            self.skipTest("Requires the maintained headful Slicer test target")
+        modulesMenu = slicer.util.moduleSelector().modulesMenu()
+
+        def chooseFromModulesMenu(moduleName):
+            modulesMenu.moduleAction(moduleName).trigger()
+            self.assertEqual(slicer.util.selectedModule(), moduleName)
+
+        def states():
+            return sorted(node.GetState() for node in self._moduleConnectors())
+
+        previousModule = slicer.util.selectedModule() or "Data"
+        try:
+            slicer.util.selectModule("SLIAFlow")
+            _, widget = self._moduleRepresentationAndWidget()
+            with self._runningStandIn() as standIn, self._connectionSettings(
+                    widget, **self._standInSettings(standIn)):
+                chooseFromModulesMenu("OpenIGTLinkIF")
+                self.assertEqual(states(), [self.IGTL_STATE_OFF] * 3,
+                                 "OpenIGTLinkIF does not list the ports while disconnected")
+                chooseFromModulesMenu("SLIAFlow")
+                widget._onConnectClicked()
+                self._waitForRow(widget, "LiveView",
+                                 lambda row: row["state"].startswith(self.STATE_RECEIVING),
+                                 "LiveView to receive")
+                chooseFromModulesMenu("OpenIGTLinkIF")
+                self.assertEqual(len(self._moduleConnectors()), 3)
+                self.assertIn(self.IGTL_STATE_CONNECTED, states())
+                chooseFromModulesMenu("Data")
+                self.assertTrue(widget.logic.connections.connected,
+                                "Leaving OpenIGTLinkIF closed the connections")
+                self.assertIn(self.IGTL_STATE_CONNECTED, states())
+                chooseFromModulesMenu("SLIAFlow")
+                widget._onConnectClicked()
+                chooseFromModulesMenu("OpenIGTLinkIF")
+                self.assertEqual(states(), [self.IGTL_STATE_OFF] * 3,
+                                 "Disconnect did not leave the ports listed")
+        finally:
+            slicer.util.selectModule(previousModule)
+
+    def test_liveViewMessageDoesNotLandInTheCameraVolume(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        camera = widget.logic.getOrCreateLiveVolume(widget._parameterNode)
+        cameraFrame = np.full((1, 3, 4, 3), 7, dtype=np.uint8)
+        slicer.util.updateVolumeFromArray(camera, cameraFrame)
+        with self._runningStandIn() as standIn, self._connectionSettings(
+                widget, **self._standInSettings(standIn, stereoPort=0, hsCubePort=0)):
+            widget._onConnectClicked()
+            self._waitForRow(widget, "LiveView",
+                             lambda row: row["state"].startswith(self.STATE_RECEIVING),
+                             "LiveView to receive")
+            self.assertNotIn(camera.GetID(), self._incomingNodeIds(self._moduleConnectors()),
+                             "The connector took the camera volume")
+            np.testing.assert_array_equal(slicer.util.arrayFromVolume(camera), cameraFrame)
