@@ -226,6 +226,27 @@ Measured on this laptop for `SLIA-035`:
   class whose name is the device name. SLIAFlow's camera volume is therefore
   named `Laptop camera`, not `LiveView`.
 
+## Measuring what a server sends
+
+`SLIA-030` measures IUMA's app with a recorder outside Slicer,
+`python -m stratum_sim.igtl_recorder` (`tools/simulators/README.md`). It logs
+every message's header, metadata and image properties, and matches each band
+against a cube on disk to find band order and orientation. It is the ports' one
+client while it runs, so SLIAFlow must be disconnected.
+
+The app's protocol, measured on 2026-09-27, is recorded in
+`docs/hardware/acquisition_app_and_hardware.md` section 4.1. In short, the
+`HsCube` port sends header version 1 with no metadata. Every IMAGE declares
+the whole cube and carries one band as a sub-volume at offset
+(0, 0, band − 1). No message marks the end of a cube.
+
+OpenIGTLinkIF assembles such sub-volumes into one volume of the full size
+(`igtlioImageConverter::IGTLToVTKImageData`), reused while size, type and
+components are unchanged. It does not clear that volume, so a band that did not
+arrive holds old memory, and the volume node does not say which bands arrived.
+A connector on 18946 therefore yields a whole cube, but not the proof that the
+cube is complete.
+
 ## Regression gate
 
 This dependency adds no SLIAFlow behaviour, so it gets no new test. It is
