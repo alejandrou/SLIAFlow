@@ -15,7 +15,9 @@ an installer, without source. Everything below comes from:
 - **[inf]**: inference. Treat these as unconfirmed until checked on the
   hardware;
 - **[iuma]**: statements from IUMA, relayed by the project owner on
-  2026-09-23 (§8).
+  2026-09-23 (§8);
+- **[meas]**: the app's stream, recorded on 2026-09-27 with the `SLIA-030`
+  recorder (§4.1).
 
 No installed file was modified during the analysis.
 
@@ -332,6 +334,43 @@ as a client.
   36 MB each as RGB 8-bit). Live-stream throughput has not been measured.
   [inf]
 
+### 4.1 The HsCube stream, measured [meas]
+
+Recorded on 2026-09-27 with `python -m stratum_sim.igtl_recorder` (see
+`tools/simulators/README.md`). No hardware was connected. The app loaded
+`input\002-04\raw_data.hdr` (4096 × 2160 × 109, uint16) with Load HS Cube, and
+the recorder was connected to all three ports before **Send Capture** was
+pressed. Evidence: `workspace\igtl-recordings\manual-real-compare-20260927-1524`
+(gitignored; header fields and pixel statistics only, no pixel data).
+
+| Property | Measured |
+| --- | --- |
+| Messages per cube | 109 `IMAGE` messages, one per band, device name `HsCube`, and nothing else: no STRING, STATUS or other message before, between or after the bands |
+| Header | version **1**, so no metadata of any kind; header timestamp always 0; CRC correct on all 109 |
+| Image header | version 1, 1 component, **uint16**, little endian, LPS, spacing 1 × 1 × 1, identity direction |
+| Size | the **whole cube**, 4096 × 2160 × 109, in every message |
+| Sub-volume | 4096 × 2160 × 1 at offset (0, 0, *k*): each message carries one band as a slab of the whole cube |
+| Band identity | offset *k* is band *k* + 1: the pixels of every message matched that band of the file on disk, as stored (not flipped or rotated). Bands arrived in order, 1 to 109 |
+| Origin | (−2047.5, −1079.5, −54.0), the centre of the whole cube |
+| Pace | 109 bands in 12.3 s: 8.8 bands/s, about 157 MB/s over the loopback. Longest gap between bands 0.16 s |
+| End of cube | no message marks it. A receiver knows the cube is complete when it holds every offset from 0 to size − 1 |
+| LiveView, Steroscopic | connected, but sent nothing without cameras |
+
+Consequences for a receiver:
+
+- The band of a message is in the message itself (the sub-volume offset), and
+  the band count is the size. A lost band is therefore named, not shifted onto
+  its neighbours.
+- **A client that connects late misses the start.** A recorder that joined
+  after Send Capture was pressed received 108 of 109 bands, offsets 1 to 108.
+  The app does not resend; the cube has to be sent again.
+- OpenIGTLinkIF assembles sub-volumes itself: `igtlioImageConverter` allocates
+  a volume of the full size and copies each slab to its offset, reusing that
+  volume while size, type and components stay the same. It does not clear it,
+  so a band that never arrived holds whatever that memory held before.
+- The float32 version (§8) is expected to keep this structure, at twice the
+  size per band (about 35 MB).
+
 ## 5. Configuration: `C:\STRATUM-Captures\config.xml`
 
 The file is created with a template on first run if it is missing. It is
@@ -399,6 +438,17 @@ The code defaults and the new-file template disagree on the colour gains.
 8. What band count, wavelengths and image size do the synthetic HELICoiD
    cubes have, and are they ENVI uint16 BSQ (the only format the viewer
    loads)?
+9. Will the float32 stream keep the measured structure (§4.1): header
+   version 1, the whole-cube size with one band per sub-volume, and no end
+   message?
+10. Could the app send the wavelength of each band, for example as header
+    version 2 metadata? Today a receiver has only the band number and must
+    assume the wavelength grid.
+11. Could the header timestamp carry the capture time? It is 0 today, so a
+    receiver cannot tell a live capture from a replay (Send Capture), or two
+    sends of the same cube apart.
+12. Can a client ask for the last cube again? A client that connects after a
+    capture started misses its first bands.
 
 ## 8. IUMA decisions (2026-09-23) [iuma]
 

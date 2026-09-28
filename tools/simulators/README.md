@@ -17,6 +17,8 @@ product.
 | `stratum_sim/igtl_transport.py` | Building IMAGE messages with pyigtl at header version 2, so their metadata reaches the wire, and plain STRING messages; refusing a port another process already listens on, and naming that process from the Windows TCP table; watching the clients attached to a server |
 | `stratum_sim/contract.py` | What the transport, the stand-in and their tests share: the provenance keys, the app's device names and base port, the stand-in's band keys, and the reserved ports |
 | `stratum_sim/iuma_app_standin.py` | The stand-in for IUMA's acquisition app (`SLIA-035`) |
+| `stratum_sim/igtl_recorder.py` | A recorder that logs every message an OpenIGTLink server sends, to measure IUMA's app (`SLIA-030`) |
+| `tests/test_igtl_recorder.py` | The recorder's tests |
 | `tests/test_igtl_transport.py` | The transport's tests |
 | `tests/test_iuma_app_standin.py` | The stand-in's tests |
 | `tests/support.py`, `tests/run_tests.py` | Test helpers and the runner |
@@ -91,24 +93,96 @@ frames/s.
 
 ### What it assumes about the real app
 
-Each point is checked against the real app in `SLIA-030`:
+Each point was checked against the real app in `SLIA-030` (2026-09-27, Send
+Capture of `002-04`'s raw cube, no cameras;
+`docs/hardware/acquisition_app_and_hardware.md` section 4.1):
 
 1. `HsCube` sends one IMAGE per band, single component, `(samples, lines, 1)`,
    spacing 1, identity matrix, LPS, bands in ascending wavelength, with no
-   end-of-cube message.
+   end-of-cube message. **Partly wrong.** One IMAGE per band, single
+   component, spacing 1, identity, LPS, bands in file order and no end message
+   are confirmed. But every message declares the whole cube,
+   `(samples, lines, bands)`, and carries its band as the sub-volume
+   `(samples, lines, 1)` at offset `(0, 0, band - 1)`, with the origin at the
+   centre of the whole cube.
 2. The per-band keys `SLIAFlow.BandNumber` and `SLIAFlow.WavelengthNm` are the
    stand-in's invention; the app's binary shows no per-band metadata.
+   **Confirmed**: the app sends no metadata at all. The band number is in the
+   sub-volume offset; the wavelength is not sent.
 3. Messages use header version 2 so that metadata reaches the wire; the app's
-   header version is unknown.
+   header version is unknown. **Wrong**: the app sends header version 1.
 4. The cube goes out automatically while a client is connected; the real app
-   sends it on Capture HSI or Send Capture.
+   sends it on Capture HSI or Send Capture. **Confirmed** for Send Capture: the
+   app sends the cube once, and a client that connects after the first band
+   misses it.
 5. LiveView and Stereo carry a colour preview of the cube at 1080 x 1080 and
    2160 x 1080; the app sends camera frames (up to 4096 x 3000) at a rate not
-   yet measured.
-6. The stand-in listens on 127.0.0.1; the app listens on 0.0.0.0.
-7. One client per port at a time, as in the app's server loop.
+   yet measured. **Not measurable** without cameras: both ports accepted the
+   client and sent nothing.
+6. The stand-in listens on 127.0.0.1; the app listens on 0.0.0.0. Known from
+   running the app; not changed by the measurement.
+7. One client per port at a time, as in the app's server loop. Known from the
+   binary; not exercised by the measurement.
 8. Today's app sends raw uint16 bands; the stand-in sends IUMA's calibrated
-   float32 cube, the announced format.
+   float32 cube, the announced format. **Confirmed**: uint16, little endian.
+
+The stand-in's pace is close to the app's: the app sent 109 bands in 12.3 s
+(8.8 bands/s) over the loopback.
+
+## The protocol recorder
+
+It records what an OpenIGTLink server actually sends, to measure IUMA's app
+before SLIAFlow's receiver is built on it (`SLIA-030`). It connects as the
+client to each port, sends nothing, and reads every message whole with its own
+parser (`pyigtl.OpenIGTLinkClient` keeps only the latest message per device
+name and would hide lost or doubled bands).
+
+```powershell
+cd tools\simulators
+..\..\.venv\Scripts\python.exe -m stratum_sim.igtl_recorder --compare-cube ..\..\input\002-04\raw_data.hdr
+```
+
+- `--ports` (default `18944,18945,18946`), `--host` (default `127.0.0.1`),
+  `--duration S`, `--out <folder>` (default
+  `workspace\igtl-recordings\<yyyyMMdd-HHmmss>`, gitignored).
+- A port that refuses is tried again every second, so the recorder can start
+  before the app. Each port serves one client: do not connect SLIAFlow to the
+  same ports while recording.
+- `messages.jsonl` has one line per message: port, arrival time, header
+  version, type, device name, header timestamp, body size, whether the CRC
+  matches, the version-2 extended header and metadata, and for IMAGE the image
+  header (components, scalar type, endianness, coordinate system, size,
+  spacing, origin, direction, sub-volume) and the pixel minimum, maximum and
+  mean over the finite values, with the count of NaN and infinite ones for
+  float types. The text of STRING and STATUS messages is logged, and the first
+  64 bytes, in hex, of any other type. Every line is strict JSON: a value that
+  is not a finite number is written as `null`. **No pixel data is written.**
+- Each port's reader only reads and time-stamps; a separate thread checks the
+  CRC, computes the statistics and matches bands. Arrival times, rates and gaps
+  are therefore the sender's even while a band is being matched. If more than
+  3 GB is waiting to be described, the readers wait, which slows the sender;
+  the summary says for how long (`Reader held back by the describer`), and
+  gives the longest wait before a message was described.
+- `--compare-cube <header>` (ENVI uint16 or float32, BSQ; about 4 s for the
+  1.93 GB raw cube) names, for each single-component image, the cube band with
+  the same pixels, as stored, flipped or rotated, or says none matches. That
+  gives band order and orientation without any band metadata.
+- `summary.md`, also printed on Ctrl+C, lists per port the device names, types,
+  header versions, metadata keys, image properties, rate and longest gap, and
+  the messages other than IMAGE with their text. Compared bands are split into
+  captures wherever more than `--capture-gap` seconds (default 5) pass without
+  one, so that sending the cube twice reads as two captures, not as repeated
+  bands. Per capture it gives the arrival order, the missing, repeated and
+  out-of-order bands, and the messages other than IMAGE that followed it, which
+  shows whether the app marks the end of a cube.
+
+Checked against the stand-in with `002-04` at full size: 109 of 109 bands
+matched in order, as stored, at 6.1 bands/s; LiveView and Stereo at 10
+frames/s; no CRC mismatch. Against IUMA's app, sending `002-04`'s raw cube:
+109 of 109 bands matched in order, as stored, at 8.8 bands/s, no CRC mismatch,
+the compare cube read in 3.9 s. Close the app's own copy of a cube before
+reading another large one as compare cube: with both in memory the first
+attempt stalled.
 
 ## Metadata reaches the wire only at header version 2
 
