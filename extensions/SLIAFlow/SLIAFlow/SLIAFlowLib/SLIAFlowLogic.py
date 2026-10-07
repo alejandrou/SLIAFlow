@@ -36,6 +36,7 @@ from .SLIAFlowParameterNode import (
     WAVELENGTHS_ASSUMED_ATTRIBUTE,
     WAVELENGTHS_ATTRIBUTE,
     SLIAFlowParameterNode,
+    appLiveViewDetail,
     calibratedCubeDetail,
     receivedCubeDetail,
     uc1ResultDetail,
@@ -66,6 +67,10 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     # "LiveView": an OpenIGTLink connector receiving the app's LiveView device
     # adopts the first vector volume of that name and writes into it (SLIA-035).
     LIVE_VOLUME_NAME = "Laptop camera"
+    # SLIA-037: the app's LiveView frames are copied here, never into the camera
+    # volume, so that neither source can write into the other's picture.
+    APP_LIVE_VIEW_NAME = "LiveView from the app"
+    APP_LIVE_VIEW_OWNER = "AppLiveView"
     # Row-major IJK-to-RAS directions. See _applyLiveVolumeGeometry.
     LIVE_VOLUME_DIRECTIONS = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
 
@@ -78,6 +83,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         Path("input") / "002-04" / "LCTF_Calibrated_Cube_Single.hdr"
     )
     SNAPSHOT_PREFIX = "output_laptop_camera_"
+    APP_SNAPSHOT_PREFIX = "output_app_liveview_"
     SNAPSHOT_TIME_FORMAT = "%Y%m%d-%H%M%S"
 
     OUTPUT_OWNER = "Uc1Output"
@@ -149,6 +155,11 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         self._cameraTimeoutCallback = None
         self._frameCallback = None
         self._errorCallback = None
+        # SLIA-037: LiveView from the app, polled from the connections.
+        self._appLiveTimer = None
+        self._appLivePoll = None
+        self._appLiveCallback = None
+        self._appLiveTimeoutCallback = None
         # The run environment. None means the repository this module is in and
         # a real QProcess; a test points both somewhere else.
         self._repositoryRootOverride = None
@@ -319,6 +330,108 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------
+    # LiveView from the app (SLIA-037)
+    # ------------------------------------------------------------------
+
+    @property
+    def appLiveViewActive(self) -> bool:
+        return self._appLiveTimer is not None
+
+    @property
+    def liveActive(self) -> bool:
+        """Whether a live source, the laptop camera or the app's LiveView, runs."""
+        return self.cameraActive or self.appLiveViewActive
+
+    def startAppLiveView(self, updateCallback, *, poll=None, timerFactory=None) -> bool:
+        """Hand `updateCallback` each LiveViewUpdate of the app's LiveView, on a timer.
+
+        `poll` defaults to the connections' `takeLiveViewFrame`; it may return
+        None for nothing new. Opens no camera.
+        """
+        self.stopAppLiveView()
+        if timerFactory is None:
+            import qt
+
+            timer = qt.QTimer()
+        else:
+            timer = timerFactory()
+        self._appLiveTimer = timer
+        self._appLivePoll = poll or self.connections.takeLiveViewFrame
+        self._appLiveCallback = updateCallback
+        self._appLiveTimeoutCallback = self._onAppLiveViewTimeout
+        timer.connect("timeout()", self._appLiveTimeoutCallback)
+        timer.setInterval(self.CAMERA_TIMER_INTERVAL_MS)
+        timer.start()
+        return True
+
+    def _onAppLiveViewTimeout(self) -> None:
+        self.pollAppLiveView()
+
+    def pollAppLiveView(self) -> None:
+        """Hand the callback the app's LiveView as it is now, without waiting for the timer."""
+        poll, callback = self._appLivePoll, self._appLiveCallback
+        if poll is None or callback is None:
+            return
+        update = poll()
+        if update is not None:
+            callback(update)
+
+    def stopAppLiveView(self) -> None:
+        timer, timeoutCallback = self._appLiveTimer, self._appLiveTimeoutCallback
+        self._appLiveTimer = None
+        self._appLivePoll = None
+        self._appLiveCallback = None
+        self._appLiveTimeoutCallback = None
+        if timer is not None:
+            try:
+                timer.stop()
+                timer.disconnect("timeout()", timeoutCallback)
+            except Exception:
+                pass
+
+    @classmethod
+    def appLiveViewNode(cls):
+        """The module-owned volume showing the app's LiveView, or None."""
+        for node in slicer.util.getNodesByClass("vtkMRMLVectorVolumeNode"):
+            if node.GetAttribute(OWNER_ATTRIBUTE) == cls.APP_LIVE_VIEW_OWNER:
+                return node
+        return None
+
+    @classmethod
+    def acceptAppLiveViewFrame(cls, frame):
+        """Put a LiveViewFrame into the module-owned volume, with its provenance.
+
+        The frame keeps SLIAFlow's upright geometry, as the camera's does. A
+        frame whose message said it was simulated (the stand-in) keeps that,
+        with the stand-in's own detail first.
+        """
+        node = cls.appLiveViewNode()
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLVectorVolumeNode",
+                slicer.mrmlScene.GenerateUniqueName(cls.APP_LIVE_VIEW_NAME))
+            node.SetAttribute(OWNER_ATTRIBUTE, cls.APP_LIVE_VIEW_OWNER)
+            node.SetSaveWithScene(False)
+            node.CreateDefaultDisplayNodes()
+        slicer.util.updateVolumeFromArray(node, frame.pixels)
+        cls._applyLiveVolumeGeometry(node)
+        received = appLiveViewDetail(frame.host, frame.port, frame.receivedAt)
+        if frame.simulated:
+            origin = SIMULATED_ORIGIN
+            detail = f"{frame.simulationDetail or 'simulated'}; {received}"
+        else:
+            origin, detail = RECEIVED_ORIGIN, received
+        node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, origin)
+        node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, detail)
+        return node
+
+    @classmethod
+    def removeAppLiveViewNode(cls) -> None:
+        node = cls.appLiveViewNode()
+        if node is not None:
+            cls._removeVolumeNode(node)
+
     @staticmethod
     def _applyLiveVolumeGeometry(liveNode) -> None:
         """Give an image volume upright, unmirrored directions.
@@ -458,10 +571,11 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     # Capture snapshot
     # ------------------------------------------------------------------
 
-    def saveSnapshot(self, rgbKjiFrame, now=None) -> Path:
+    def saveSnapshot(self, rgbKjiFrame, now=None, prefix=None) -> Path:
         """Save the frozen LiveView frame as a PNG, top row first.
 
-        The name carries the second the capture was taken. A second capture in
+        `prefix` names the source, the laptop camera's by default. The name
+        carries the second the capture was taken. A second capture in
         the same second gets `-2`, then `-3`, so no snapshot is overwritten.
         The snapshot records the simulated acquisition; UC1 never reads it.
         """
@@ -474,10 +588,11 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         directory = self.capturesDirectory
         directory.mkdir(parents=True, exist_ok=True)
         stamp = (now or datetime.datetime.now()).strftime(self.SNAPSHOT_TIME_FORMAT)
-        path = directory / f"{self.SNAPSHOT_PREFIX}{stamp}.png"
+        prefix = prefix or self.SNAPSHOT_PREFIX
+        path = directory / f"{prefix}{stamp}.png"
         suffix = 2
         while path.exists():
-            path = directory / f"{self.SNAPSHOT_PREFIX}{stamp}-{suffix}.png"
+            path = directory / f"{prefix}{stamp}-{suffix}.png"
             suffix += 1
 
         height, width = frame.shape[:2]

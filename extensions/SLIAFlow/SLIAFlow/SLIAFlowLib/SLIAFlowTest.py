@@ -956,10 +956,11 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         # links, demo mode, layers and band browser are gone (ADR-0003).
         # SLIA-032: what the HS Cube panel shows, bands or the colour preview.
         # SLIA-036: which cube HS Cube shows and Capture uses.
+        # SLIA-037: which source the live pane shows.
         self.assertEqual(
             sorted(control.objectName for control in interactive),
-            sorted(("startButton", "stopButton", "captureButton", "resultOutputSelector",
-                    "cubeDisplaySelector", "cubeSourceSelector")),
+            sorted(("liveSourceSelector", "startButton", "stopButton", "captureButton",
+                    "resultOutputSelector", "cubeDisplaySelector", "cubeSourceSelector")),
         )
         for control in interactive:
             with self.subTest(control=control.objectName):
@@ -4021,6 +4022,495 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertNotIn(camera.GetID(), self._incomingNodeIds(self._moduleConnectors()),
                              "The connector took the camera volume")
             np.testing.assert_array_equal(slicer.util.arrayFromVolume(camera), cameraFrame)
+
+    # ----------------------------------------------------------------------
+    # SLIA-037: LiveView from IUMA's acquisition app in the live pane
+    #
+    # Frames handed to the widget are placeholder fixtures built here, standing
+    # for no imagery. They reach it through the poll the logic takes, never
+    # through the module's own conversion of a connector node.
+    # ----------------------------------------------------------------------
+
+    # The SLIA-037 card: the two sources, the volume, the snapshot name and the
+    # captions, as the card states them.
+    LIVE_SOURCE_CAMERA = "Laptop camera"
+    LIVE_SOURCE_APP = "LiveView from the app"
+    APP_LIVE_VIEW_OWNER = "AppLiveView"
+    APP_SNAPSHOT_NAME_PATTERN = r"^output_app_liveview_\d{8}-\d{6}(-\d+)?\.png$"
+    APP_LIVE_CAPTION = "LiveView received from the app"
+    STAND_IN_LIVE_CAPTION = "LiveView from the stand-in for the app, simulated"
+    NO_LONGER_UPDATED = "no longer updated"
+    # SLIA-036 owner decision 2, worded for LiveView by the SLIA-037 card.
+    APP_LIVE_DETAIL = (
+        "LiveView colour frame received over OpenIGTLink from 127.0.0.1:18944, the port IUMA's "
+        "AcquisitionSystemApp serves its LiveView on, at 2026-10-06 14:25:30; the sender may "
+        "have captured it live or replayed it, which SLIAFlow cannot tell apart")
+    # SLIA-026: the live pane's upright, unmirrored directions.
+    UPRIGHT_DIRECTIONS = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
+
+    def _connectionsModule(self):
+        return self._helperModule("SLIAFlowConnections")
+
+    def _appFrame(self, value, *, simulated=False, detail=None):
+        """A 3 x 4 placeholder RGB frame, distinct per pixel, as the connections hand it over."""
+        pixels = np.zeros((1, 3, 4, 3), dtype=np.uint8)
+        pixels[0, ..., 0] = np.arange(12, dtype=np.uint8).reshape(3, 4) * 5 + value
+        pixels[0, ..., 1] = value
+        pixels[0, ..., 2] = 200 - value
+        return self._connectionsModule().LiveViewFrame(
+            pixels=pixels, simulated=simulated, simulationDetail=detail, host="127.0.0.1",
+            port=18944, receivedAt=self.RECEIVED_AT)
+
+    @contextlib.contextmanager
+    def _appLiveSession(self, **sessionOptions):
+        """A capture session whose live pane shows LiveView from the app, fed by the test.
+
+        Headful, the six-panel layout is active, so the pane's captions are drawn.
+        """
+        layoutManager = slicer.app.layoutManager()
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode() if layoutManager else None
+        previousLayout = int(layoutNode.GetViewArrangement()) if layoutNode else None
+        with self._captureSession(**sessionOptions) as session:
+            widget = session["widget"]
+            previous = widget._parameterNode.liveSource
+            updates = []
+            timer = self._FakeCameraTimer()
+            session.update(updates=updates, appTimer=timer, layoutManager=layoutManager)
+            try:
+                if layoutManager is not None:
+                    self.assertTrue(widget._activatePresentation())
+                widget._parameterNode.liveSource = self.LIVE_SOURCE_APP
+                widget._startAppLiveView(poll=lambda: updates.pop(0) if updates else None,
+                                         timerFactory=lambda: timer)
+                self.assertTrue(widget.logic.appLiveViewActive,
+                                "LiveView from the app did not start")
+                yield session
+            finally:
+                widget._stopCamera(clearLiveView=True)
+                widget._parameterNode.liveSource = previous
+                if layoutManager is not None:
+                    widget._deactivatePresentation(restore=True)
+                    if int(layoutNode.GetViewArrangement()) != previousLayout:
+                        layoutManager.setLayout(previousLayout)
+
+    def _pushAppUpdate(self, session, **update):
+        session["updates"].append(self._connectionsModule().LiveViewUpdate(**update))
+        session["appTimer"].fire()
+
+    def _pushAppFrame(self, session, value, **frameOptions):
+        frame = self._appFrame(value, **frameOptions)
+        self._pushAppUpdate(session, connected=True, frame=frame)
+        return frame.pixels[0]
+
+    class _FakeLiveViewConnector:
+        """The LiveView connector as SLIAFlowConnections reads it, with no socket."""
+
+        def __init__(self, nodes, state):
+            self.nodes = list(nodes)
+            self.state = state
+
+        def GetState(self):
+            return self.state
+
+        def GetNumberOfIncomingMRMLNodes(self):
+            return len(self.nodes)
+
+        def GetIncomingMRMLNode(self, index):
+            return self.nodes[index]
+
+    def _liveViewConnections(self, nodes):
+        """Connections whose LiveView connector is connected and delivers into `nodes`."""
+        connections = self._connectionsModule()
+        hub = connections.SLIAFlowConnections(openIGTLinkAvailable=lambda: True)
+        hub.configure("127.0.0.1", {connections.CHANNEL_LIVE_VIEW: 18944}, 1)
+        connector = self._FakeLiveViewConnector(nodes, connections.CONNECTOR_STATE_CONNECTED)
+        # What connect() leaves for a started LiveView connector.
+        hub._connectors = {connections.CHANNEL_LIVE_VIEW: connector}
+        hub._connected = True
+        return hub, connector
+
+    def _appLiveArray(self, widget):
+        node = widget.logic.appLiveViewNode()
+        self.assertIsNotNone(node, "No LiveView from the app volume")
+        return np.array(slicer.util.arrayFromVolume(node))[0]
+
+    def _liveBackgroundId(self, widget):
+        """The live pane's background volume ID, or None without a layout."""
+        sliceWidget = widget._sliceWidgetOrNone(widget.LIVE_VIEW_NAME)
+        if sliceWidget is None:
+            return None
+        return sliceWidget.sliceLogic().GetSliceCompositeNode().GetBackgroundVolumeID()
+
+    def _assertUpright(self, node) -> None:
+        matrix = vtk.vtkMatrix4x4()
+        node.GetIJKToRASDirectionMatrix(matrix)
+        for row in range(3):
+            for column in range(3):
+                self.assertEqual(matrix.GetElement(row, column),
+                                 self.UPRIGHT_DIRECTIONS[row][column], f"direction ({row}, {column})")
+
+    def test_liveSourceDefaultsToTheLaptopCamera(self) -> None:
+        representation, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        fresh = parameterModule.SLIAFlowParameterNode(
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScriptedModuleNode"))
+        self.assertEqual(fresh.liveSource, self.LIVE_SOURCE_CAMERA)
+        selector = slicer.util.findChild(representation, "liveSourceSelector")
+        self.assertEqual([selector.itemText(index) for index in range(selector.count)],
+                         [self.LIVE_SOURCE_CAMERA, self.LIVE_SOURCE_APP])
+        previous = widget._parameterNode.liveSource
+        try:
+            selector.setCurrentIndex(1)
+            self.assertEqual(widget._parameterNode.liveSource, self.LIVE_SOURCE_APP,
+                             "The choice was not saved in the parameter node")
+        finally:
+            widget._parameterNode.liveSource = previous
+
+    def test_captureFreezesTheAppLiveView(self) -> None:
+        import re
+
+        import qt
+
+        with self._appLiveSession() as session:
+            widget = session["widget"]
+            frozen = self._pushAppFrame(session, 40)
+            self.assertTrue(widget.ui.captureButton.enabled,
+                            "Capture is disabled while LiveView from the app is shown")
+            widget._onCaptureClicked()
+            self.assertTrue(widget.captureInProgress)
+            self.assertTrue(widget.liveViewFrozen)
+            self._pushAppFrame(session, 90)
+            np.testing.assert_array_equal(self._appLiveArray(widget), frozen,
+                                          "LiveView from the app kept updating after Capture")
+            self.assertIsNone(widget._parameterNode.liveVolume,
+                              "A frame from the app landed in the laptop camera volume")
+
+            snapshots = list(session["captures"].glob("*.png"))
+            self.assertEqual(len(snapshots), 1)
+            self.assertTrue(re.match(self.APP_SNAPSHOT_NAME_PATTERN, snapshots[0].name),
+                            snapshots[0].name)
+            # Qt's reader is independent of the VTK writer; row 0 is the top.
+            image = qt.QImage(str(snapshots[0]))
+            self.assertEqual((image.height(), image.width()), frozen.shape[:2])
+            for row in range(frozen.shape[0]):
+                for column in range(frozen.shape[1]):
+                    pixel = int(image.pixel(column, row))
+                    observed = ((pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255)
+                    self.assertEqual(observed, tuple(int(v) for v in frozen[row, column]),
+                                     f"PNG pixel ({row}, {column})")
+
+    def test_appLiveViewResumesAfterCaptureSuccessAndFailure(self) -> None:
+        with self._appLiveSession() as session:
+            widget = session["widget"]
+            for label, finish in (
+                ("success", lambda: self._finishCapture(session)),
+                ("failure", lambda: self._finishCapture(session, exitCode=1)),
+            ):
+                with self.subTest(outcome=label):
+                    self._pushAppFrame(session, 20)
+                    widget._onCaptureClicked()
+                    self.assertTrue(widget.liveViewFrozen)
+                    finish()
+                    self.assertFalse(widget.liveViewFrozen)
+                    moving = self._pushAppFrame(session, 150)
+                    np.testing.assert_array_equal(self._appLiveArray(widget), moving,
+                                                  f"LiveView did not resume after {label}")
+
+    def test_appLiveViewKeepsItsLastFrameWhenTheConnectionIsLost(self) -> None:
+        with self._appLiveSession() as session:
+            widget = session["widget"]
+            last = self._pushAppFrame(session, 30)
+            self._pushAppUpdate(session, connected=False)
+            np.testing.assert_array_equal(self._appLiveArray(widget), last,
+                                          "The frame on screen was dropped with the connection")
+            self.assertTrue(widget.appLiveViewStale)
+            if widget._presentationActive:
+                self.assertIn(self.NO_LONGER_UPDATED, widget.panelCaption(widget.LIVE_VIEW_NAME))
+
+            widget._onCaptureClicked()
+            self.assertFalse(widget.captureInProgress, "Capture ran on a frame no longer updated")
+            self.assertFalse(widget.liveViewFrozen)
+            self.assertEqual(session["processes"], [])
+            self.assertFalse(session["captures"].exists() and any(session["captures"].iterdir()),
+                             "Capture saved a snapshot of a frame no longer updated")
+            self.assertIn(self.NO_LONGER_UPDATED, widget.ui.statusLabel.text)
+
+            moving = self._pushAppFrame(session, 60)
+            self.assertFalse(widget.appLiveViewStale, "A new frame kept the no-longer-updated mark")
+            np.testing.assert_array_equal(self._appLiveArray(widget), moving)
+            # Manual step 3: the refusal stayed on the Status line while frames arrived.
+            self.assertNotIn(self.NO_LONGER_UPDATED, widget.ui.statusLabel.text,
+                             "Status kept the refusal after LiveView resumed")
+            self.assertIn("again", widget.ui.statusLabel.text)
+            if widget._presentationActive:
+                self.assertNotIn(self.NO_LONGER_UPDATED,
+                                 widget.panelCaption(widget.LIVE_VIEW_NAME))
+
+    def test_appLiveViewStaleCaptionIsNoWiderThanTheLiveOne(self) -> None:
+        # Manual step 3: one long line was clipped at the pane's edge and ran
+        # into the slice view's corner text. The stand-in caption, legible in
+        # step 1, is the widest line the pane may carry.
+        with self._appLiveSession() as session:
+            widget, layoutManager = session["widget"], session["layoutManager"]
+            if layoutManager is None:
+                self.skipTest("Requires the maintained headful Slicer test target")
+            self._pushAppFrame(session, 30, simulated=True)
+            self._pushAppUpdate(session, connected=False)
+            self._waitForCaption(widget, layoutManager, widget.LIVE_VIEW_NAME,
+                                 (self.NO_LONGER_UPDATED,))
+            caption = widget.panelCaption(widget.LIVE_VIEW_NAME)
+            textProperty = widget._panelCaptionActors[widget.LIVE_VIEW_NAME].GetTextProperty()
+            renderer = vtk.vtkTextRenderer()
+
+            def width(text):
+                box = [0, 0, 0, 0]
+                self.assertTrue(renderer.GetBoundingBox(textProperty, text, box, 72))
+                return box[1] - box[0]
+
+            widest = width(self.STAND_IN_LIVE_CAPTION)
+            for line in caption.split("\n"):
+                self.assertLessEqual(width(line), widest, f"Caption line too wide: {line!r}")
+
+            # Manual step 3 again: at the bottom, the caption ran into the
+            # slice view's own `B:` line and the probe text, which Slicer
+            # writes in the bottom-left corner. The caption stays in the top half.
+            sliceWidget = layoutManager.sliceWidget(widget.LIVE_VIEW_NAME)
+            sliceWidget.sliceView().forceRender()
+            viewRenderer = widget._sliceViewRenderer(sliceWidget)
+            actor = widget._panelCaptionActors[widget.LIVE_VIEW_NAME]
+            box = [0.0, 0.0, 0.0, 0.0]
+            actor.GetBoundingBox(viewRenderer, box)  # relative to the anchor
+            anchor = actor.GetPositionCoordinate().GetComputedDisplayValue(viewRenderer)
+            bottom = anchor[1] + box[2]
+            height = viewRenderer.GetSize()[1]
+            self.assertGreater(bottom, height / 2,
+                               f"The caption reaches the bottom half: from {bottom} px in {height} px")
+
+    def test_appLiveViewRefusesAFrameItCannotShow(self) -> None:
+        connections = self._connectionsModule()
+        observation = connections.MessageObservation
+        accepted = observation(time=0.0, deviceName="LiveView", messageType="IMAGE",
+                               size=(4, 3, 1), components=3, scalarType="uint8")
+        self.assertIsNone(connections.liveViewRefusal(accepted))
+        for name, refused in (
+            ("float32", observation(time=0.0, deviceName="LiveView", messageType="IMAGE",
+                                    size=(4, 3, 1), components=3, scalarType="float32")),
+            ("one component", observation(time=0.0, deviceName="LiveView", messageType="IMAGE",
+                                          size=(4, 3, 1), components=1, scalarType="uint8")),
+            ("two slices", observation(time=0.0, deviceName="LiveView", messageType="IMAGE",
+                                       size=(4, 3, 2), components=3, scalarType="uint8")),
+        ):
+            with self.subTest(refused=name):
+                reason = connections.liveViewRefusal(refused)
+                self.assertIsNotNone(reason, f"A {name} frame was accepted")
+                self.assertIn("LiveView", reason)
+
+        with self._appLiveSession() as session:
+            widget = session["widget"]
+            shown = self._pushAppFrame(session, 30)
+            self._pushAppUpdate(session, connected=True,
+                                refusal="LiveView - IMAGE 4 x 3 x 3 float32")
+            np.testing.assert_array_equal(self._appLiveArray(widget), shown,
+                                          "A refused frame changed the live pane")
+            self.assertIn("LiveView - IMAGE 4 x 3 x 3 float32", widget.ui.statusLabel.text)
+            self.assertIn("RGB uint8", widget.ui.statusLabel.text)
+
+    def test_captureRightAfterTheConnectionIsLostIsRefused(self) -> None:
+        with self._appLiveSession() as session:
+            widget = session["widget"]
+            self._pushAppFrame(session, 30)
+            # The connection is lost, and the live pane's timer has not run since.
+            session["updates"].append(self._connectionsModule().LiveViewUpdate(connected=False))
+            widget._onCaptureClicked()
+            self.assertFalse(widget.captureInProgress,
+                             "Capture ran on the frame of a connection already lost")
+            self.assertFalse(widget.liveViewFrozen)
+            self.assertEqual(session["processes"], [])
+            self.assertFalse(session["captures"].exists() and any(session["captures"].iterdir()),
+                             "Capture saved the frame of a connection already lost")
+            self.assertTrue(widget.appLiveViewStale)
+            self.assertIn(self.NO_LONGER_UPDATED, widget.ui.statusLabel.text)
+
+    def test_appLiveViewFrameOfALostConnectionIsNotNews(self) -> None:
+        connections = self._connectionsModule()
+        # Each way the loss can be seen: by the Connections rows, on the
+        # connector's DisconnectedEvent, or by the live pane's own poll.
+        for observer in ("connections", "live pane"):
+            with self.subTest(lossSeenBy=observer):
+                node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", "LiveView")
+                try:
+                    hub, connector = self._liveViewConnections([node])
+
+                    def send(value, simulated, node=node):
+                        slicer.util.updateVolumeFromArray(node, self._appFrame(value).pixels)
+                        if simulated:
+                            node.SetAttribute(connections.DATA_ORIGIN_ATTRIBUTE,
+                                              connections.SIMULATED_ORIGIN)
+
+                    send(10, simulated=True)
+                    self.assertTrue(hub.takeLiveViewFrame().frame.simulated)
+                    # The stand-in sends one more frame and stops before it is taken.
+                    send(20, simulated=True)
+                    connector.state = connections.CONNECTOR_STATE_WAITING
+                    if observer == "connections":
+                        hub.refresh()
+                    else:
+                        self.assertFalse(hub.takeLiveViewFrame().connected)
+                    # Another sender connects and has sent nothing yet.
+                    connector.state = connections.CONNECTOR_STATE_CONNECTED
+                    update = hub.takeLiveViewFrame()
+                    self.assertTrue(update.connected)
+                    self.assertIsNone(update.frame,
+                                      "The lost connection's last frame was handed over as new")
+                    send(30, simulated=False)
+                    update = hub.takeLiveViewFrame()
+                    self.assertIsNotNone(update.frame, "The new sender's frame was not taken")
+                    np.testing.assert_array_equal(update.frame.pixels, self._appFrame(30).pixels)
+                    self.assertFalse(update.frame.simulated)
+                finally:
+                    slicer.mrmlScene.RemoveNode(node)
+
+    def test_appLiveViewNamesAMessageThatIsNoImage(self) -> None:
+        transform = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "LiveView")
+        try:
+            hub, _connector = self._liveViewConnections([transform])
+            update = hub.takeLiveViewFrame()
+            self.assertIsNone(update.frame)
+            self.assertIsNotNone(update.refusal, "A TRANSFORM on the LiveView port went unnamed")
+            self.assertIn("LiveView - TRANSFORM", update.refusal)
+            self.assertIsNone(hub.takeLiveViewFrame().refusal, "The same message was named twice")
+        finally:
+            slicer.mrmlScene.RemoveNode(transform)
+
+    def test_appLiveViewFrameProvenance(self) -> None:
+        with self._appLiveSession() as session:
+            widget = session["widget"]
+            self._pushAppFrame(session, 30)
+            node = widget.logic.appLiveViewNode()
+            self.assertEqual(node.GetAttribute("SLIAFlow.Owner"), self.APP_LIVE_VIEW_OWNER)
+            self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "received")
+            self.assertEqual(node.GetAttribute("SLIAFlow.SimulationDetail"), self.APP_LIVE_DETAIL)
+            self._assertUpright(node)
+            if widget._presentationActive:
+                self.assertEqual(widget.panelCaption(widget.LIVE_VIEW_NAME), self.APP_LIVE_CAPTION)
+
+            self._pushAppFrame(session, 50, simulated=True, detail="stand-in fixture detail")
+            node = widget.logic.appLiveViewNode()
+            self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "simulated")
+            self.assertEqual(node.GetAttribute("SLIAFlow.SimulationDetail"),
+                             f"stand-in fixture detail; {self.APP_LIVE_DETAIL}")
+            if widget._presentationActive:
+                self.assertEqual(widget.panelCaption(widget.LIVE_VIEW_NAME),
+                                 self.STAND_IN_LIVE_CAPTION)
+
+    def test_switchingTheLiveSourceStopsTheOneLeft(self) -> None:
+        with self._captureSession() as session:
+            widget = session["widget"]
+            selector = widget.ui.liveSourceSelector
+            previous = widget._parameterNode.liveSource
+            try:
+                widget._parameterNode.liveSource = self.LIVE_SOURCE_CAMERA
+                self._startFakeCamera(session)
+                self._showFrame(session, 10)
+                selector.setCurrentIndex(selector.findText(self.LIVE_SOURCE_APP))
+                self.assertFalse(widget.logic.cameraActive, "The laptop camera kept running")
+                self.assertFalse(widget.ui.captureButton.enabled)
+                self.assertNotEqual(self._liveBackgroundId(widget),
+                                    widget._parameterNode.liveVolume.GetID())
+
+                widget._startAppLiveView(poll=lambda: None,
+                                         timerFactory=self._FakeCameraTimer)
+                self.assertTrue(widget.logic.appLiveViewActive)
+                widget.logic.acceptAppLiveViewFrame(self._appFrame(20))
+                selector.setCurrentIndex(selector.findText(self.LIVE_SOURCE_CAMERA))
+                self.assertFalse(widget.logic.appLiveViewActive,
+                                 "LiveView from the app kept running")
+                self.assertIsNone(widget.logic.appLiveViewNode(),
+                                  "The LiveView from the app volume outlived its source")
+            finally:
+                widget._parameterNode.liveSource = previous
+
+    def test_appLiveViewIsRemovedOnStopAndSceneClose(self) -> None:
+        with self._appLiveSession() as session:
+            widget = session["widget"]
+            self._pushAppFrame(session, 30)
+            widget._onStopCamera()
+            self.assertFalse(widget.logic.appLiveViewActive)
+            self.assertIsNone(widget.logic.appLiveViewNode(), "Stop kept the app's frame")
+            self.assertFalse(widget.ui.captureButton.enabled)
+
+            widget._startAppLiveView(poll=lambda: session["updates"].pop(0)
+                                     if session["updates"] else None,
+                                     timerFactory=lambda: session["appTimer"])
+            self._pushAppFrame(session, 40)
+            slicer.mrmlScene.Clear()
+            self.assertFalse(widget.logic.appLiveViewActive,
+                             "LiveView from the app outlived the scene")
+            self.assertIsNone(widget.logic.appLiveViewNode())
+            widget.initializeParameterNode()
+
+    def test_cameraSourceShowsNoFrameFromTheApp(self) -> None:
+        with self._captureSession() as session:
+            widget = session["widget"]
+            previous = widget._parameterNode.liveSource
+            try:
+                widget._parameterNode.liveSource = self.LIVE_SOURCE_CAMERA
+                with self._runningStandIn() as standIn, self._connectionSettings(
+                        widget, **self._standInSettings(standIn, stereoPort=0, hsCubePort=0)):
+                    self._startFakeCamera(session)
+                    cameraFrame = self._showFrame(session, 70)
+                    widget._onConnectClicked()
+                    self._waitForRow(widget, "LiveView",
+                                     lambda row: row["state"].startswith(self.STATE_RECEIVING),
+                                     "LiveView to receive")
+                    self._waitInTheEventLoop(lambda: False, 0.5)
+                    self.assertFalse(widget.logic.appLiveViewActive)
+                    self.assertIsNone(widget.logic.appLiveViewNode(),
+                                      "A frame from the app was shown with the camera chosen")
+                    np.testing.assert_array_equal(self._liveArray(widget), cameraFrame)
+                    background = self._liveBackgroundId(widget)
+                    if background is not None:
+                        self.assertEqual(background, widget._parameterNode.liveVolume.GetID())
+            finally:
+                widget._parameterNode.liveSource = previous
+
+    def test_appLiveViewFromTheStandInReachesTheLivePane(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        camera = widget.logic.getOrCreateLiveVolume(widget._parameterNode)
+        cameraFrame = np.full((1, 3, 4, 3), 7, dtype=np.uint8)
+        slicer.util.updateVolumeFromArray(camera, cameraFrame)
+        previous = widget._parameterNode.liveSource
+        try:
+            with self._runningStandIn() as standIn, self._connectionSettings(
+                    widget, **self._standInSettings(standIn, stereoPort=0, hsCubePort=0)):
+                widget._parameterNode.liveSource = self.LIVE_SOURCE_APP
+                widget._onConnectClicked()
+                widget._startAppLiveView()
+                self.assertTrue(self._waitInTheEventLoop(lambda: widget._frameDisplayed,
+                                                         self.CONNECTION_TIMEOUT_SEC, 50),
+                                "No LiveView frame from the stand-in reached the live pane")
+                node = widget.logic.appLiveViewNode()
+                (connector,) = [c for c in self._moduleConnectors()
+                                if c.GetServerPort() == standIn["basePort"]]
+                incoming = [connector.GetIncomingMRMLNode(index)
+                            for index in range(connector.GetNumberOfIncomingMRMLNodes())]
+                (received,) = [n for n in incoming if n.IsA("vtkMRMLVectorVolumeNode")]
+                # The stand-in sends the same preview in every frame.
+                np.testing.assert_array_equal(slicer.util.arrayFromVolume(node),
+                                              slicer.util.arrayFromVolume(received))
+                self.assertNotEqual(node.GetID(), received.GetID())
+                self.assertNotEqual(node.GetID(), camera.GetID())
+                np.testing.assert_array_equal(slicer.util.arrayFromVolume(camera), cameraFrame,
+                                              "A frame from the app landed in the camera volume")
+                self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "simulated")
+                self._assertUpright(node)
+                background = self._liveBackgroundId(widget)
+                if background is not None:
+                    self.assertEqual(background, node.GetID())
+        finally:
+            widget._stopCamera(clearLiveView=True)
+            widget._parameterNode.liveSource = previous
 
     # ----------------------------------------------------------------------
     # SLIA-036: the HS cube received from IUMA's acquisition app

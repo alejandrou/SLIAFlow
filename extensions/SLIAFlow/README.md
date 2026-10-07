@@ -25,10 +25,13 @@ workflow by itself. No console, Python service or OpenIGTLink link is involved.
    `input\002-04\LCTF_Calibrated_Cube_Single.hdr` (`ADR-0004`). It is the cube
    HS Cube shows and the cube UC1 runs on. `input\README.txt` describes the rest
    of `input\`.
-3. Open SLIAFlow and press **Start**. The laptop camera stands in for the
-   acquisition system's LiveView.
+3. Open SLIAFlow and press **Start**. With **Live source** `Laptop camera`
+   (the default) the laptop camera stands in for the acquisition system's
+   LiveView; with `LiveView from the app` the live pane shows the app's own
+   LiveView stream (below, `SLIA-037`).
 4. Press **Capture**. LiveView freezes, the frame is saved as
-   `workspace\captures\output_laptop_camera_<date>-<time>.png`, the configured
+   `workspace\captures\output_laptop_camera_<date>-<time>.png` (for the app's
+   LiveView, `output_app_liveview_<date>-<time>.png`), the configured
    cube is checked, and UC1 runs on it in the background (timeout 60 s). UC1's
    model was trained on 93 bands at 440-900 nm, so SLIAFlow first writes the
    cube mapped onto those bands to `build\uc1\UC1\input\002-04\raw.dat`:
@@ -131,7 +134,8 @@ The **Connections** section connects to IUMA's acquisition app as an
 OpenIGTLink client (`ADR-0004` decision 2) and shows, per port, whether it is
 connected and what arrives. It only receives: nothing is sent to the app. The
 HS cube it receives is shown in HS Cube and can be captured on (`SLIA-036`,
-below); LiveView and Stereo frames are not shown in a panel yet (`SLIA-037`).
+below), and its LiveView frames can be shown in the live pane (`SLIA-037`,
+below). Stereo frames are not shown in a panel.
 
 - **Settings**: host (default `127.0.0.1`), the LiveView, Stereo and HS Cube
   ports (18944, 18945 and 18946, as the app serves them; 0 leaves a channel
@@ -222,6 +226,46 @@ below); LiveView and Stereo frames are not shown in a panel yet (`SLIA-037`).
   device, not once per message.
 - The laptop camera volume is named `Laptop camera`, so that no connector can
   take it for the app's `LiveView` device.
+
+### LiveView from the app in the live pane (SLIA-037)
+
+- **Live source** in the Operator section chooses what the live pane shows:
+  `Laptop camera` (the default) or `LiveView from the app`. It is saved with
+  the module's settings. **Start** and **Stop** start and stop the chosen
+  source; the app's LiveView needs no camera support. Changing the choice stops
+  the source that runs, and it cannot be changed during a capture.
+- With `LiveView from the app` started, each new frame that reaches the
+  LiveView connector is copied into its own volume, `LiveView from the app`,
+  shown upright with row 0 at the top. It never goes into the `Laptop camera`
+  volume, and with `Laptop camera` chosen no frame from the app reaches a view.
+  Until a frame arrives the pane says `Waiting for LiveView from the app`.
+- Only RGB uint8 frames of one slice are shown. Anything else, an image or
+  another message such as a TRANSFORM, leaves the pane as it was, and the
+  Status line names what arrived.
+- A caption at the top of the pane says `LiveView received from the app`,
+  or `LiveView from the stand-in for the app, simulated` for frames whose
+  messages say `SLIAFlow.DataOrigin = simulated`.
+- When the connection is lost (the app stops, or Disconnect), the last frame
+  stays and the caption adds a second line, `The connection was lost; no longer updated`.
+  Capture is then refused with that reason; Capture checks the connection
+  when pressed, not only when the pane last updated. Only a frame that arrives
+  on a new connection clears the mark: a frame the lost connection delivered
+  but the pane had not shown yet is never shown, nor labelled as the next
+  sender's. When frames arrive again, the Status line says so.
+- Capture freezes the app's frame as it freezes the camera's, and saves it as
+  `workspace\captures\output_app_liveview_<date>-<time>.png`. The Cube source
+  and what Capture runs do not change.
+- The volume carries `SLIAFlow.DataOrigin = received` and the detail
+  `LiveView colour frame received over OpenIGTLink from <host>:<port>, the port
+  IUMA's AcquisitionSystemApp serves its LiveView on, at <time>; the sender may
+  have captured it live or replayed it, which SLIAFlow cannot tell apart`.
+  Stand-in frames stay `simulated`, with the stand-in's detail first.
+- Stop, changing the source, leaving SLIAFlow, closing the scene, Reload and
+  quitting remove the volume.
+- The real app sends LiveView only with its cameras connected. Its frame size
+  (up to 4096 x 3000), rate and orientation are not measured yet. Each new
+  frame is copied twice on Slicer's main thread, off the connector's node and
+  into the volume: about 74 MB per frame at full size, before it is drawn.
 
 Without IUMA's app, use the stand-in in `tools\simulators` (it says it is a
 stand-in in everything it prints and sends):

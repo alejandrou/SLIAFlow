@@ -5,8 +5,9 @@
 > acquisition app on 18944, 18945 and 18946 as an OpenIGTLink client (`ADR-0004`
 > decision 2), so SLIAFlow declares this dependency again. Since `SLIA-036` the
 > HS cube is read by SLIAFlow's own reader, not by a connector, and is shown in
-> HS Cube and captured on; LiveView and Stereo frames are counted but not yet
-> shown (`SLIA-037`). The Connections section is described in
+> HS Cube and captured on. Since `SLIA-037` LiveView frames can be shown in
+> the live pane; Stereo frames are counted but not shown. The Connections
+> section is described in
 > `extensions/SLIAFlow/README.md`, and the stand-in for the app in
 > `tools/simulators/README.md`.
 
