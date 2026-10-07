@@ -1,7 +1,7 @@
 ---
 id: SLIA-030
-title: Receive IUMA's acquisition app - measure its protocol, then show and classify its cube
-status: active
+title: Measure IUMA's acquisition app protocol with a recorder
+status: completed
 branch: feature/SLIA-030-external-openigtlink-links
 priority: medium
 depends_on: SLIA-035, SLIA-033
@@ -10,14 +10,23 @@ optional_tools: []
 related_adrs: [ADR-0003, ADR-0004]
 ---
 
-# SLIA-030 - Receive IUMA's acquisition app - measure its protocol, then show and classify its cube
+# SLIA-030 - Measure IUMA's acquisition app protocol with a recorder
+
+> **Scope split on 2026-10-06.** This card was planned in two phases. Only
+> phase A, the recorder and the measured protocol, was implemented, verified
+> and moved to `tasks/completed/` (commit `7873e7e`). Phase B, receiving the
+> cube and using it, was never implemented. At the project owner's request it
+> moved to `SLIA-036` (the HS Cube reader, the received cube in the HS Cube
+> panel and as Capture source, provenance, the stand-in's measured protocol)
+> and `SLIA-037` (LiveView from the app in the live pane). This card now holds
+> phase A only; phase B's specification, criteria 7-11, test rows and manual
+> steps B1-B4 are in those cards.
 
 ## Goal
 
-Connect SLIAFlow to IUMA's real acquisition app, write down exactly what it
-sends, and then use it: LiveView from 18944 in the live pane, and the cube from
-18946 assembled, shown in the HS Cube panel and, when it is the calibrated
-float32 cube, run through UC1 like the cube read from disk.
+Connect to IUMA's real acquisition app with a recorder outside Slicer and
+write down exactly what it sends, so that SLIAFlow's receiver (`SLIA-036`) is
+built on measured facts rather than on the stand-in's assumptions.
 
 ## Context
 
@@ -75,10 +84,6 @@ metadata) and the list of **stand-in assumptions** this card checks.
 
 ## Requirements
 
-The task has two phases. Phase B's details depend on what phase A measures, and
-are finalised in this card, and reported to the owner, before any phase B code
-is written.
-
 ### Phase A - measure the protocol
 
 - `tools/simulators/stratum_sim/igtl_recorder.py`, run with
@@ -124,106 +129,19 @@ is written.
   `docs/development/openigtlink_setup.md`, the stand-in assumptions in
   `tools/simulators/README.md`, and this card.
 
-### Phase B - receive and use
+### Phase B - moved
 
-*Finalised on 2026-09-27 from the measurement (`acquisition_app_and_hardware.md`
-section 4.1); proposed to the owner, not yet approved.*
-
-What the measurement fixed: `HsCube` is header version 1 with no metadata.
-Every IMAGE declares the whole cube (4096 x 2160 x 109) and carries one band as
-the sub-volume at offset (0, 0, band - 1). No message marks the end of a cube.
-The app sent 8.8 bands/s (157 MB/s), and a client that joined late missed
-band 1.
-
-- **Receiver: a module-owned reader for 18946**
-  (`SLIAFlowReceivedCube.py`), not an observer on the `SLIA-035` connector.
-  Reasons:
-  1. The band is known only from the sub-volume offset, and OpenIGTLinkIF
-     does not pass it on. It assembles the slabs into one volume that it does
-     not clear. An observer would therefore see a volume change, but not which
-     band arrived. It could not name a missing band, and could not tell a
-     missing band from one that holds the previous cube's pixels.
-  2. The connector keeps 3 messages per device and is emptied on the main
-     thread. At 113 ms per band, a main-thread pause of about 0.35 s (a UC1
-     run, a colour preview) drops bands silently.
-  3. The recorder, written in Python, already read the real stream at
-     157 MB/s without being held back.
-
-  The reader is a socket thread that connects to host:18946 as the port's one
-  client and retries every second like the connector. It reads each message
-  whole, header version 1 or 2, and checks the CRC. It copies each band's
-  pixels into place in one preallocated numpy array of the declared size,
-  keyed by the sub-volume offset. It never touches MRML: the main thread polls
-  it with a Qt timer.
-
-  In the Connections panel, the HsCube row is fed by this reader. The LiveView
-  and Stereo rows keep their `SLIA-035` connectors.
-- **Messages the reader accepts.** Anything but a single-component uint16 or
-  float32 IMAGE with a whole-cube size and a one-band sub-volume is refused by
-  name in the HsCube row, and does not touch the cube being assembled. So is a
-  bad CRC, or a size or type that changes in the middle of a cube.
-- **Band identity**: band = sub-volume offset k + 1, of `size[2]` bands. When
-  a message carries `SLIAFlow.BandNumber` (the stand-in, header version 2),
-  it must agree with the offset, or the message is refused. Wavelengths are
-  never sent. For 109 bands the node gets the expected grid (460-1000 nm in
-  5 nm steps), and says on the node that the grid is assumed, not received.
-  Any other band count has no wavelengths, so it is shown but not classified.
-- **Cube boundaries.** A cube is **complete** as soon as it holds every offset
-  from 0 to `size[2] - 1`. A new cube starts when an offset already held
-  arrives again, or when the size or type changes. A cube that gets no band
-  for 10 s (`ChannelMonitor.CUBE_IDLE_SEC`), or whose sender disconnects, is
-  **incomplete**: its missing bands are named, for example
-  `Missing bands: 1 (connected after the capture started)`, and it is thrown
-  away. Only a complete cube is ever shown or classified.
-- **The cube from the app.** A complete cube is shown in the HS Cube panel
-  with its colour preview and pixel spectrum, as for the cube read from disk,
-  keeping its received type (uint16 or float32).
-  - The array has the same axis order as the cube read from disk: received
-    offset k is disk band k + 1, as stored (measured).
-  - The geometry is SLIAFlow's own, not the app's centred origin: the app's
-    header is spacing 1 with an identity direction, which carries no physical
-    information.
-- **Memory.** One received cube is kept. The assembly buffer is a second
-  array: a new cube is assembled while the last complete one stays shown, so
-  the peak is two cubes (3.9 GB uint16, 7.7 GB float32). The last complete
-  cube is replaced, and freed, when the next one completes. An incomplete
-  cube's buffer is freed when it is thrown away. Both are freed on Disconnect,
-  scene close and Reload.
-- **Capture source.** The operator chooses the cube source: the configured cube
-  on disk (today's behaviour, the default) or the last complete cube received
-  from the app. Capture on a received float32 cube runs UC1 through the existing
-  band mapping and checks; on a received uint16 cube it shows the cube and says
-  UC1 waits for IUMA's calibrated float32 stream. Memory: one received cube is
-  kept, not a history.
-- **LiveView from the app** in the live pane, as an alternative to the laptop
-  camera, chosen by the operator. It never lands in the laptop camera volume
-  (`SLIA-035` criterion 10).
-- **Provenance** as in owner decision 3, on the received cube, the frames, and
-  the UC1 outputs of a received cube.
-- The stand-in follows the measured protocol: every HsCube message declares
-  the whole cube and carries one band as the sub-volume at offset
-  (0, 0, band - 1).
-  - It keeps header version 2 and its metadata, so that its data stays marked
-    `simulated`. `--app-header` sends header version 1 without metadata,
-    exactly like the app, which tests the reader on the real form.
-  - It gains `--raw`, which sends `002-04`'s raw cube as uint16, so that both
-    pixel types are tested.
-  - pyigtl 2.2.6 always packs the sub-volume as the full image, so the
-    transport gains a hand-packed IMAGE with a sub-volume
-    (`igtl_transport.buildImageSlabMessage`). It is checked against the
-    recorder's parser and against a real OpenIGTLinkIF connector.
-- Questions the measurement cannot answer go to IUMA, listed in the hardware
-  document section 7.
+Phase B, finalised on 2026-09-27 from the measurement, was never implemented.
+Its specification moved to `SLIA-036` and `SLIA-037` on 2026-10-06.
 
 ## Out of scope
 
+- Receiving, assembling, showing or classifying the app's cube in SLIAFlow
+  (`SLIA-036`), and LiveView from the app (`SLIA-037`).
 - Sending anything back to the app (commands, parameters, Capture HSI).
 - White/dark calibration in SLIAFlow.
-- Stereo display beyond showing that the port carries data (SLIA-035 already
-  does).
 - PLUS (`ADR-0004` decision 9).
 - UC2 (`SLIA-021`).
-- A history of received cubes, or saving a received cube to disk.
 
 ## Files allowed
 
@@ -236,25 +154,7 @@ Phase A:
 - `docs/development/openigtlink_setup.md`
 - `tasks/active/SLIA-030-external-openigtlink-links.md`
 
-Phase B, in addition:
-
-- `extensions/SLIAFlow/SLIAFlow/SLIAFlowLib/SLIAFlowReceivedCube.py` (new)
-- `extensions/SLIAFlow/SLIAFlow/SLIAFlowLib/SLIAFlowConnections.py`
-- `extensions/SLIAFlow/SLIAFlow/SLIAFlowLib/SLIAFlowLogic.py`
-- `extensions/SLIAFlow/SLIAFlow/SLIAFlowLib/SLIAFlowParameterNode.py`
-- `extensions/SLIAFlow/SLIAFlow/SLIAFlowLib/SLIAFlowUc1Input.py`
-- `extensions/SLIAFlow/SLIAFlow/SLIAFlowLib/SLIAFlowWidget.py`
-- `extensions/SLIAFlow/SLIAFlow/SLIAFlowLib/SLIAFlowTest.py`
-- `extensions/SLIAFlow/SLIAFlow/CMakeLists.txt`
-- `extensions/SLIAFlow/SLIAFlow/Resources/UI/SLIAFlow.ui`
-- `extensions/SLIAFlow/README.md`
-- `tools/simulators/stratum_sim/iuma_app_standin.py`
-- `tools/simulators/stratum_sim/contract.py`
-- `tools/simulators/tests/test_iuma_app_standin.py`
-- `tools/simulators/stratum_sim/igtl_transport.py` (added 2026-09-27 with
-  phase B, pending owner approval: sub-volume IMAGE messages)
-- `tools/simulators/tests/test_igtl_transport.py` (same)
-- `docs/architecture/SLIAFLOW_UC1_IMAGE_CONTRACT.md`
+Phase B's files are listed in `SLIA-036` and `SLIA-037`.
 
 Also touched on this branch at the owner's request (2026-09-27), outside the
 task: `tasks/active/SLIA-034-uc1-performance-and-large-cubes.md` deleted. It
@@ -266,7 +166,6 @@ The built copy under `build\SLIAFlow` is regenerated by
 
 ## Relevant skills and references
 
-- Slicer skill (phase B): `vtkMRMLIGTLConnectorNode`, volume nodes from arrays.
 - OpenIGTLink v2/v3 header and IMAGE message layout, as implemented by the
   pinned `pyigtl` 2.2.6 in `.venv` (`pyigtl/messages.py`), used by the tests to
   build reference messages.
@@ -289,14 +188,7 @@ Phase A:
 5. Write the measured facts into the documents and this card; check each
    stand-in assumption.
 
-Phase B, after the measurement:
-
-6. Finalise the receiver choice, the phase B acceptance criteria and test names
-   in this card; report them to the owner.
-7. Tests first, then `SLIAFlowReceivedCube.py` (Slicer-free band assembly), the
-   connector-side copying, the capture source choice, LiveView source, UC1 on a
-   received float32 cube, provenance; stand-in `--raw` and protocol updates.
-8. Documentation; `build-sliaflow.ps1 -Configure`; all checks.
+Phase B (steps 6-8) moved to `SLIA-036`.
 
 ## Acceptance criteria
 
@@ -321,30 +213,7 @@ Phase A:
    assumption marked confirmed, wrong (with the measured fact) or not
    measurable.
 
-Phase B (finalised 2026-09-27, pending owner approval):
-
-7. A complete cube from the app or the stand-in is assembled by sub-volume
-   offset, whatever the order in which bands arrive, and shown in the HS Cube
-   panel.
-   - This holds for uint16 and float32, and for header version 1 without
-     metadata and version 2 with it.
-   - A cube with missing bands is never shown, and the HsCube row names the
-     missing bands. This includes a first band missed by a late connection.
-   - Refused messages are named, and leave the cube being assembled
-     untouched: a bad CRC, a wrong type or component count, a band number
-     that disagrees with the offset, or a size change in mid-cube.
-   - At the app's pace, 8.8 bands/s, no band is lost while the main thread is
-     blocked for 2 s.
-8. Capture on a received float32 cube runs UC1 and shows its result; on a
-   received uint16 cube it runs nothing and says why; on the cube read from disk
-   it behaves as before.
-9. LiveView from the app appears in the live pane when chosen, and never in the
-   laptop camera volume.
-10. Received nodes and their UC1 outputs carry `DataOrigin = received` and the
-    agreed detail; stand-in data keeps `simulated`.
-11. Nothing received survives Disconnect, scene close, Reload or quit beyond
-    what `SLIA-035` already allows, and a received cube's memory is freed when
-    replaced.
+Phase B's criteria 7-11 moved to `SLIA-036` and `SLIA-037`.
 
 ## Test plan
 
@@ -357,13 +226,6 @@ Phase B (finalised 2026-09-27, pending owner approval):
 | 5 No pixel data; summary | `RecorderStandInTest.test_writesNoPixelData`, `test_summaryNamesMissingBands` (stand-in `--drop-bands`), `RecorderRawServerTest.test_summarySplitsCapturesByGap` | automated |
 | 5a Sender's timing | `RecorderRawServerTest.test_arrivalTimesDoNotWaitForSlowDescription` | automated |
 | 6 Real protocol recorded | Manual steps A1-A3; document review | manual |
-| 7 Assembly | `SLIAFlowTest`: `test_receivedCubeAssemblesBandsByOffset`, `test_receivedCubeOutOfOrderBands`, `test_receivedCubeNamesMissingBands`, `test_receivedCubeLateConnectionMissesFirstBand`, `test_receivedCubeRefusesBadMessages` (CRC, type, components, band number, size change), `test_receivedCubeHeaderVersion1And2`, `test_receivedCubeSurvivesBlockedMainThread` (stand-in on free ports, placeholder cube); `test_iuma_app_standin.py`: `test_hsCubeSendsWholeCubeSubVolumes`, `test_appHeaderSendsVersion1WithoutMetadata`, `test_rawSendsUint16`; `test_igtl_transport.py`: `test_imageSlabMessageParsesInRecorder`; `SLIAFlowTest.test_imageSlabMessageAssembledByOpenIGTLinkIF` | automated |
-| 7 Real app | Manual step B1 | manual |
-| 8 Capture source | `SLIAFlowTest`: `test_captureOnReceivedFloat32CubeRunsUc1`, `test_captureOnReceivedUint16CubeRunsNothing`, `test_captureOnDiskCubeUnchanged`, `test_receivedCubeWithoutWavelengthGridIsNotClassified` | automated |
-| 9 LiveView source | `SLIAFlowTest`: `test_liveViewFromAppShownInLivePane`, `test_liveViewFromAppNeverInLaptopCameraVolume` | automated |
-| 10 Provenance | `SLIAFlowTest`: `test_receivedCubeProvenance`, `test_standInCubeStaysSimulated`, `test_uc1OutputsOfReceivedCubeCarryProvenance` | automated |
-| 11 Lifetime | `SLIAFlowTest`: `test_receivedCubeFreedOnDisconnect`, `test_receivedCubeFreedOnSceneClose`, `test_receivedCubeReplacedByNextComplete`, `test_readerStopsOnCleanup` | automated |
-| 7-10 End to end | Manual steps B1-B3 | manual |
 
 Tests to add, and how each is shown to fail first:
 
@@ -389,14 +251,7 @@ client, and the recorder must be it.
 | A2 | In the app: **Load HS Cube**, choose `input\002-04\raw_data.hdr`, wait until it is shown, press **Send Capture**. Wait until the app's console says the transmission ended, then 30 s more | The recorder's console counts HsCube messages up to 109 (or states what it got) | PASS after retrying with the recorder connected before **Send Capture**: 109 `HsCube` IMAGE messages, uint16, 4096 x 2160 x 1. The first attempt joined after transmission began and received 108/109, missing the first band. |
 | A3 | Press Ctrl+C in the recorder. Send the folder it names (`workspace\igtl-recordings\...`: `messages.jsonl`, `summary.md`) or paste `summary.md`. Note anything the app's console printed | `summary.md` lists per port the device names, sizes, scalar type, header version, metadata keys, rate, and for HsCube the matched band order | PASS: `workspace\igtl-recordings\manual-real-compare-20260927-1524` contains strict-JSON `messages.jsonl` and `summary.md`; it reports bands 1-109 in order, as stored, no missing/repeated/out-of-order bands, no CRC mismatches, no metadata, and no end-of-cube message. LiveView and Stereo connected but emitted no frames without hardware. |
 
-Phase B (after implementation). Nothing else may be connected to 18946.
-
-| # | Action | Expected observation | Result |
-| --- | --- | --- | --- |
-| B1 | Start the app, load `input\002-04\raw_data.hdr`. Start SLIAFlow, **Connect**, then **Send Capture** in the app | HsCube row counts to 109 and says the cube is complete; the HS Cube panel shows the received cube, labelled raw uint16 and received from the app; colour preview and pixel spectrum work | |
-| B2 | Capture with the received cube as source | UC1 does not run; SLIAFlow says UC1 waits for IUMA's calibrated float32 stream. With the disk cube as source, Capture behaves as before | |
-| B3 | Disconnect, then Connect again after pressing **Send Capture** | The late connection names the missing first band(s); no incomplete cube is shown; the previous complete cube is gone after Disconnect | |
-| B4 | Stand-in with the calibrated float32 cube: `..\..\.venv\Scripts\python.exe -m stratum_sim.iuma_app_standin`, Connect, Capture with the received cube as source | UC1 runs and shows its result; the cube and outputs say simulated (stand-in) | |
+Phase B's manual steps B1-B4 moved to `SLIA-036` and `SLIA-037`.
 
 ## Risks
 
@@ -404,25 +259,14 @@ Phase B (after implementation). Nothing else may be connected to 18946.
   sub-volume offset. The wavelength is still not sent, so the 460-1000 nm grid
   is an assumption. It holds only for 109 bands, and IUMA is asked (hardware
   document section 7, question 10).
-- The float32 version may change the structure despite IUMA's statement. The
-  reader refuses what it does not recognise, by name, rather than guessing
-  (question 9).
-- A reader in Python inside Slicer holds the GIL while it copies about 17.7 MB
-  (uint16) or 35 MB (float32) per band. The copy is one numpy slice
-  assignment; if the UI stutters measurably during B1, that is reported as a
-  finding.
-- Peak memory while a second cube is assembled is two cubes, 7.7 GB at
-  float32, on a 15.3 GB laptop (`SLIA-034` measured the UC1 limits).
+- The float32 version may change the structure despite IUMA's statement
+  (question 9). Carried into `SLIA-036`.
 - The app's cube viewer loads the whole 1.93 GB raw cube into RAM, and the
   recorder reads the same cube for comparison: about 4 GB on a 15.3 GB laptop.
   Close Slicer during A1-A3.
 - The app needs its hardware to start cleanly; without it the window opens and
   the ports listen (`acquisition_app_and_hardware.md` section 3.1). If Send
   Capture fails without hardware, that is itself a finding to report.
-- A uint16 raw cube shown in the HS Cube panel could be mistaken for calibrated
-  reflectance. Its caption states it is raw and uncalibrated.
-- Received data could be mistaken for a live capture. The provenance says the
-  app may be replaying.
 
 ## Documentation impact
 
@@ -431,8 +275,6 @@ Phase B (after implementation). Nothing else may be connected to 18946.
 - `docs/development/openigtlink_setup.md`: the recorder, the measured protocol,
   the receiver.
 - `tools/simulators/README.md`: the recorder; stand-in assumptions checked.
-- Phase B: `extensions/SLIAFlow/README.md`,
-  `docs/architecture/SLIAFLOW_UC1_IMAGE_CONTRACT.md`.
 
 ## Completion evidence
 
@@ -553,3 +395,7 @@ Written into:
 ## Review findings
 
 ## Human approval
+
+Moved to `tasks/completed/` by the project owner in commit `7873e7e`, with
+phase A done. The split of phase B into `SLIA-036` and `SLIA-037` was asked
+for by the project owner on 2026-10-06.
