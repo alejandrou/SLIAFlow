@@ -3,11 +3,29 @@
 ## Purpose
 
 SLIAFlow is the 3D Slicer visualization component of the STRATUM demonstrator.
-It presents a live image beside genuine UC1 output without implementing or
-changing the acquisition, UC1, or UC2 algorithms.
+It runs the vendored UC1 pipeline and the UC2 blood-vessel enhancement on a
+hyperspectral cube, shows the images they write beside the live image and the
+cube itself, and connects to IUMA's acquisition app. It does not implement or
+change the acquisition, UC1 or UC2 algorithms.
 
 This is prototype software. It is not clinically validated and must not be used
 with private or identifiable patient data.
+
+## Where the decisions are
+
+This roadmap says where the project stands and what comes next. It decides
+nothing. When it and another document disagree, the order in `AGENTS.md`
+applies:
+
+- the accepted ADRs in `docs/architecture/decisions/`, `ADR-0001` to
+  `ADR-0005`, which also record what each supersedes;
+- the one task in `tasks/active/` or `tasks/review/`;
+- the module README, `extensions/SLIAFlow/README.md`, which describes what the
+  operator sees in detail.
+
+`WP5_MS5_DEMO_PLAN.md` is the plan the six panels came from. It is kept because
+accepted ADRs link to it, and is historical where `ADR-0003` to `ADR-0005`
+supersede it: its links, producers and ports are not the current design.
 
 ## Canonical Windows layout
 
@@ -18,225 +36,117 @@ with private or identifiable patient data.
 | SLIAFlow extension source | `C:\stratum\extensions\SLIAFlow` |
 | Regenerable extension build | `C:\stratum\build\SLIAFlow` |
 | SLIAFlow launcher | `C:\stratum\build\SLIAFlow\SlicerWithSLIAFlow.exe` |
+| Staged UC1 build (`build-uc1.ps1`) | `C:\stratum\build\uc1\UC1` |
+| Staged UC2 build (`build-uc2.ps1`) | `C:\stratum\build\uc2` |
+| The cube SLIAFlow reads (gitignored) | `C:\stratum\input\002-04` |
+| Saved capture frames (gitignored) | `C:\stratum\workspace\captures` |
 | Complementary project references | `C:\stratum\workspace\components` |
 | Meeting and source references | `C:\stratum\workspace\references` |
 
-The base Slicer build stays in place. Only the small extension build may be
+The base Slicer build stays in place. Only the small extension build is
 regenerated when the SLIAFlow extension source changes.
 
-## First usable milestone
+## What the module does, since SLIA-036
 
-1. Start `SlicerWithSLIAFlow.exe`.
-2. Open the `SLIAFlow` module.
-3. Show two side-by-side Slicer image views.
-4. Show the laptop camera in the left `Live Image` view.
-5. Keep the right `UC1 Result` view black and display
-   `Waiting for genuine UC1 result` until a real result arrives.
-
-SLIAFlow must never *create* a tumour classification, probability map,
-heatmap, or diagnostic result. It only presents data produced outside the
-module.
-
-Data that an external producer marks as simulated is displayed only under a
-transient, never-persisted operator opt-in and a permanent on-view banner
-(`SLIA-010`). A genuine source always takes precedence over a simulated one for
-the same map role, and provenance travels with the data, never with the endpoint
-it arrived on. Absent or unrecognized provenance is invalid, not a default.
-
-```mermaid
-flowchart LR
-    Camera[Laptop camera] --> LiveNode[Live MRML image]
-    LiveNode --> Left[Live Image view]
-
-    UC1[External UC1 GPU process] --> IGT[OpenIGTLink]
-    IGT --> Validation[Validate genuine map]
-    Validation --> Right[UC1 Result view]
-
-    Missing[No genuine UC1 data] --> Black[Black result view]
-    Black --> Right
-```
-
-## Implementation order
-
-| Order | Task | Result |
-| --- | --- | --- |
-| 1 | `SLIA-001` | Canonical repository, clean roadmap, and superseded test prototype |
-| 2 | `SLIA-002` | Project context copied safely into `C:\stratum` |
-| 3 | `SLIA-003` | Fresh scripted SLIAFlow extension and working launcher |
-| 4 | `SLIA-004` | Two black side-by-side image views and basic controls |
-| 5 | `SLIA-005` | Live Windows laptop-camera image in the left view |
-| 6 | `SLIA-006` | Validated presentation of genuine UC1 result volumes |
-| 7 | `SLIA-010` | Simulated result origin, demo mode, and simulated banner |
-| 8 | `SLIA-011` | Simulator toolchain and acquisition simulator |
-| 9 | `SLIA-012` | Stand-in UC1 maps and map sender |
-| 10 | `SLIA-013` | Real UC1 build, runner, and MV class sender |
-| 11 | `SLIA-007` | Independently built SlicerOpenIGTLink dependency |
-| 12 | `SLIA-008` | LiveView and UC1 OpenIGTLink reception |
-| 13 | `SLIA-014` | End-to-end hardware-free workflow verification |
-| 14 | `SLIA-016` | Link state that follows the socket, not the connector object |
-| 15 | `SLIA-023` | Recorded HSI cubes accepted; acquisition trigger stand-in |
-| 16 | `SLIA-022` | Six-panel operator surface with a capture button |
-| 17 | `SLIA-024` | UC1 result over a colour image derived from its own cube (MS5 point 2) |
-| 18 | `SLIA-021` | UC2 blood-vessel enhancement as an independent producer (MS5 point 3) |
-| 19 | `SLIA-009` | Camera-only demonstration and operator runbook |
-
-Orders 14 to 18 are the WP5 demonstrator, planned in
-`docs/architecture/WP5_MS5_DEMO_PLAN.md`. That document is the authority on their
-scope, the six-view layout and the port reservations; this table is the order.
-`SLIA-017` and `SLIA-018` remain open and are worth taking before order 16, since
-the demonstrator runs seven ports where the verified session ran two.
-
-SLIA-010 to SLIA-013 stand in for the unavailable hyperspectral camera. The
-stand-ins are separate processes outside `extensions/`, so the rule that SLIAFlow
-never generates a result is unchanged; SLIAFlow only gains the ability to display
-externally produced simulated data under an explicit, non-persisted opt-in and a
-permanent on-view banner. SLIA-013 runs the genuine UC1 CUDA pipeline, and
-since SLIA-023 on recorded cases, so only the acquisition is simulated. Swapping a stand-in for the real
-application is a matter of stopping one process and starting another on the same
-port.
-
-SLIA-014 verifies that claim rather than restating it. The whole workflow is run
-on one machine with no hyperspectral camera - the acquisition stand-in on
-`127.0.0.1:18944`, a map producer on `127.0.0.1:18945`, SLIAFlow receiving both -
-and the map producer is then swapped for a different one on the same port with no
-change to SLIAFlow. The procedure and its recorded evidence are in
-`docs/development/end_to_end_verification.md`.
-
-When real hardware arrives, nothing inside `extensions/` changes. The acquisition
-application takes over port 18944 and the genuine UC1 pipeline keeps port 18945.
-The only change on the producers' side is provenance: a map computed from a real
-cube travels as `SLIAFlow.DataOrigin = external-genuine` with no simulation
-detail, and SLIAFlow then displays it with no banner and without demo mode.
-
-The first demonstrable checkpoint is reached after SLIA-005. Tasks are completed
-one at a time so that each visible behavior can be verified in Slicer before the
-next integration layer is added.
-
-## User-visible behavior
-
-Since `SLIA-022` the module presents the six-view WP5 operator surface, in two
-rows of three:
+The module presents the six-view WP5 operator surface, in two rows of three:
 
 | LiveView | Stereoscopic | HS Cube |
 | --- | --- | --- |
 | **Relative StO2** | **Enhanced Vascularization** | **Tumour Delineation** |
 
-Since `SLIA-027`
-(`docs/architecture/decisions/ADR-0003-integrated-capture-and-uc1-in-slicer.md`)
-the panels behave as follows, with no OpenIGTLink link in the module:
-
 - **LiveView** shows the laptop camera, which stands in for the acquisition
-  system's LiveView. With no image yet it is black and says what it is waiting
-  for.
-- **Stereoscopic** and **Relative StO2** are black and carry their reason on
-  screen: no producer yet, and ports 18948 and 18949 reserved.
-- **HS Cube** is black and says the cube is not displayed: UC1 reads the
-  recorded case from disk.
-- **Enhanced Vascularization** is black and says no UC2 producer exists yet
+  app's LiveView. Showing the app's own stream is `SLIA-037`.
+- **Stereoscopic** and **Relative StO2** are black and say what they wait for:
+  no producer exists for either.
+- **HS Cube** shows the cube Capture uses, band by band, as a colour preview,
+  and as a pixel spectrum (`SLIA-032`). **Cube source** chooses IUMA's
+  calibrated LCTF cube `002-04` on disk (`ADR-0004`) or the last complete cube
+  received from the app (`SLIA-036`).
+- **Enhanced Vascularization** shows the map UC2 wrote for the last capture
   (`SLIA-021`).
-- **Tumour Delineation** shows one of the five UC1 output images, chosen under
-  **Delineation output**, on its own. Before the first result it is black and
-  says it is waiting for a capture.
-- **Capture** freezes LiveView, saves the frame under `workspace/captures`, picks
-  a recorded case from a shuffled pool, runs
-  `stratum.opt.intermediate.exe` in the background with a 60 s timeout, and
-  resumes LiveView when the run ends. It is enabled only while the camera runs
-  and no capture is in progress.
-- Camera index and camera-support install are in a collapsed Developer section,
-  with the current result's file, case and capture ID.
+- **Tumour Delineation** shows one of the five UC1 outputs, chosen under
+  **Delineation output** (`imageRGB.bmp` by default), on its own, with nothing
+  composited under or over it (`ADR-0003` decision 3, `ADR-0005`).
+- **Capture** freezes LiveView, saves the frame, checks the cube, maps it onto
+  UC1's 93 model bands (`ADR-0004` decision 4), runs UC1 and UC2 in the
+  background, each independently of the other, and resumes LiveView when both
+  have ended (`ADR-0003`, `SLIA-027`, `SLIA-033`).
+- **Connections** connects to IUMA's acquisition app as an OpenIGTLink client
+  on its LiveView, Stereo and HS Cube ports (18944, 18945 and 18946) and shows
+  what each one carries. It only receives (`ADR-0004` decision 2, `SLIA-035`,
+  `SLIA-036`).
 
-Defaults: camera index `0`, delineation output `imageRGB.bmp`.
+```mermaid
+flowchart LR
+    Camera[Laptop camera] --> Live[LiveView]
+    Disk[input/002-04 on disk] --> Cube[HS Cube]
+    App[IUMA acquisition app] -->|OpenIGTLink, HS Cube port| Cube
+    Cube --> Capture[Capture]
+    Capture --> UC1[UC1, staged build] --> Delineation[Tumour Delineation]
+    Capture --> UC2[UC2, staged build] --> Vascular[Enhanced Vascularization]
+```
 
-The earlier design below - links, a live-source selector, demo mode, layers,
-and a UC1 map composited over `UC1_RGB` - is superseded by ADR-0003 and kept as
-the record of why it was built.
+## Rules that hold throughout
 
-The live and result images were originally placed in separate views, on the
-grounds that the laptop RGB image and HSI-derived maps are not registered.
-`docs/architecture/decisions/ADR-0001-overlay-result-on-cube-derived-rgb.md`
-supersedes that decision and narrows it: an algorithm result may be composited
-over a background **derived from the same hyperspectral cube it was computed
-from**, which is registered with it by construction, and may never be composited
-over the laptop camera, which is not. SLIAFlow performs no registration or
-resampling; its only geometric safeguard is a refusal to composite images of
-different dimensions. Under rule 3 of that ADR a result is composited only over a
-background from its own producer on its own connection, so `UC2_BV` has its own
-panel and is never drawn over `UC1_RGB`.
+- SLIAFlow never creates a classification, probability map, heatmap or
+  diagnostic result. It shows what UC1 and UC2 write.
+- UC1 and UC2 change only through the versioned patches recorded in
+  `docs/development/uc1_changes.md` and `uc2_changes.md`, none of which changes
+  the algorithm.
+- Results on `002-04` are behavioural, not validated: UC1's model was trained
+  on another camera (`ADR-0004` decision 5).
+- Every image says where it came from: `SLIAFlow.DataOrigin` is `simulated`
+  for a cube read from disk, whose acquisition is simulated, and `received` for
+  a cube from the app; a cube from the app's stand-in stays `simulated`.
+- No algorithm result is ever composited over the laptop camera (`ADR-0001`).
+- A missing, refused or failed result leaves a black panel, or the previous
+  result marked as previous, with the reason on screen, never fabricated
+  output.
 
-As implemented by `SLIA-024`, the delineation panel puts `UC1_MV_CLASS` over
-`UC1_RGB` only when the background carries the map's capture ID and has exactly
-the map's dimensions, origin and simulation detail. The capture ID and the
-map-alone presentation of a size mismatch are
-`docs/architecture/decisions/ADR-0002-uc1-background-capture-identity-and-mismatch.md`,
-accepted on 2026-09-16. In every other case - no background yet, another capture,
-different size, different provenance, or not a three-component `uint8` image - the map is shown
-alone, exactly as before, and the **Background** line under the result source
-says why. The background is found by its exact device name only, so the laptop
-camera volume and a `LiveView` stream are never candidates, whatever they are
-called. The layer opacity moves the map over the image: 0 shows the image alone
-and 1 the map alone.
+## Build checks
 
-## OpenIGTLink contract
+`scripts/development/check-uc1.py` and `check-uc2.py` run the staged builds on
+`002-04` and compare with the runs recorded on 2026-10-07, besides independent
+oracles (`ADR-0005` decision 3). Nothing compares the patched builds with the
+delivered ones any more (`ADR-0005` decision 4). Their checks, and how to record
+a run again after a deliberate change, are in `uc1_changes.md` and
+`uc2_changes.md`.
 
-Since `SLIA-027` SLIAFlow creates no connector and the operator workflow uses
-none of the device names below (ADR-0003). They are kept for `SLIA-030`.
+## How it got here
 
-The networking tasks use these device names and data shapes:
+Each step is a task card in `tasks/completed/`, which records what was built
+and how it was verified.
 
-| Device name | Required image data |
-| --- | --- |
-| `LiveView` | Three-component RGB `uint8` |
-| `UC1_TMD` | One-component `float32` in `[0,1]` |
-| `UC1_MV_CLASS` | One-component `uint8` containing class values 1 through 4 |
-| `UC1_MV_PROB` | One-component `float32` in `[0,1]` |
-| `UC1_SVM_PROB` | Four-component `float32` in `[0,1]` |
-| `UC1_KNN_PROB` | Four-component `float32` in `[0,1]` |
-| `UC1_RGB` | Three-component `uint8`, composed from the cube's 710/540/480 nm bands (`SLIA-024`) |
-| `UC2_BV` | Three-component `uint8`, the PNG UC2 writes, as written (`SLIA-021`) |
-| `HSCube` | One-component `uint16`, shape `(bands, lines, samples)` in `(k, j, i)` order: the captured cube's raw counts, with `SLIAFlow.WavelengthsNm` and `SLIAFlow.DatasetFolder` in its metadata (`SLIA-023`) |
-| `CaptureTrigger` | `STRING` to the acquisition stand-in: `CAPTURE`, declared US-ASCII, IANA 3 (`SLIA-023`). A `vtkMRMLTextNode`'s encoding number travels to the receiver unchanged, and the VTK default, `VTK_ENCODING_US_ASCII`, is 1, which is not an IANA number and is refused |
-| `CaptureReply` | `STRING` from the stand-in, one per trigger: `CAPTURING`, `IGNORED` or `REFUSED` (`SLIA-023`) |
-| `CaptureStatus` | `STRING` from the stand-in, on change and every 0.5 s: `IDLE`, `CAPTURING` or `READY ... folder=<case folder>` (`SLIA-023`) |
+| Stage | Tasks | Result |
+| --- | --- | --- |
+| Foundation | `SLIA-001` to `SLIA-005` | Repository, scripted module, two panes, laptop camera |
+| External producers | `SLIA-006` to `SLIA-018` | UC1 results received over OpenIGTLink from stand-in producers, verified end to end without a camera (`SLIA-014`) |
+| WP5 surface | `SLIA-022` to `SLIA-024` | Six panels, recorded cubes, UC1 over a colour image of its own cube (`ADR-0001`, `ADR-0002`) |
+| Integrated capture | `SLIA-025` to `SLIA-028` | Capture and UC1 run inside Slicer; the phantom, producers and session scripts retired (`ADR-0003`) |
+| One cube and the app | `SLIA-030` to `SLIA-036`, `SLIA-021` | `002-04` adopted; HS Cube; UC1 and UC2 on the calibrated cube; the app measured, connected, and its cube received (`ADR-0004`) |
+| Cleanup | `SLIA-038`, `SLIA-039` | Faster test runs; the old database inputs and the ground-truth overlay retired (`ADR-0005`) |
 
-Ports, one per channel:
+Two designs of that history no longer hold. The live and result images were
+first kept in separate views because they are not registered, which `ADR-0001`
+narrowed to compositing only over an image of the same cube. The UC1 result
+then arrived from external producers over OpenIGTLink and was composited over
+`UC1_RGB`; `ADR-0003` replaced that with Capture inside Slicer and each output
+shown on its own. The device names, ports and producers of that design are in
+the completed cards and in Git history.
 
-| Port | Channel | State |
-| ---: | --- | --- |
-| 18944 | `LiveView` | In use |
-| 18945 | `UC1_MV_CLASS` and `UC1_RGB` | In use; `UC1_RGB` added by `SLIA-024` |
-| 18946 | `UC2_BV` | `SLIA-021` |
-| 18947 | `HSCube` | In use by the recorded-case stand-in (`SLIA-023`) |
-| 18948 | `Stereoscopic` | **Reserved. No producer. Black panel with its reason.** |
-| 18949 | `UC2_STO2` | **Reserved. No algorithm. Black panel with its reason.** |
-| 18950 | `Control`: `CaptureTrigger`, `CaptureReply`, `CaptureStatus` | Producer side in use (`SLIA-023`); Slicer side implemented (`SLIA-022`) |
+## Next
 
-The control channel carries three device names rather than one. A connector
-re-sends an outgoing node when a message of the same name updates it, so the
-trigger and the answers travel under different names; and pyigtl keeps only the
-latest message per device name, so the one reply to a trigger cannot share a name
-with the state repeated every half second. The exact wording, and why the state is
-repeated at all, is in `tools/simulators/README.md` as it stood before `SLIA-028`,
-in Git history.
-
-`UC1_RGB` shares port 18945 with `UC1_MV_CLASS` deliberately. One producer
-sending a result and its background from one cube over one connection makes
-"same capture" a property of the transport rather than an assumption. See
-`ADR-0001`.
-
-Class values are normal (1), tumour (2), hypervascularized (3), and background
-(4). SVM and KNN maps require a class selector because they contain four
-probability components.
-
-Normalization and creation of the maps remain the responsibility of the external
-UC1 wrapper. SLIAFlow validates and displays received data; it does not infer
-`tmdMap`, change UC1 or UC2, or reinterpret malformed values.
+- `SLIA-037`: the app's LiveView stream in the live pane, instead of the laptop
+  camera.
+- `SLIA-009`: an operator runbook and shutdown hardening for the built
+  application, including the transport helpers the retired producers left.
 
 ## Safety boundaries
 
-- No changes to AcquisitionSystemApp, UC1, or UC2 are part of this roadmap.
-- No private medical data is permitted.
-- Missing, disconnected, or invalid result data produces a black result view and
-  an explicit status, never fabricated output.
+- No change to AcquisitionSystemApp is part of this roadmap; UC1 and UC2 change
+  only as stated above.
+- No private medical data is permitted. The data SLIAFlow may read is listed in
+  `.ai/policies/medical-data-policy.md`.
 - MRML node IDs are stored for internal references because node names are not
   unique.
 - Commit, push, merge, and lifecycle completion require separate project-owner

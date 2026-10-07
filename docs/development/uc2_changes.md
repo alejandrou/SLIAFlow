@@ -45,13 +45,18 @@ them.
 .\.venv\Scripts\python.exe scripts\development\check-uc2.py
 ```
 
-`check-uc2.py` runs three checks:
+`check-uc2.py` runs two checks:
 
 | Check | Patch | Oracle |
 | --- | --- | --- |
-| Calibrated cube `002-04` | 0001, 0002 | a NumPy replica of UC2's own steps on the bands at 480, 540 and 710 nm, pixel for pixel |
-| Reference case `020-01`, uint16 with references | 0001 leaves it alone | the unpatched build's PNG, by SHA-256 |
+| Calibrated cube `002-04` | 0001, 0002 | a NumPy replica of UC2's own steps on the bands at 480, 540 and 710 nm, pixel for pixel; and the PNG's SHA-256 recorded on 2026-10-07 |
 | Calibrated cube holding five bands only | 0002 | refused: exit 1, `Error reading band`, no PNG |
+
+Until `SLIA-039` a third check ran the patched build on the recorded case
+`020-01` (uint16 with references), which patch 0001 leaves on UC2's delivered
+path, and required the unpatched build's PNG. That case left `input/` with
+`ADR-0005`; its last run is at the end of this document. Nothing checks the
+delivered uint16 path any more.
 
 ## Patch 0001 - use the calibrated cube when the folder has one
 
@@ -147,8 +152,7 @@ maximum start from the first value of the red plane, not of its own channel.
 The owner's own replica in the standalone project also gave a difference of 0.
 
 The 69.9 % of blue pixels at 255 is the `bValue = 3` multiply clipped at 1.0
-before normalisation, as on the HSI Human Brain Database cases
-(`uc2_local_build.md`). It is reported, not corrected.
+before normalisation. It is reported, not corrected.
 
 ## What none of this checks
 
@@ -175,10 +179,35 @@ If UC2's authors deliver these changes, or their own equivalent:
 1. update the vendored copy to their commit and change `$expectedCommit` in
    `build-uc2.ps1`;
 2. delete the patches they cover from `scripts/development/uc2-patches/`;
-3. update the expected warning lines in `build-uc2.ps1` and the hash in
-   `check-uc2.py` if the delivered code moved them;
+3. update the expected warning lines in `build-uc2.ps1` if the delivered code
+   moved them, and `RECORDED_PNG_SHA256` in `check-uc2.py` if the map changed,
+   after reviewing why;
 4. run `build-uc2.ps1 -Clean` and `check-uc2.py`, and record the result here.
 
 `SLIAFlowUc2Run.py` depends only on the behaviour: a folder argument, the
 calibrated cube's file names, the three bands and the PNG name. If the
 delivered code reads other names or bands, those checks change with it.
+
+## check-uc2.py on 002-04 (SLIA-039)
+
+The 002-04 map of the build above, unchanged since 2026-10-05, was
+`605BF532810C85DC8752CB437E842CB1DC044225976CABF3EECC9FE7899E4CCD`
+(3,310,223 bytes) in the check's run and in SLIAFlow's own run on 2026-10-07;
+`check-uc2.py` now requires that hash besides the replica. `check-uc2.py`,
+exit 0:
+
+```text
+002-04: exit 0, 0.22 s
+  002-04-BVMap.png  1080 x 1080, identical to the NumPy replica (bands 4, 16, 50 = 480, 540, 710 nm)
+  002-04-BVMap.png  identical to the run recorded on 2026-10-07  605BF532...
+  R at 255 0.7%, G at 255 0.8%, B at 255 69.9%
+short-cube: exit 1, 0.01 s, no PNG
+PASS
+```
+
+With the recorded hash changed it exited 1:
+`002-04-BVMap.png is 605BF532..., the build wrote 00000000... on 2026-10-07`.
+
+**The last run on `020-01`.** Before that check was removed, the earlier
+`check-uc2.py` passed on 2026-10-07 (exit 0), with `020-01-BVMap.png` identical
+to the unpatched build's (`C1C7B940...`).

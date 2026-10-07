@@ -43,22 +43,11 @@ workflow by itself. No console, Python service or OpenIGTLink link is involved.
    says the results are not validated on this cube (`ADR-0004` decision 5):
    the model was trained on another camera. On failure the previous result
    stays on screen marked `PREVIOUS RESULT - not from the current capture`.
-6. **Delineation output** has a sixth entry, `gtMap`, offered only when the
-   cube has a `gtMap` pair beside it (`ADR-0004` decision 8). `002-04` has none,
-   so the entry is hidden; a `gtMap` selection kept from earlier makes the
-   status say the cube has no ground truth. For a cube that has one, it does not
-   replace the picture on screen -- it is drawn over the output chosen last, on
-   Slicer's Label layer, so the layer's opacity slider and outline toggle work
-   on it. Its colours are `FOUR_COLORS_MAP` from the UC1 source, the same table
-   `svm.bmp` and `knn.bmp` are painted with: green normal tissue, red tumour,
-   blue hypervascularized, black background. Unlabelled pixels are left clear.
-
-   `svm.bmp` and `knn.bmp` are the two outputs a ground truth can be read
-   against, because they share that legend. `kmeans.bmp` is painted from
-   cluster numbers that carry no fixed meaning, and `pca.bmp` is not a
-   classification at all. Nothing computes an accuracy or agreement figure:
-   `.ai/policies/medical-data-policy.md` does not approve one, and this
-   module only puts the two pictures on top of each other.
+6. `svm.bmp` and `knn.bmp` paint each pixel with its class, from
+   `FOUR_COLORS_MAP` in the UC1 source: green normal tissue, red tumour, blue
+   hypervascularized, black background. `kmeans.bmp` is painted from cluster
+   numbers that carry no fixed meaning, and `pca.bmp` is not a classification at
+   all. Nothing computes an accuracy or agreement figure.
 
 Every output is marked `SLIAFlow.DataOrigin = simulated`, names its cube in
 `SLIAFlow.RecordedCase`, and carries the detail `real UC1 pipeline, recorded

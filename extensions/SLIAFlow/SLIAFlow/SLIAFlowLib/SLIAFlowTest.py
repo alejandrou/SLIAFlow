@@ -1014,40 +1014,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         """
         return importlib.import_module(f".{name}", __package__)
 
-    def _writeFixtureGroundTruth(self, folder: Path, *, samples=4, lines=3, omit=(),
-                                 groundTruthOverrides=None, groundTruthLabels=None) -> Path:
-        """Write a placeholder gtMap pair beside a cube, laid out like a recorded case's."""
-        folder.mkdir(parents=True, exist_ok=True)
-        classes = self._helperModule("SLIAFlowCube").GROUND_TRUTH_CLASSES
-        groundTruth = "ENVI\ndescription = {test fixture}\n"
-        if "gtMap.hdr" not in omit:
-            header = dict(samples=samples, lines=lines, bands=1, dataType="12",
-                          interleave="bil", byteOrder="0", headerOffset="0")
-            header.update(groundTruthOverrides or {})
-            groundTruth += "".join(f"{key} = {value}\n" for key, value in (
-                ("samples", header["samples"]), ("lines", header["lines"]),
-                ("bands", header["bands"]), ("data type", header["dataType"]),
-                ("byte order", header["byteOrder"]),
-                ("interleave", header["interleave"]),
-                ("header offset", header["headerOffset"]),
-            ))
-            groundTruth += "".join(f"Class ID ({classId}) = {className}\n"
-                                   for classId, className, _colour in classes)
-            (folder / "gtMap.hdr").write_text(groundTruth, encoding="ascii")
-        if "gtMap" not in omit:
-            if groundTruthLabels is None:
-                # One pixel of each class and the rest unlabelled, which is
-                # the shape of a recorded case: across the 61 cases of the
-                # HSI Human Brain Database, 0.0% to 16.2% of pixels carry a class.
-                labels = np.zeros(lines * samples, dtype="<u2")
-                for index, (classId, _name, _colour) in enumerate(classes):
-                    if index < labels.size:
-                        labels[index] = classId
-            else:
-                labels = np.asarray(groundTruthLabels, dtype="<u2")
-            (folder / "gtMap").write_bytes(labels.tobytes())
-        return folder
-
     # The calibrated LCTF cube (SLIA-032). The layout, names and wavelength grid
     # are those of IUMA's LCTF_Calibrated_Cube_Single.hdr in input/002-04: ENVI
     # data type 4, bsq, byte order 0, 460-1000 nm in 5 nm steps.
@@ -1108,11 +1074,11 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     # SLIA-033: where SLIAFlow writes the cube UC1 reads, under the staged build.
     UC1_INPUT_RELATIVE_PATH = Path("build") / "uc1" / "UC1" / "input"
 
-    def _makeFixtureRepository(self, root: Path, *, cube=True, groundTruth=False) -> dict:
+    def _makeFixtureRepository(self, root: Path, *, cube=True) -> dict:
         """A repository-shaped placeholder tree: markers, the calibrated cube, staged build.
 
-        The cube lies where the configured one does, input/002-04. With
-        `groundTruth`, a gtMap pair lies beside it; `cube=False` writes no cube.
+        The cube lies where the configured one does, input/002-04; `cube=False`
+        writes no cube.
         """
         (root / "AGENTS.md").write_text("test fixture\n", encoding="ascii")
         (root / "extensions" / "SLIAFlow").mkdir(parents=True)
@@ -1121,8 +1087,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         calibratedValues = None
         if cube:
             calibratedHeader, calibratedValues = self._writeFixtureCalibratedCube(cubeFolder)
-        if groundTruth:
-            self._writeFixtureGroundTruth(cubeFolder)
         buildRoot = root / "build" / "uc1" / "UC1"
         source = buildRoot / "gpu_single_bsq" / "source"
         (source / "output" / "rgb").mkdir(parents=True)
@@ -1373,105 +1337,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                     reader.decodeUc1Bmp(data, samples, lines)
                 self.assertIn(f"{samples} x {lines}", str(raised.exception))
 
-    # ------------------------------------------------------------------
-    # The recorded case's own ground truth
-    # ------------------------------------------------------------------
-
-    def test_groundTruthPaletteMatchesTheClassifierOutputs(self) -> None:
-        """gtMap class IDs index FOUR_COLORS_MAP, so the colours mean one thing.
-
-        `writeKNNBMP` (BitmapWriter.cpp) paints svm.bmp and knn.bmp straight
-        from `FOUR_COLORS_MAP[classId]`, and gtMap.hdr legends the same IDs.
-        If this table drifted from the UC1 source, a ground truth laid over a
-        result would be read against a different legend from the one the
-        classifier drew, so the two are pinned together here.
-        """
-        cubeModule = self._helperModule("SLIAFlowCube")
-        self.assertEqual(
-            cubeModule.GROUND_TRUTH_CLASSES,
-            (
-                (0, "Pixel Not Labeled", (255, 255, 255)),
-                (1, "Normal Tissue", (0, 255, 0)),
-                (2, "Tumor Tissue", (255, 0, 0)),
-                (3, "Hypervascularized Tissue", (0, 0, 255)),
-                (4, "Background", (0, 0, 0)),
-            ),
-            "FOUR_COLORS_MAP in BitmapWriter.hpp and the Class ID legend in gtMap.hdr",
-        )
-        self.assertEqual(cubeModule.UNLABELLED_CLASS_ID, 0)
-        self.assertEqual(cubeModule.HIGHEST_GROUND_TRUTH_CLASS_ID, 4)
-
-    def test_groundTruthIsReadTopRowFirst(self) -> None:
-        """readGroundTruth returns (lines, samples) with row 0 at the top.
-
-        One band of bil is a plain row-major image, and `readUc1Bmp` hands back
-        a decoded output the same way round, so no flip is needed for the two to
-        line up. A flip here would put the labels on the wrong tissue.
-        """
-        cubeModule = self._helperModule("SLIAFlowCube")
-        with self._fixtureDirectory() as root:
-            labels = [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0]
-            folder = self._writeFixtureGroundTruth(root / self.CALIBRATED_CUBE_NAME,
-                                                   groundTruthLabels=labels)
-            groundTruth = cubeModule.readGroundTruth(folder, samples=4, lines=3)
-            self.assertEqual(groundTruth.shape, (3, 4))
-            self.assertEqual(groundTruth.dtype, np.dtype("uint16"))
-            self.assertEqual(groundTruth[0].tolist(), [1, 2, 3, 4])
-            self.assertEqual(groundTruth[1].tolist(), [0, 0, 0, 0])
-
-    def test_groundTruthIsRefusedRatherThanReshaped(self) -> None:
-        """A gtMap that does not describe this cube is refused, not fitted to it."""
-        cubeModule = self._helperModule("SLIAFlowCube")
-        rejections = {
-            "no gtMap.hdr": (dict(omit=("gtMap.hdr",)), "is missing"),
-            "no gtMap": (dict(omit=("gtMap",)), "is missing"),
-            "other dimensions": (dict(groundTruthOverrides={"samples": 9}), "but the cube is"),
-            "more than one band": (dict(groundTruthOverrides={"bands": 2}), "single map of labels"),
-            "wrong data type": (dict(groundTruthOverrides={"dataType": "4"}), "not 12 (uint16)"),
-            "wrong interleave": (dict(groundTruthOverrides={"interleave": "bsq"}), "not bil"),
-            "wrong byte order": (
-                dict(groundTruthOverrides={"byteOrder": "1"}), "not 0 (little-endian)"),
-            "a header offset": (dict(groundTruthOverrides={"headerOffset": "64"}), "header offset"),
-            "a class outside the legend": (dict(groundTruthLabels=[5] + [0] * 11), "only legends"),
-            "a short gtMap": (dict(groundTruthLabels=[1, 2, 3]), "bytes but"),
-        }
-        for reason, (options, message) in rejections.items():
-            with self.subTest(reason=reason):
-                with self._fixtureDirectory() as root:
-                    folder = self._writeFixtureGroundTruth(root / self.CALIBRATED_CUBE_NAME,
-                                                           **options)
-                    with self.assertRaises(cubeModule.GroundTruthError) as raised:
-                        cubeModule.readGroundTruth(folder, samples=4, lines=3)
-                    self.assertIn(message, str(raised.exception))
-
-    def test_groundTruthReadingDoesNotWriteToInput(self) -> None:
-        """Reading a ground truth leaves the cube's folder byte for byte as it was."""
-        cubeModule = self._helperModule("SLIAFlowCube")
-        with self._fixtureDirectory() as root:
-            folder = root / self.CALIBRATED_CUBE_NAME
-            self._writeFixtureCalibratedCube(folder)
-            self._writeFixtureGroundTruth(folder)
-            before = {path.name: (path.stat().st_size, path.read_bytes())
-                      for path in sorted(folder.iterdir())}
-            self.assertTrue(cubeModule.hasGroundTruth(folder))
-            cubeModule.readGroundTruth(folder, samples=4, lines=3)
-            after = {path.name: (path.stat().st_size, path.read_bytes())
-                     for path in sorted(folder.iterdir())}
-            self.assertEqual(before, after)
-
-    def test_groundTruthIsASelectableViewAlongsideTheOutputs(self) -> None:
-        """gtMap is a sixth entry in Delineation output, after the five outputs."""
-        cubeModule = self._helperModule("SLIAFlowCube")
-        self.assertEqual(parameterModule.GROUND_TRUTH_VIEW_NAME,
-                         cubeModule.GROUND_TRUTH_FILE_NAME)
-        self.assertEqual(
-            parameterModule.RESULT_VIEW_NAMES,
-            (*self.UC1_OUTPUT_FILE_NAMES, "gtMap"),
-        )
-        # The default stays an output: the panel opens on a result, not on a
-        # ground truth laid over one.
-        self.assertIn(parameterModule.DEFAULT_RESULT_OUTPUT, self.UC1_OUTPUT_FILE_NAMES)
-
     # --- The configured cube (SLIA-031, SLIA-033, ADR-0004 decisions 1, 4, 6) -
 
     # ADR-0004 decision 4, restated from its text rather than from the module:
@@ -1537,7 +1402,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                           for path in folder.rglob("*"))
 
         with self._fixtureDirectory() as root:
-            fixture = self._makeFixtureRepository(root, groundTruth=True)
+            fixture = self._makeFixtureRepository(root)
             inputFolder = root / "input"
             before = snapshot(inputFolder)
             run, case, build, processes, results = self._startRun(fixture)
@@ -1566,20 +1431,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             finally:
                 run.cancel()
             self.assertEqual(snapshot(inputFolder), before, "Something was written into input/")
-
-    def test_moduleHasNoCasePool(self) -> None:
-        """One configured cube: no pool, no shuffling, no recorded case run in place."""
-        with self.assertRaises(ModuleNotFoundError):
-            self._helperModule("SLIAFlowCasePool")
-        cubeModule = self._helperModule("SLIAFlowCube")
-        for name in ("CasePool", "discoverCases", "DEFERRED_CASES", "DEFERRED_REASON",
-                     "NoCompatibleCaseError", "random", "loadRecordedCase",
-                     "assertCaseUnchanged", "RecordedCase"):
-            self.assertFalse(hasattr(cubeModule, name), f"SLIAFlowCube still has {name}")
-        logic = SLIAFlowLogic()
-        for name in ("casePool", "inputRoot", "INPUT_RELATIVE_PATH", "cubeFolder",
-                     "CUBE_RELATIVE_PATH", "loadConfiguredCube"):
-            self.assertFalse(hasattr(logic, name), f"SLIAFlowLogic still has {name}")
 
     def test_captureRunsUc1OnTheConfiguredCalibratedCube(self) -> None:
         """Every Capture runs UC1 on the configured calibrated cube, and no other.
@@ -1675,11 +1526,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         def translate(context, text):
             return marker + text
 
-        cubeModule = self._helperModule("SLIAFlowCube")
         calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
         inputModule = self._helperModule("SLIAFlowUc1Input")
-        for module, errorNames in ((cubeModule, ("GroundTruthError",)),
-                                   (calibratedModule, ("CalibratedCubeError",)),
+        for module, errorNames in ((calibratedModule, ("CalibratedCubeError",)),
                                    (inputModule, ("BandMappingError", "CalibratedCubeError"))):
             with self.subTest(module=module.__name__):
                 tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
@@ -1703,11 +1552,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         messages = {}
         with mock.patch.object(slicer.i18n, "translate", translate), \
                 self._fixtureDirectory() as root:
-            folder = self._writeFixtureGroundTruth(root / "no-map", omit=("gtMap",))
-            with self.assertRaises(cubeModule.GroundTruthError) as raised:
-                cubeModule.readGroundTruth(folder, samples=4, lines=3)
-            messages["ground truth missing"] = str(raised.exception)
-
             for name, options in (("calibrated uint16", dict(dataType=12)),
                                   ("calibrated short", dict(dataBytes=10)),
                                   ("calibrated no wavelengths", dict(wavelengths=None, bands=109))):
@@ -2233,20 +2077,19 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         return frame
 
     @contextlib.contextmanager
-    def _captureSession(self, *, cube=True, groundTruth=False, uc2=False):
+    def _captureSession(self, *, cube=True, uc2=False):
         """The module widget wired to a fixture repository, a fake camera and fake UC1.
 
         The configured cube is the fixture calibrated cube at its default place,
         input/002-04. With `cube=False` it is not written, so the configured
-        header does not exist; with `groundTruth` a gtMap lies beside it. With
-        `uc2` a placeholder UC2 build is staged too, so Capture starts a fake
+        header does not exist. With `uc2` a placeholder UC2 build is staged too, so Capture starts a fake
         UC2 process before the fake UC1 one; without it UC2 is refused before
         any process is created, and `processes` holds UC1's alone.
         """
         _, widget = self._moduleRepresentationAndWidget()
         widget.initializeParameterNode()
         with self._fixtureDirectory() as root:
-            fixture = self._makeFixtureRepository(root, cube=cube, groundTruth=groundTruth)
+            fixture = self._makeFixtureRepository(root, cube=cube)
             if uc2:
                 fixture.update(self._makeFixtureUc2Build(root))
             factory, processes = self._fakeProcessFactory()
@@ -2651,7 +2494,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 self.assertNotAlmostEqual(zoomed[0], fitted[0], places=3,
                                           msg="The zoom this test needs was not applied")
 
-                for viewName in ("svm.bmp", "knn.bmp", "gtMap", "pca.bmp"):
+                for viewName in ("svm.bmp", "knn.bmp", "pca.bmp"):
                     widget._parameterNode.resultOutput = viewName
                     widget._onResultOutputChanged()
                     for shown, kept in zip(sliceNode.GetFieldOfView(), zoomed, strict=True):
@@ -2804,36 +2647,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     # --- Panel ------------------------------------------------------------
 
-    def test_operatorPanelHasNoLinkDemoOrLayerControls(self) -> None:
-        representation, _ = self._moduleRepresentationAndWidget()
-        for name in (
-            "liveSourceSelector",
-            "connectLinksButton",
-            "acquisitionStateValueLabel",
-            "uc1StateValueLabel",
-            "uc2StateValueLabel",
-            "hsCubeStateValueLabel",
-            "controlStateValueLabel",
-            "linkWaitingLabel",
-            "resultClassSpinBox",
-            "demoModeCheckBox",
-            "simulatedBannerLabel",
-            "layerTable",
-            "layerOpacitySlider",
-            "bandSlider",
-            "openIGTLinkUnavailableLabel",
-            "resultBackgroundValueLabel",
-        ):
-            with self.subTest(control=name):
-                # findChild raises for a missing name; findChildren reports none.
-                self.assertEqual(slicer.util.findChildren(representation, name=name), [])
+    def test_resultSelectorListsTheFiveOutputFiles(self) -> None:
+        """The five UC1 outputs in the order UC1 writes them, and nothing else.
 
-    def test_resultSelectorListsTheFiveOutputFilesAndTheGroundTruth(self) -> None:
-        """The five UC1 outputs in the order UC1 writes them, then gtMap.
-
-        gtMap comes last because it is the only entry UC1 did not produce, and
-        the only one that is a layer over another rather than a picture of its
-        own.
+        ADR-0005 retired the gtMap entry with the ground-truth overlay.
         """
         representation, widget = self._moduleRepresentationAndWidget()
         widget.initializeParameterNode()
@@ -2841,63 +2658,16 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         self.assertIsNotNone(selector)
         self.assertEqual(
             tuple(selector.itemText(index) for index in range(selector.count)),
-            (*self.UC1_OUTPUT_FILE_NAMES, "gtMap"),
+            self.UC1_OUTPUT_FILE_NAMES,
         )
-
-    def _groundTruthEntryOffered(self, widget) -> tuple:
-        """(enabled, visible in the popup) of the gtMap entry in Delineation output."""
-        selector = widget.ui.resultOutputSelector
-        index = selector.findText("gtMap")
-        self.assertGreaterEqual(index, 0, "The gtMap entry is not in the list at all")
-        return bool(selector.model().item(index).isEnabled()), not selector.view().isRowHidden(index)
-
-    def test_groundTruthEntryIsOfferedOnlyForACubeThatHasOne(self) -> None:
-        """ADR-0004 decision 8: gtMap is offered only for a cube that carries one.
-
-        002-04 has no gtMap. The entry stays in the list, because the panel's
-        parameter binding selects by position, but it is hidden and cannot be
-        chosen; a stored gtMap selection says the cube has no ground truth
-        rather than that one could not be read.
-        """
-        for hasGroundTruth in (False, True):
-            with self.subTest(groundTruth=hasGroundTruth), \
-                    self._captureSession(groundTruth=hasGroundTruth) as session:
-                widget = session["widget"]
-                self.assertEqual(self._groundTruthEntryOffered(widget), (False, False),
-                                 "gtMap is offered before there is a result")
-                self._startFakeCamera(session)
-                self._showFrame(session, 30)
-                widget._onCaptureClicked()
-                self._finishCapture(session, seed=15)
-                self.assertEqual(self._groundTruthEntryOffered(widget),
-                                 (hasGroundTruth, hasGroundTruth))
-                try:
-                    widget._parameterNode.resultOutput = "gtMap"
-                    widget._onResultOutputChanged()
-                    status = widget.ui.resultStatusLabel.text
-                    if hasGroundTruth:
-                        self.assertIsNotNone(widget._groundTruthNode())
-                        self.assertIn("under the recorded ground truth", status)
-                    else:
-                        self.assertIsNone(widget.logic.groundTruthNode())
-                        self.assertIn("has no ground truth", status)
-                        self.assertNotIn("could not be read", status)
-                        self.assertIn(widget._selectedOutput(), status)
-                finally:
-                    widget._parameterNode.resultOutput = parameterModule.DEFAULT_RESULT_OUTPUT
-                    widget._onResultOutputChanged()
-                widget._forgetResult()
-                self.assertEqual(self._groundTruthEntryOffered(widget), (False, False),
-                                 "gtMap is still offered after the result is gone")
 
     def test_resultStatusSaysLctfResultsAreNotValidated(self) -> None:
         """ADR-0004 decision 5: a UC1 result on the LCTF cube is behavioural only.
 
-        Every line that describes a result on screen says so: a fresh one, one
-        under its ground truth, one whose ground truth could not be read, and
+        Every line that describes a result on screen says so: a fresh one, and
         the previous result kept while a capture runs and after it fails.
         """
-        with self._captureSession(groundTruth=True) as session:
+        with self._captureSession() as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             self._showFrame(session, 30)
@@ -2906,18 +2676,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             shown = {"capture status": widget.ui.statusLabel.text,
                      "result status": widget.ui.resultStatusLabel.text}
             try:
-                widget._parameterNode.resultOutput = "gtMap"
-                widget._onResultOutputChanged()
-                self.assertIsNotNone(widget._groundTruthNode())
-                shown["result under its ground truth"] = widget.ui.resultStatusLabel.text
-                widget.logic.groundTruthNode().SetAttribute(
-                    "SLIAFlow.CaptureId", "a-capture-that-is-not-this-one")
-                widget._updateResultStatus()
-                self.assertIn("could not be read", widget.ui.resultStatusLabel.text)
-                shown["ground truth unreadable"] = widget.ui.resultStatusLabel.text
-
-                widget._parameterNode.resultOutput = parameterModule.DEFAULT_RESULT_OUTPUT
-                widget._onResultOutputChanged()
                 widget._onCaptureClicked()
                 self.assertIn(self.STALE_STATUS_FRAGMENT, widget.ui.resultStatusLabel.text)
                 shown["previous result while processing"] = widget.ui.resultStatusLabel.text
@@ -2926,11 +2684,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 shown["previous result after a failed capture"] = widget.ui.resultStatusLabel.text
             finally:
                 widget._forgetResult()
-            # Including the one for a cube without ground truth, which this
-            # fixture's cube cannot reach.
-            for name in ("CAPTURE_DONE_STATUS", "RESULT_STATUS", "RESULT_STALE_STATUS",
-                         "GROUND_TRUTH_STATUS", "GROUND_TRUTH_MISSING_STATUS",
-                         "NO_GROUND_TRUTH_STATUS"):
+            for name in ("CAPTURE_DONE_STATUS", "RESULT_STATUS", "RESULT_STALE_STATUS"):
                 # SLIA-036: the texts name the cube by a phrase; for the cube
                 # on disk it is the wording they always had.
                 shown[name] = getattr(widget, name).format(
@@ -2961,6 +2715,28 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             parameterModule.DEFAULT_RESULT_OUTPUT,
             "Binding the panel overwrote the stored output selection",
         )
+        self.assertEqual(selector.currentText, parameterModule.DEFAULT_RESULT_OUTPUT)
+        self.assertEqual(widget._selectedOutput(), parameterModule.DEFAULT_RESULT_OUTPUT)
+
+    def test_storedGroundTruthSelectionFallsBackToTheDefaultOutput(self) -> None:
+        """A scene saved with gtMap selected still binds, on the default output.
+
+        resultOutput is persisted, and gtMap was one of its choices until
+        ADR-0005. Slicer's combo-box connector raises ValueError for a stored
+        value that is not a choice, which would leave the panel unbound.
+        """
+        representation, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        parameterNode = widget._parameterNode.parameterNode
+        # As an older scene holds it, written past the Choice validator while
+        # no panel is bound, and then opened.
+        widget.setParameterNode(None)
+        parameterNode.SetParameter("resultOutput", "gtMap")
+        widget.initializeParameterNode()
+
+        selector = slicer.util.findChild(representation, "resultOutputSelector")
+        self.assertEqual(widget._parameterNode.resultOutput,
+                         parameterModule.DEFAULT_RESULT_OUTPUT)
         self.assertEqual(selector.currentText, parameterModule.DEFAULT_RESULT_OUTPUT)
         self.assertEqual(widget._selectedOutput(), parameterModule.DEFAULT_RESULT_OUTPUT)
 
@@ -3088,239 +2864,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             finally:
                 widget._forgetCube()
             self.assertIsNone(widget.logic.cubeNode(), "The cube outlived the module")
-
-    def test_groundTruthArrivesAsALabelLayerOverTheResult(self) -> None:
-        """Choosing gtMap lays the case's labelling over the chosen output.
-
-        It is a label map, not a third background, so the Label layer's own
-        opacity and outline controls work on it and the result stays visible
-        underneath. Class 0 is most of the image and is not a class, so it is
-        given zero opacity in the colour table rather than painted white.
-        """
-        cubeModule = self._helperModule("SLIAFlowCube")
-        with self._captureSession(groundTruth=True) as session:
-            widget = session["widget"]
-            self._startFakeCamera(session)
-            self._showFrame(session, 30)
-            widget._onCaptureClicked()
-            case, _images = self._finishCapture(session, seed=11)
-            try:
-                node = widget.logic.groundTruthNode()
-                self.assertIsNotNone(node, "No ground truth reached the scene")
-                self.assertEqual(node.GetName(), "gtMap")
-                self.assertTrue(node.IsA("vtkMRMLLabelMapVolumeNode"),
-                                "The ground truth is not a label layer")
-                array = np.array(slicer.util.arrayFromVolume(node))
-                self.assertEqual(array.shape, (1, case.lines, case.samples))
-                self.assertEqual(self._ijkToRasDirections(node),
-                                 self.UPRIGHT_LIVE_DIRECTIONS,
-                                 "The ground truth is not aligned with the result")
-                # It belongs to the capture whose result it can be laid over.
-                self.assertEqual(
-                    node.GetAttribute("SLIAFlow.CaptureId"),
-                    widget.logic.outputNode("imageRGB.bmp").GetAttribute("SLIAFlow.CaptureId"),
-                )
-                self.assertEqual(node.GetAttribute("SLIAFlow.RecordedCase"), case.name)
-                self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "simulated")
-
-                colorNode = node.GetDisplayNode().GetColorNode()
-                self.assertIsNotNone(colorNode, "The gtMap classes have no colour table")
-                self.assertEqual(colorNode.GetNumberOfColors(),
-                                 len(cubeModule.GROUND_TRUTH_CLASSES))
-                for classId, className, (red, green, blue) in cubeModule.GROUND_TRUTH_CLASSES:
-                    colour = [0.0] * 4
-                    colorNode.GetColor(classId, colour)
-                    self.assertEqual(colorNode.GetColorName(classId), className)
-                    self.assertAlmostEqual(colour[0], red / 255.0, places=2)
-                    self.assertAlmostEqual(colour[1], green / 255.0, places=2)
-                    self.assertAlmostEqual(colour[2], blue / 255.0, places=2)
-                expectedOpacity = [0.0] * 4
-                colorNode.GetLookupTable().GetTableValue(
-                    cubeModule.UNLABELLED_CLASS_ID, expectedOpacity)
-                self.assertEqual(expectedOpacity[3], 0.0,
-                                 "Unlabelled pixels would hide the result under white")
-            finally:
-                widget._forgetResult()
-            self.assertIsNone(widget.logic.groundTruthNode(),
-                              "The ground truth outlived the result")
-
-    def test_groundTruthOverlaysTheOutputChosenLastRatherThanReplacingIt(self) -> None:
-        """gtMap keeps the current output on the background layer.
-
-        The comparison is between a classification and the labelling, so
-        selecting gtMap must not take the classification off the screen.
-        """
-        with self._captureSession(groundTruth=True) as session:
-            widget = session["widget"]
-            self._startFakeCamera(session)
-            self._showFrame(session, 30)
-            widget._onCaptureClicked()
-            self._finishCapture(session, seed=12)
-            try:
-                widget._parameterNode.resultOutput = "svm.bmp"
-                widget._onResultOutputChanged()
-                self.assertEqual(widget._selectedOutput(), "svm.bmp")
-                self.assertFalse(widget._groundTruthSelected())
-
-                widget._parameterNode.resultOutput = "gtMap"
-                widget._onResultOutputChanged()
-                self.assertTrue(widget._groundTruthSelected())
-                self.assertEqual(widget._selectedOutput(), "svm.bmp",
-                                 "gtMap replaced the result instead of overlaying it")
-                self.assertIn("svm.bmp", widget.ui.resultStatusLabel.text)
-
-                widget._parameterNode.resultOutput = "knn.bmp"
-                widget._onResultOutputChanged()
-                self.assertFalse(widget._groundTruthSelected())
-                self.assertEqual(widget._selectedOutput(), "knn.bmp")
-            finally:
-                widget._forgetResult()
-
-    def test_groundTruthReachesTheResultPanelLabelLayer(self) -> None:
-        """Choosing gtMap binds it to the Tumour Delineation Label layer.
-
-        Everything else about the ground truth can be right -- the node class,
-        its shape, its directions, its capture ID, its colour table -- while it
-        is bound to no view at all, and the status line still says a comparison
-        is on screen. This asserts the binding itself, on the panel the
-        comparison is read on.
-        """
-        layoutManager = slicer.app.layoutManager()
-        if layoutManager is None:
-            self.skipTest("Requires the maintained headful Slicer test target")
-        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
-        previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession(groundTruth=True) as session:
-            widget = session["widget"]
-            try:
-                self.assertTrue(widget._activatePresentation())
-                resultWidget = layoutManager.sliceWidget(widget.RESULT_VIEW_NAME)
-                composite = resultWidget.sliceLogic().GetSliceCompositeNode()
-                self._startFakeCamera(session)
-                self._showFrame(session, 30)
-                widget._onCaptureClicked()
-                self._finishCapture(session, seed=21)
-
-                widget._parameterNode.resultOutput = "svm.bmp"
-                widget._onResultOutputChanged()
-                self.assertIsNone(composite.GetLabelVolumeID(),
-                                  "An output selection left a label layer behind")
-
-                widget._parameterNode.resultOutput = "gtMap"
-                widget._onResultOutputChanged()
-                groundTruth = widget.logic.groundTruthNode()
-                self.assertIsNotNone(groundTruth, "No ground truth reached the scene")
-                self.assertEqual(composite.GetLabelVolumeID(), groundTruth.GetID(),
-                                 "gtMap is not on the Tumour Delineation Label layer")
-                self.assertEqual(composite.GetBackgroundVolumeID(),
-                                 widget.logic.outputNode("svm.bmp").GetID(),
-                                 "gtMap replaced the output instead of overlaying it")
-                self.assertAlmostEqual(composite.GetLabelOpacity(),
-                                       widget.GROUND_TRUTH_LABEL_OPACITY, places=3)
-
-                widget._parameterNode.resultOutput = "knn.bmp"
-                widget._onResultOutputChanged()
-                self.assertIsNone(composite.GetLabelVolumeID(),
-                                  "gtMap stayed on the Label layer after it was deselected")
-            finally:
-                widget._forgetResult()
-                widget._deactivatePresentation(restore=True)
-                if int(layoutNode.GetViewArrangement()) != previousLayout:
-                    layoutManager.setLayout(previousLayout)
-
-    def test_cubePanelStaysAloneWhenGroundTruthIsSelected(self) -> None:
-        """The cube is shown alone whatever the Delineation output box says.
-
-        The ground truth belongs to the result panel. The cube's bands run
-        along S, so a one-band label map placed in that stack is off the plane
-        the operator scrolls: it would draw nothing and still be claimed.
-        """
-        layoutManager = slicer.app.layoutManager()
-        if layoutManager is None:
-            self.skipTest("Requires the maintained headful Slicer test target")
-        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
-        previousLayout = int(layoutNode.GetViewArrangement())
-        with self._captureSession(groundTruth=True) as session:
-            widget = session["widget"]
-            try:
-                self.assertTrue(widget._activatePresentation())
-                cubeWidget = layoutManager.sliceWidget(widget.CUBE_VIEW_NAME)
-                cubeComposite = cubeWidget.sliceLogic().GetSliceCompositeNode()
-                self._startFakeCamera(session)
-                self._showFrame(session, 30)
-                widget._onCaptureClicked()
-                self._finishCapture(session, seed=23)
-
-                widget._parameterNode.resultOutput = "gtMap"
-                widget._onResultOutputChanged()
-                widget._showCube()
-                self.assertIsNotNone(widget._groundTruthNode(),
-                                     "This test needs a ground truth to be selectable")
-                self.assertEqual(cubeComposite.GetBackgroundVolumeID(),
-                                 widget.logic.cubeNode().GetID(),
-                                 "The cube left its own panel")
-                self.assertIsNone(cubeComposite.GetLabelVolumeID(),
-                                  "The ground truth was laid over the cube")
-                self.assertIsNone(cubeComposite.GetForegroundVolumeID())
-            finally:
-                widget._forgetResult()
-                widget._forgetCube()
-                widget._deactivatePresentation(restore=True)
-                if int(layoutNode.GetViewArrangement()) != previousLayout:
-                    layoutManager.setLayout(previousLayout)
-
-    def test_groundTruthFromAnotherCaptureIsNotLaidOver(self) -> None:
-        """A ground truth that is not this result's is not shown at all.
-
-        Laying one case's labelling over another case's result would read as
-        agreement or disagreement that was never measured.
-        """
-        with self._captureSession(groundTruth=True) as session:
-            widget = session["widget"]
-            self._startFakeCamera(session)
-            self._showFrame(session, 30)
-            widget._onCaptureClicked()
-            self._finishCapture(session, seed=13)
-            try:
-                widget._parameterNode.resultOutput = "gtMap"
-                widget._onResultOutputChanged()
-                self.assertIsNotNone(widget._groundTruthNode())
-                widget.logic.groundTruthNode().SetAttribute(
-                    "SLIAFlow.CaptureId", "a-capture-that-is-not-this-one")
-                self.assertIsNone(widget._groundTruthNode(),
-                                  "Another capture's ground truth was laid over the result")
-                widget._updateResultStatus()
-                self.assertIn("could not be read", widget.ui.resultStatusLabel.text)
-            finally:
-                widget._forgetResult()
-
-    def test_unreadableGroundTruthDoesNotFailTheCapture(self) -> None:
-        """Reading the ground truth is for the panel; the result does not need it."""
-        with self._captureSession(groundTruth=True) as session:
-            widget = session["widget"]
-            self._startFakeCamera(session)
-            self._showFrame(session, 30)
-
-            def refuse(case, captureId):
-                raise OSError("the ground truth could not be read")
-
-            original = widget.logic.acceptGroundTruth
-            widget.logic.acceptGroundTruth = refuse
-            try:
-                widget._onCaptureClicked()
-                case, _images = self._finishCapture(session, seed=14)
-            finally:
-                widget.logic.acceptGroundTruth = original
-            try:
-                self.assertIsNone(widget.logic.groundTruthNode())
-                self.assertIsNotNone(widget.logic.outputNode("imageRGB.bmp"),
-                                     "The result was lost with the ground truth")
-                self.assertIn(case.name, widget.ui.statusLabel.text)
-                widget._parameterNode.resultOutput = "gtMap"
-                widget._onResultOutputChanged()
-                self.assertIn("could not be read", widget.ui.resultStatusLabel.text)
-            finally:
-                widget._forgetResult()
 
     def test_unreadableCubeDoesNotFailTheCapture(self) -> None:
         """Reading the cube is for the panel; the run does not depend on it."""

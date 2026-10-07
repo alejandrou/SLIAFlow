@@ -7,7 +7,7 @@ accepted: 2026-09-17
 amended: 2026-09-18 (decision 3, ground-truth label overlay)
 related_tasks: SLIA-027, SLIA-028, SLIA-029, SLIA-030, SLIA-021
 supersedes: ADR-0001 (rules 1-3, demo-mode opt-in, genuine-over-simulated precedence), ADR-0002 (in full)
-superseded_in_part_by: ADR-0004
+superseded_in_part_by: ADR-0004, ADR-0005
 ---
 
 # ADR-0003 - Run capture and UC1 inside Slicer, and show its outputs standalone
@@ -20,6 +20,11 @@ Accepted by the project owner on 2026-09-17, during the specification of
 Superseded in part by `ADR-0004` on 2026-09-24, accepted during the
 specification of `SLIA-031`: the case pool of decision 1, decision 2 for
 external acquisition, and the input validation of decision 5. The rest stands.
+
+Superseded in part by `ADR-0005` on 2026-10-07, accepted during the
+specification of `SLIA-039`: the 2026-09-18 amendment of decision 3 is
+withdrawn with the ground-truth overlay, so decision 3 reads as it did before
+it.
 
 Proposed the same day, from decisions the project owner made after a
 Slicer-skill review of the task's first draft.

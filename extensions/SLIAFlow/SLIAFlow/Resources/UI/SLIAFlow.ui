@@ -114,7 +114,7 @@
          <bool>false</bool>
         </property>
         <property name="toolTip">
-         <string>Select what the Tumour Delineation panel shows. Each UC1 output is shown on its own, as UC1 wrote it. gtMap is the recorded case&apos;s own labelling from the HSI Human Brain Database, drawn over the output chosen last: green normal tissue, red tumour, blue hypervascularised, black background, unlabelled pixels left clear. svm.bmp and knn.bmp use those same colours, so they can be read against it directly.</string>
+         <string>Select what the Tumour Delineation panel shows. Each UC1 output is shown on its own, as UC1 wrote it. svm.bmp and knn.bmp paint each pixel with its class: green normal tissue, red tumour, blue hypervascularised, black background. kmeans.bmp colours clusters with no fixed meaning, and pca.bmp is not a classification.</string>
         </property>
         <property name="SlicerParameterName" stdset="0">
          <string>resultOutput</string>
