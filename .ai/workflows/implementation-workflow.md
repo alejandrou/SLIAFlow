@@ -45,6 +45,12 @@ All three must be accounted for before reporting the task as implemented.
    .\scripts\development\run-slicer-tests.ps1
    ```
 
+   This is the full headless run. Add the full `-Headful` run when the task
+   touches the layout, the panels or rendering, and run `-Target Build -Headful`
+   after a rebuild before manual verification. See "Which runs are needed
+   when" in `docs/development/testing_strategy.md`. A `-Test` partial run does
+   not count for this check.
+
 3. The manual steps in the task card, performed in a real Slicer window by the
    project owner. Codex prepares and reports them; it does not mark them done.
 

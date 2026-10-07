@@ -110,11 +110,15 @@ run continues, and any failure or error fails the button.
 `SLIAFlowTest.test_reloadAndTestRunsPastSkippedTests` guards this. Keep the
 override; do not replace it with a hand-written loop.
 
-The command-line runner reports one test more than `SLIAFlowTest` defines.
-Slicer requires `ScriptedLoadableModuleTest` to be imported into the module
-namespace, so `unittest` discovers the imported base class as well and runs its
-inherited `runTest`, which finds no test names and returns. It is expected and
-always passes; only the `SLIAFlowTest.test_*` entries are project coverage.
+The command-line runner loads every `TestCase` in the `SLIAFlow` module
+namespace, which is only `SLIAFlowTest`, so a full run reports the same count as
+`Reload and Test`. `SLIAFlow.py` used to import `ScriptedLoadableModuleTest`,
+and the runner then ran that base class's empty `runTest` as one extra test; it
+no longer does.
+
+A run with `-Test` (below) selects from `SLIAFlowTest` alone. That selection is
+written into the runner's `--python-code` and nowhere else, so `Reload and
+Test` and a normal Slicer session always run every test.
 
 ## Test location
 
@@ -174,6 +178,56 @@ The headful run must report the layout lifecycle, layout restore, waiting
 annotation, and simulated-banner tests as passed rather than skipped. It is also
 the automated precursor to visual manual verification; it does not replace the
 human legibility check.
+
+### Selected tests
+
+While working on one area, run only its tests:
+
+```powershell
+.\scripts\development\run-slicer-tests.ps1 -Test receivedCube,Connections
+```
+
+`-Test` runs the `SLIAFlowTest` methods whose names contain any of the
+comma-separated fragments, case-sensitively, in the order of a full run. It
+works with `-Headful` and `-Target Build`.
+
+- A fragment that matches no test fails the run before any test runs and names
+  that fragment, so a typo never gives a green run of fewer tests.
+- A partial run prints `Partial run: N of M SLIAFlowTest tests matching ...`
+  before its first test and as the last line of the output. A partial run is
+  never evidence that the suite passes.
+
+### Live output and the timeout
+
+The runner prints Slicer's output as it is written. Before each test body runs,
+`Started: <test id>` appears on its own line. unittest's own `test_x ... ok`
+line is completed only once the test has finished.
+
+`-TimeoutSeconds` (default 900) bounds a run, including the wait for Slicer to
+exit after its output has closed. When it expires, the runner prints
+`TIMEOUT after <s> s. Last test started: <test id>`, stops Slicer and every
+process Slicer started, such as the stand-in for IUMA's app, and exits 1.
+
+The same stop runs whenever the run ends: on a timeout, on Ctrl+C, and after
+Slicer exits, so a process Slicer left running is stopped and named in a
+`Stopped N processes this run started: ...` line. The runner warns if any of
+them is still running afterwards.
+
+It never stops a process that the run did not start. Every 2 seconds it lists
+the processes descended from Slicer and holds each one open, so Windows cannot
+give that process ID to another process while the run refers to it. A process
+counts as a child only if it was created no earlier than its listed parent, and
+its start time is checked again when it is opened.
+
+### Which runs are needed when
+
+Decided by the project owner on 2026-10-07 (`SLIA-038`):
+
+| When | Run |
+| --- | --- |
+| While implementing | Headless, with `-Test` as wanted |
+| Before reporting a task implemented | The full headless run. Add the full `-Headful` run when the task touches the layout, the panels or rendering |
+| Before manual verification | Rebuild with `build-sliaflow.ps1`, then `-Target Build -Headful` |
 
 ### Automated tests against the compiled extension
 

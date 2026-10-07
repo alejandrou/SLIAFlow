@@ -82,10 +82,9 @@ band-count test, moved to `SLIA-036`, which rewrites those tests.
      `assertPortCanBeServed`, the README paragraph, and the tests that pass
      `allowSharedPort=True`. Keep the tests for occupied-port refusal and
      client reconnection.
-   - Keep the ground-truth, camera, BMP, UC1 and UC2 failure-path and 93-band
-     mapping tests. They protect supported behaviour. Ground-truth tests that
-     look similar check different layers: selection, MRML data and view
-     binding.
+   - Keep the camera, BMP, UC1 and UC2 failure-path and 93-band mapping
+     tests. They protect supported behaviour. The ground-truth tests go with
+     the overlay in `SLIA-039`.
 
 ## Out of scope
 
