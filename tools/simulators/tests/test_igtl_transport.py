@@ -125,6 +125,61 @@ class ImageMessageShapeTest(unittest.TestCase):
         )
 
 
+class ImageSlabMessageTest(unittest.TestCase):
+    """One band sent as IUMA's app sends it (acquisition_app_and_hardware.md 4.1).
+
+    Read back with the recorder's parser, which read the real app's stream.
+    """
+
+    BANDS = 5
+
+    def _describe(self, message):
+        from stratum_sim import igtl_recorder
+
+        packed = message.pack()
+        header = igtl_recorder.parseHeader(packed[:igtl_recorder.HEADER_SIZE])
+        return igtl_recorder.describeMessage(header, packed[igtl_recorder.HEADER_SIZE:])
+
+    def test_imageSlabMessageParsesInRecorder(self):
+        for dtype, headerVersion, sentMetadata in (
+                (numpy.uint16, 1, {}),
+                (numpy.float32, 2, {contract.METADATA_BAND_NUMBER_KEY: "3"})):
+            with self.subTest(dtype=numpy.dtype(dtype).name, headerVersion=headerVersion):
+                cube = (numpy.arange(self.BANDS * TEST_LINES * TEST_SAMPLES)
+                        .reshape(self.BANDS, TEST_LINES, TEST_SAMPLES).astype(dtype))
+                message = igtl_transport.buildImageSlabMessage(
+                    cube[2], bandCount=self.BANDS, bandIndex=2, deviceName="HsCube",
+                    metadata=sentMetadata, headerVersion=headerVersion, timestamp=0.0)
+                record, pixels = self._describe(message)
+                self.assertTrue(record["crcMatches"])
+                self.assertEqual(record["headerVersion"], headerVersion)
+                self.assertEqual(record["timestamp"], 0)
+                self.assertEqual(record["metadata"], sentMetadata)
+                image = record["image"]
+                self.assertEqual(image["size"], [TEST_SAMPLES, TEST_LINES, self.BANDS])
+                self.assertEqual(image["subvolumeOffset"], [0, 0, 2])
+                self.assertEqual(image["subvolumeSize"], [TEST_SAMPLES, TEST_LINES, 1])
+                self.assertEqual(image["scalarType"], numpy.dtype(dtype).name)
+                self.assertEqual(image["components"], 1)
+                self.assertEqual(image["coordinateSystem"], "LPS")
+                numpy.testing.assert_allclose(image["spacing"], [1.0, 1.0, 1.0])
+                numpy.testing.assert_array_equal(pixels, cube[2])
+
+    def test_metadataIsNotDroppedSilentlyAtHeaderVersion1(self):
+        band = numpy.zeros((TEST_LINES, TEST_SAMPLES), dtype=numpy.uint16)
+        with self.assertRaises(ValueError):
+            igtl_transport.buildImageSlabMessage(
+                band, bandCount=2, bandIndex=0, deviceName="HsCube",
+                metadata={contract.METADATA_BAND_NUMBER_KEY: "1"}, headerVersion=1)
+
+    def test_bandOutsideTheCubeIsRefused(self):
+        band = numpy.zeros((TEST_LINES, TEST_SAMPLES), dtype=numpy.uint16)
+        for bandIndex in (-1, 2):
+            with self.subTest(bandIndex=bandIndex), self.assertRaises(ValueError):
+                igtl_transport.buildImageSlabMessage(
+                    band, bandCount=2, bandIndex=bandIndex, deviceName="HsCube", metadata={})
+
+
 class DependencyConsistencyTest(unittest.TestCase):
 
     def test_installedPyigtlMatchesTheSimulatorManifest(self):

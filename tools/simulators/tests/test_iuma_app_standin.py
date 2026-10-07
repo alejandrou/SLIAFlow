@@ -1,10 +1,11 @@
-"""Tests for the stand-in for IUMA's acquisition app (SLIA-035).
+"""Tests for the stand-in for IUMA's acquisition app (SLIA-035, SLIA-036).
 
-Every cube here is a test fixture: a few float32 values in a temporary folder
-that stand for no imagery. The messages are read off a raw socket rather than
-through `pyigtl.OpenIGTLinkClient`, which keeps only the latest message per
-device name and would hide exactly the dropped or doubled bands these tests
-look for.
+Every cube here is a test fixture: a few float32 or uint16 values in a
+temporary folder that stand for no imagery. The messages are read off a raw
+socket rather than through `pyigtl.OpenIGTLinkClient`, which keeps only the
+latest message per device name and would hide exactly the dropped or doubled
+bands these tests look for. HsCube messages are described by the recorder's
+parser: pyigtl refuses to unpack a sub-volume, which is how the app sends a band.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from pathlib import Path
 import numpy
 import pyigtl
 
-from stratum_sim import contract, igtl_transport, iuma_app_standin
+from stratum_sim import contract, igtl_recorder, igtl_transport, iuma_app_standin
 
 SIMULATORS_ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,11 +36,18 @@ FIXTURE_LINES = 3
 FIXTURE_WAVELENGTHS = (460.0, 465.0, 470.0, 475.0, 480.0)
 
 
+# ENVI data types: 4 is float32 (IUMA's calibrated cube), 12 is uint16 (its raw
+# cube), 2 is int16 (neither).
+_ENVI_DTYPES = {4: "<f4", 12: "<u2", 2: "<i2"}
+
+
 def writeFixtureCube(folder: Path, *, dataType: int = 4, name: str = "cube") -> tuple[Path, numpy.ndarray]:
     """Write a small ENVI BSQ cube and return its header and its (bands, lines, samples) values."""
     bands = len(FIXTURE_WAVELENGTHS)
-    values = (numpy.arange(bands * FIXTURE_LINES * FIXTURE_SAMPLES, dtype=numpy.float32)
-              .reshape(bands, FIXTURE_LINES, FIXTURE_SAMPLES) / 100.0)
+    counts = numpy.arange(bands * FIXTURE_LINES * FIXTURE_SAMPLES).reshape(
+        bands, FIXTURE_LINES, FIXTURE_SAMPLES)
+    dtype = numpy.dtype(_ENVI_DTYPES[dataType])
+    values = (counts / 100.0).astype(dtype) if dtype.kind == "f" else (counts * 7).astype(dtype)
     header = folder / f"{name}.hdr"
     header.write_text(
         "ENVI\n"
@@ -49,7 +57,7 @@ def writeFixtureCube(folder: Path, *, dataType: int = 4, name: str = "cube") -> 
         "wavelength = {" + ", ".join(f"{value:g}" for value in FIXTURE_WAVELENGTHS) + "}\n",
         encoding="ascii",
     )
-    values.astype("<f4").tofile(folder / f"{name}.dat")
+    values.tofile(folder / f"{name}.dat")
     return header, values
 
 
@@ -108,6 +116,37 @@ def receiveMessages(port: int, count: int, timeoutSec: float = 10.0) -> list:
     return messages
 
 
+def receiveRecords(port: int, count: int, timeoutSec: float = 10.0) -> list:
+    """Read `count` whole messages off the port and describe each with the recorder.
+
+    Returns (record, pixels) pairs in arrival order.
+    """
+    deadline = time.monotonic() + timeoutSec
+    records = []
+    with socket.create_connection(("127.0.0.1", port), timeout=timeoutSec) as stream:
+        stream.settimeout(0.5)
+
+        def receiveExactly(size: int) -> bytes:
+            data = bytearray()
+            while len(data) < size:
+                if time.monotonic() > deadline:
+                    raise AssertionError(
+                        f"Timed out on port {port} after {len(records)} of {count} messages.")
+                try:
+                    chunk = stream.recv(size - len(data))
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    raise AssertionError(f"Port {port} closed after {len(records)} messages.")
+                data += chunk
+            return bytes(data)
+
+        while len(records) < count:
+            header = igtl_recorder.parseHeader(receiveExactly(igtl_recorder.HEADER_SIZE))
+            records.append(igtl_recorder.describeMessage(header, receiveExactly(header["bodySize"])))
+    return records
+
+
 class CubeReaderTest(unittest.TestCase):
 
     def test_readsAFloat32BsqCubeAsStored(self):
@@ -119,9 +158,17 @@ class CubeReaderTest(unittest.TestCase):
             self.assertEqual(cube.wavelengths, FIXTURE_WAVELENGTHS)
             self.assertEqual(cube.name, Path(folder).name)
 
-    def test_refusesACubeThatIsNotFloat32(self):
+    def test_readsAUint16BsqCubeAsStored(self):
+        """The app's raw cube is uint16 (acquisition_app_and_hardware.md 4.1)."""
         with tempfile.TemporaryDirectory() as folder:
-            header, _values = writeFixtureCube(Path(folder), dataType=12)
+            header, values = writeFixtureCube(Path(folder), dataType=12)
+            cube = iuma_app_standin.readCube(header)
+            self.assertEqual(cube.bands.dtype, numpy.dtype("<u2"))
+            numpy.testing.assert_array_equal(numpy.asarray(cube.bands), values)
+
+    def test_refusesACubeThatIsNeitherFloat32NorUint16(self):
+        with tempfile.TemporaryDirectory() as folder:
+            header, _values = writeFixtureCube(Path(folder), dataType=2)
             with self.assertRaises(iuma_app_standin.CubeError) as raised:
                 iuma_app_standin.readCube(header)
             self.assertIn("data type", str(raised.exception))
@@ -169,22 +216,35 @@ class StandInWireTest(unittest.TestCase):
         self.standIn.stop()
         self._folder.cleanup()
 
-    def test_theCubeIsSentBandByBandWithoutTheDroppedBands(self):
-        messages = receiveMessages(self.basePort + 2, count=4)
-        self.assertEqual({message.device_name for message in messages}, {APP_DEVICE_NAMES[2]})
-        bandNumbers = [int(message.metadata[contract.METADATA_BAND_NUMBER_KEY]) for message in messages]
-        self.assertEqual(bandNumbers, [1, 2, 4, 5])
-        for message, bandNumber in zip(messages, bandNumbers, strict=True):
-            with self.subTest(band=bandNumber):
-                self.assertIsInstance(message, pyigtl.ImageMessage)
-                self.assertEqual(message.image.dtype, numpy.float32)
-                # pyigtl's (k, j, i): one slice of lines x samples, one component.
-                self.assertEqual(message.image.shape, (1, FIXTURE_LINES, FIXTURE_SAMPLES))
-                numpy.testing.assert_array_equal(message.image[0], self.values[bandNumber - 1])
-                self.assertEqual(float(message.metadata[contract.METADATA_WAVELENGTH_KEY]),
-                                 FIXTURE_WAVELENGTHS[bandNumber - 1])
-                self.assertEqual(message.metadata[contract.METADATA_DATA_ORIGIN_KEY], "simulated")
-                self.assertIn("stand-in", message.metadata[contract.METADATA_SIMULATION_DETAIL_KEY])
+    def test_hsCubeSendsWholeCubeSubVolumes(self):
+        """Each band as the app sends it: the whole cube declared, the band at its offset.
+
+        The app's form is measured (acquisition_app_and_hardware.md 4.1). By
+        default the stand-in also sends header version 2 with its metadata, so
+        that its data stays marked simulated.
+        """
+        records = receiveRecords(self.basePort + 2, count=4)
+        bands = len(FIXTURE_WAVELENGTHS)
+        offsets = [record["image"]["subvolumeOffset"][2] for record, _pixels in records]
+        self.assertEqual(offsets, [0, 1, 3, 4], "Band 3 was to be left out")
+        for (record, pixels), offset in zip(records, offsets, strict=True):
+            with self.subTest(band=offset + 1):
+                self.assertEqual(record["deviceName"], APP_DEVICE_NAMES[2])
+                self.assertTrue(record["crcMatches"])
+                self.assertEqual(record["headerVersion"], 2)
+                image = record["image"]
+                self.assertEqual(image["size"], [FIXTURE_SAMPLES, FIXTURE_LINES, bands])
+                self.assertEqual(image["subvolumeOffset"], [0, 0, offset])
+                self.assertEqual(image["subvolumeSize"], [FIXTURE_SAMPLES, FIXTURE_LINES, 1])
+                self.assertEqual(image["scalarType"], "float32")
+                self.assertEqual(image["components"], 1)
+                numpy.testing.assert_array_equal(pixels, self.values[offset])
+                metadata = record["metadata"]
+                self.assertEqual(metadata[contract.METADATA_BAND_NUMBER_KEY], str(offset + 1))
+                self.assertEqual(float(metadata[contract.METADATA_WAVELENGTH_KEY]),
+                                 FIXTURE_WAVELENGTHS[offset])
+                self.assertEqual(metadata[contract.METADATA_DATA_ORIGIN_KEY], "simulated")
+                self.assertIn("stand-in", metadata[contract.METADATA_SIMULATION_DETAIL_KEY])
 
     def test_liveViewAndStereoAreRgbFrames(self):
         for offset, width in ((0, FIXTURE_SAMPLES), (1, 2 * FIXTURE_SAMPLES)):
@@ -196,6 +256,48 @@ class StandInWireTest(unittest.TestCase):
                 self.assertEqual(message.image.shape, (1, FIXTURE_LINES, width, 3))
                 self.assertEqual(message.metadata[contract.METADATA_DATA_ORIGIN_KEY], "simulated")
                 self.assertIn("stand-in", message.metadata[contract.METADATA_SIMULATION_DETAIL_KEY])
+
+
+class StandInAppFormTest(unittest.TestCase):
+    """The stand-in sending exactly what the app sends, and the app's raw pixel type."""
+
+    def _sendOneCube(self, *, dataType=4, appHeader=False):
+        with tempfile.TemporaryDirectory() as folder:
+            header, values = writeFixtureCube(Path(folder), dataType=dataType)
+            basePort = freeBasePort()
+            standIn = iuma_app_standin.StandIn(
+                iuma_app_standin.readCube(header), basePort=basePort, bandInterval=0.0,
+                cubeInterval=60.0, appHeader=appHeader)
+            standIn.start()
+            try:
+                records = receiveRecords(basePort + 2, count=len(FIXTURE_WAVELENGTHS))
+            finally:
+                standIn.stop()
+        return records, values
+
+    def test_appHeaderSendsVersion1WithoutMetadata(self):
+        records, values = self._sendOneCube(appHeader=True)
+        for offset, (record, pixels) in enumerate(records):
+            with self.subTest(band=offset + 1):
+                self.assertEqual(record["headerVersion"], 1)
+                self.assertEqual(record["metadata"], {})
+                self.assertEqual(record["timestamp"], 0)
+                self.assertTrue(record["crcMatches"])
+                self.assertEqual(record["image"]["subvolumeOffset"], [0, 0, offset])
+                numpy.testing.assert_array_equal(pixels, values[offset])
+
+    def test_uint16CubeIsSentAsUint16(self):
+        records, values = self._sendOneCube(dataType=12, appHeader=True)
+        for offset, (record, pixels) in enumerate(records):
+            with self.subTest(band=offset + 1):
+                self.assertEqual(record["image"]["scalarType"], "uint16")
+                self.assertEqual(record["image"]["endianness"], "little")
+                numpy.testing.assert_array_equal(pixels, values[offset])
+
+    def test_appHeaderIsOfferedOnTheCommandLine(self):
+        arguments = iuma_app_standin._parseArguments(["--app-header"])
+        self.assertTrue(arguments.app_header)
+        self.assertFalse(iuma_app_standin._parseArguments([]).app_header)
 
 
 class _FailingSocket:
@@ -224,7 +326,7 @@ class _ClientLeavesDuringTheWrite:
     def __init__(self):
         self.isConnected = True
 
-    def sendImage(self, image, deviceName, metadata):
+    def sendImageSlab(self, band, **_message):
         self.isConnected = False
         return True
 

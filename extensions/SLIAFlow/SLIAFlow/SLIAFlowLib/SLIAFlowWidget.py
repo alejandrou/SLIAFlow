@@ -15,10 +15,17 @@ from .SLIAFlowConnections import CHANNEL_HS_CUBE, CHANNEL_LIVE_VIEW, CHANNEL_STE
 from .SLIAFlowLogic import SLIAFlowLogic
 from .SLIAFlowParameterNode import (
     CAPTURE_ID_ATTRIBUTE,
+    CUBE_SOURCE_APP,
+    CUBE_SOURCES,
+    DATA_ORIGIN_ATTRIBUTE,
     DEFAULT_RESULT_OUTPUT,
     GROUND_TRUTH_VIEW_NAME,
+    RECEIVED_CUBE_NAME,
     RECORDED_CASE_ATTRIBUTE,
     RESULT_VIEW_NAMES,
+    SIMULATED_ORIGIN,
+    SIMULATION_DETAIL_ATTRIBUTE,
+    WAVELENGTHS_ASSUMED_ATTRIBUTE,
     SLIAFlowParameterNode,
 )
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES, Uc1Run, Uc1RunError
@@ -128,46 +135,50 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         "Capture needs a LiveView frame. Wait for the camera image, then press Capture."
     )
     CAPTURE_CAPTURING_STATUS = _("Capturing: LiveView is frozen and the frame is being saved.")
-    CAPTURE_RUNNING_STATUS = _(
-        "Running UC1 on recorded cube {case} (simulated acquisition)..."
-    )
-    CAPTURE_VALIDATING_STATUS = _("Validating the UC1 outputs for recorded cube {case}...")
+    CAPTURE_RUNNING_STATUS = _("Running UC1 on {cube} ({origin})...")
+    CAPTURE_VALIDATING_STATUS = _("Validating the UC1 outputs for {cube}...")
     # ADR-0004 decision 5: UC1's model was trained on another camera, so a
     # result on the LCTF cube shows what the pipeline does, not how right it is.
     # Every status that describes a result on screen says so, stale ones too.
     CAPTURE_DONE_STATUS = _(
-        "Done: UC1 results for recorded cube {case} are shown. They are not validated: UC1's "
+        "Done: UC1 results for {cube} are shown. They are not validated: UC1's "
         "model was trained on another camera. Snapshot saved as {snapshot}."
     )
     CAPTURE_FAILED_STATUS = _("Failed: {message} Press Capture to try again.")
-    CAPTURE_FAILED_CASE_STATUS = _(
-        "Failed on recorded cube {case}: {message} Press Capture to try again."
+    CAPTURE_FAILED_CASE_STATUS = _("Failed on {cube}: {message} Press Capture to try again.")
+    # SLIA-036: Capture on the last cube from the app needs one.
+    CAPTURE_NO_RECEIVED_CUBE_STATUS = _(
+        "Capture uses the last cube from the app, and no complete cube has been received. "
+        "Connect under Connections, or choose Cube on disk."
     )
     RESULT_NONE_STATUS = _("No UC1 result yet. Press Capture.")
     RESULT_STATUS = _(
-        "Recorded cube {case} - simulated acquisition. Showing {file}. UC1 results on this "
-        "cube are not validated."
+        "{Cube} - {origin}. Showing {file}. UC1 results on this cube are not validated."
     )
     RESULT_STALE_STATUS = _(
-        "Previous result: recorded cube {case}, simulated acquisition. It is not from "
+        "Previous result: {cube}, {origin}. It is not from "
         "the current capture. UC1 results on this cube are not validated."
     )
-    RESULT_SOURCE_TEXT = _("{file}, recorded cube {case}, capture {captureId}")
+    RESULT_SOURCE_TEXT = _("{file}, {cube}, capture {captureId}")
     GROUND_TRUTH_STATUS = _(
-        "Recorded cube {case} - simulated acquisition. Showing {file} under the recorded "
+        "{Cube} - {origin}. Showing {file} under the recorded "
         "ground truth. UC1 results on this cube are not validated."
     )
-    GROUND_TRUTH_SOURCE_TEXT = _(
-        "{file} under {groundTruth}, recorded cube {case}, capture {captureId}"
-    )
+    GROUND_TRUTH_SOURCE_TEXT = _("{file} under {groundTruth}, {cube}, capture {captureId}")
     GROUND_TRUTH_MISSING_STATUS = _(
-        "Recorded cube {case} - simulated acquisition. Showing {file}. Its ground truth "
+        "{Cube} - {origin}. Showing {file}. Its ground truth "
         "could not be read. UC1 results on this cube are not validated."
     )
     NO_GROUND_TRUTH_STATUS = _(
-        "Recorded cube {case} - simulated acquisition. Showing {file}. This cube has no ground "
+        "{Cube} - {origin}. Showing {file}. This cube has no ground "
         "truth. UC1 results on this cube are not validated."
     )
+    # SLIA-036: how the texts name a cube, and where it came from.
+    RECORDED_CUBE_PHRASE = _("recorded cube {case}")
+    RECEIVED_CUBE_PHRASE = _("the cube received from the app")
+    STAND_IN_CUBE_PHRASE = _("the stand-in's cube received on the app's port")
+    SIMULATED_ORIGIN_PHRASE = _("simulated acquisition")
+    RECEIVED_ORIGIN_PHRASE = _("received from the app, captured live or replayed")
     # The label layer is drawn over the result, so it is half transparent: both
     # the labelled class and the classification under it stay readable.
     GROUND_TRUTH_LABEL_OPACITY = 0.5
@@ -183,7 +194,21 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     PREVIEW_CAPTION = _(
         "R {red:g} nm, G {green:g} nm, B {blue:g} nm - band composite, not a photograph"
     )
-    RESULT_CAPTION = _("Result for recorded cube {case}")
+    # SLIA-036: a cube received from the app says so, says when it is raw, and
+    # says that its wavelengths are assumed or unknown.
+    RECEIVED_CUBE_CAPTION = _("Cube received from the app - {kind}")
+    STAND_IN_CUBE_CAPTION = _("Cube from the stand-in for the app, simulated - {kind}")
+    RAW_KIND = _("raw counts, uncalibrated")
+    CALIBRATED_KIND = _("calibrated reflectance")
+    ASSUMED_BAND_CAPTION = _(
+        "Band {band} of {bands} - {wavelength:g} nm, assumed: the app sends no wavelengths"
+    )
+    UNKNOWN_WAVELENGTH_BAND_CAPTION = _("Band {band} of {bands} - wavelength not sent")
+    RAW_PREVIEW_CAPTION = _("Scaled to the cube's brightest count")
+    RECEIVED_WAITING_MESSAGE = _(
+        "Waiting for a complete cube from the app.\nConnect under Connections."
+    )
+    RESULT_CAPTION = _("Result for {cube}")
     CUBE_UNREADABLE_MESSAGE = _("The hyperspectral cube could not be shown.\n{reason}")
     CAPTION_FONT_SIZE = 13
     # Top of HS Cube; bottom of Tumour Delineation, whose top carries the stale
@@ -195,16 +220,14 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # names the cube; the Status panel says how the map was made and why one
     # is missing. The map is a display enhancement, rescaled per channel within
     # each image, so it is never kept across captures.
-    VASCULAR_CAPTION = _("Enhanced vascularization for recorded cube {case}")
+    VASCULAR_CAPTION = _("Enhanced vascularization for {cube}")
     VASCULAR_FAILED_MESSAGE = _(
         "The enhanced vascularization could not be computed.\nThe Status panel says why."
     )
     VASCULAR_NONE_STATUS = _("No enhanced vascularization yet. Press Capture.")
-    VASCULAR_RUNNING_STATUS = _(
-        "Computing the enhanced vascularization of recorded cube {case} (UC2)..."
-    )
+    VASCULAR_RUNNING_STATUS = _("Computing the enhanced vascularization of {cube} (UC2)...")
     VASCULAR_STATUS = _(
-        "Enhanced vascularization of recorded cube {case} - simulated acquisition. UC2 "
+        "Enhanced vascularization of {cube} - {origin}. UC2 "
         "blood-vessel enhancement with fixed {parameters}. A display enhancement, not a "
         "measurement: colours are rescaled within each image and are not comparable between "
         "captures. Not validated."
@@ -212,8 +235,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     VASCULAR_FAILED_STATUS = _("Enhanced vascularization (UC2) failed: {message}")
     SPECTRUM_PROMPT = _("Click a pixel of HS Cube to plot its stored values.")
     SPECTRUM_LABEL = _(
-        "Pixel column {column}, row {row} of recorded cube {cube}: stored values, "
-        "not an analysis."
+        "Pixel column {column}, row {row} of {cube}: stored values, not an analysis."
+    )
+    SPECTRUM_NO_WAVELENGTHS_LABEL = _(
+        "This cube carries no wavelengths, so its spectrum cannot be plotted against them."
     )
     SPECTRUM_OUTSIDE_LABEL = _(
         "That click was outside the cube. Click a pixel of HS Cube to plot its stored values."
@@ -311,6 +336,17 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._appliedConnectionSettings = None
         self._connectionsTimer = None
         self._observedParameterNode = None
+        # SLIA-036. A cube completed while a capture runs on the last one is
+        # held until the capture ends. The provenance of the cube the current
+        # capture runs on, and whether a received one was the stand-in's; the
+        # shown result and map keep their own, as the next capture changes it.
+        self._heldReceivedCube = None
+        self._captureProvenance = None
+        self._receivedRunSimulated = False
+        self._resultSimulated = False
+        self._vascularSimulated = False
+        # The run cube outlived a Disconnect only because a capture used it.
+        self._removeRunCubeAfterCapture = False
 
     def setup(self) -> None:
         super().setup()
@@ -345,6 +381,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.cubeDisplaySelector.connect(
             "currentIndexChanged(int)", self._onCubeDisplayChanged
         )
+        self.ui.cubeSourceSelector.connect("currentIndexChanged(int)", self._onCubeSourceChanged)
         self._spectrumPlotWidget = slicer.qMRMLPlotWidget()
         self._spectrumPlotWidget.setMRMLScene(slicer.mrmlScene)
         self.ui.spectrumPlotContainer.layout().addWidget(self._spectrumPlotWidget)
@@ -375,6 +412,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except Exception:
             pass
         self._cancelCapture()
+        # Releasing the connections also forgets the received cube.
         self._releaseConnections()
         if self._connectionsTimer is not None:
             self._connectionsTimer.stop()
@@ -655,6 +693,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if button is None or self.logic is None:
             return
         button.setEnabled(self.logic.cameraActive and not self._captureInProgress)
+        # The cube a capture runs on stays on HS Cube until the capture ends.
+        self.ui.cubeSourceSelector.setEnabled(not self._captureInProgress)
 
     def _onCaptureClicked(self) -> None:
         if self.logic is None or self._parameterNode is None:
@@ -664,6 +704,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         liveNode = self._parameterNode.liveVolume
         if not self._frameDisplayed or liveNode is None or liveNode.GetImageData() is None:
             self._setStatus(self.CAPTURE_NO_FRAME_STATUS)
+            return
+        if self._cubeSourceIsApp() and self.logic.receivedCubeNode() is None:
+            # Refused before anything is frozen or saved.
+            self._setStatus(self.CAPTURE_NO_RECEIVED_CUBE_STATUS)
             return
 
         self._captureInProgress = True
@@ -702,6 +746,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._failCapture(_("The capture snapshot could not be saved: {error}").format(error=error))
             return
 
+        if self._cubeSourceIsApp():
+            self._startCaptureOnReceivedCube()
+            return
+        self._captureProvenance = None
         # UC2 starts first: it is independent of UC1, and a UC1 refusal ends
         # UC1's side of the capture at once, which must not end it before UC2
         # has been started.
@@ -711,10 +759,36 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # cube does not need UC1: it is shown whether or not the run started.
         self._showCapturedCube()
 
-    def _startUc1(self) -> None:
-        """Start UC1 on the configured cube, or end the capture saying why."""
+    def _startCaptureOnReceivedCube(self) -> None:
+        """Run UC1 and UC2 on the last cube from the app, or say why they cannot (SLIA-036).
+
+        The cube stays on HS Cube as received, now this capture's. A float32
+        cube with wavelengths is written once for the runs; a raw one, or one
+        without wavelengths, runs nothing.
+        """
+        node = self.logic.receivedCubeNode()
+        node.SetAttribute(CAPTURE_ID_ATTRIBUTE, self._captureId)
+        self._receivedRunSimulated = node.GetAttribute(DATA_ORIGIN_ATTRIBUTE) == SIMULATED_ORIGIN
+        self._captureProvenance = (node.GetAttribute(DATA_ORIGIN_ATTRIBUTE),
+                                   node.GetAttribute(SIMULATION_DETAIL_ATTRIBUTE))
+        self._captureCaseName = RECEIVED_CUBE_NAME
+        self._cubeError = None
+        self._resetSpectrumLabel()
+        self._showCube()
         try:
-            case = self.logic.loadConfiguredUc1Input()
+            cube = self.logic.writeReceivedCubeForRun(node)
+        except (CalibratedCubeError, OSError) as error:
+            self._failVascular(str(error))
+            self._failCapture(str(error))
+            return
+        self._startUc2(cube)
+        self._startUc1(cube)
+
+    def _startUc1(self, cube=None) -> None:
+        """Start UC1 on `cube` or the configured cube, or end the capture saying why."""
+        try:
+            case = (self.logic.loadConfiguredUc1Input() if cube is None
+                    else self.logic.uc1InputFor(cube))
         except (CalibratedCubeError, Uc1RunError, OSError) as error:
             self._failCapture(str(error))
             return
@@ -729,14 +803,15 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except (Uc1RunError, OSError) as error:
             self._failCapture(str(error))
 
-    def _startUc2(self) -> None:
-        """Start UC2 on the configured cube, or say on its own panel and line why not.
+    def _startUc2(self, cube=None) -> None:
+        """Start UC2 on `cube` or the configured cube, or say on its own panel and line why not.
 
         UC2 is independent of UC1 (SLIA-021): its refusal or failure never ends
         the capture early, fails UC1 or touches the Tumour Delineation panel.
         """
         try:
-            cube = self.logic.loadConfiguredCalibratedCube()
+            if cube is None:
+                cube = self.logic.loadConfiguredCalibratedCube()
             self.logic.startUc2Run(cube, self._onUc2Finished)
         except (CalibratedCubeError, Uc2RunError, OSError) as error:
             self._failVascular(str(error))
@@ -759,7 +834,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._failVascular(result.message)
         else:
             try:
-                self.logic.acceptVascularMap(result.cube, self._captureId, result.image)
+                self.logic.acceptVascularMap(result.cube, self._captureId, result.image,
+                                             provenance=self._captureProvenance)
             except Exception as error:
                 logging.exception("SLIAFlow: the UC2 map of cube %s could not be shown",
                                   result.cube.name)
@@ -767,6 +843,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             else:
                 logging.info("SLIAFlow: %s", result.message)
                 self._vascularCaseName = result.cube.name
+                self._vascularSimulated = self._receivedRunSimulated
                 self._vascularCaptureId = self._captureId
                 self._vascularError = None
                 self._updateVascularStatus()
@@ -843,6 +920,27 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if label is not None:
             label.setText(self.SPECTRUM_PROMPT)
 
+    def _cubeSourceIsApp(self) -> bool:
+        return self._parameterNode is not None and self._parameterNode.cubeSource == CUBE_SOURCE_APP
+
+    def _displayedCubeNode(self):
+        """The cube HS Cube shows: the last one from the app, or the one read for the capture."""
+        if self.logic is None:
+            return None
+        return self.logic.receivedCubeNode() if self._cubeSourceIsApp() else self.logic.cubeNode()
+
+    def _onCubeSourceChanged(self, index=None) -> None:
+        # This slot runs before the parameter-node binding's own, so the choice
+        # is taken from the box; while connectGui refills it, it is not a choice.
+        if self._bindingResultSelector:
+            return
+        selector = getattr(getattr(self, "ui", None), "cubeSourceSelector", None)
+        if (self._parameterNode is not None and selector is not None
+                and selector.currentText in CUBE_SOURCES):
+            self._parameterNode.cubeSource = selector.currentText
+        self._resetSpectrumLabel()
+        self._showCube()
+
     def _onCubeDisplayChanged(self, index=None) -> None:
         selector = getattr(getattr(self, "ui", None), "cubeDisplaySelector", None)
         if selector is None:
@@ -878,30 +976,32 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME, layoutManager)
         if cubeWidget is None:
             return
-        node = self.logic.cubeNode() if self.logic is not None else None
+        node = self._displayedCubeNode()
         try:
             sliceLogic = cubeWidget.sliceLogic()
             composite = sliceLogic.GetSliceCompositeNode()
             if node is None:
                 self._clearSliceLayers(cubeWidget)
                 self._removePanelCaption(self.CUBE_VIEW_NAME)
-                self._showPanelMessage(
-                    self.CUBE_VIEW_NAME,
-                    self.CUBE_UNREADABLE_MESSAGE.format(reason=self._cubeError)
-                    if self._cubeError else self.RESERVED_PANEL_REASONS[self.CUBE_VIEW_NAME],
-                    layoutManager,
-                )
+                if self._cubeSourceIsApp():
+                    message = self.RECEIVED_WAITING_MESSAGE
+                elif self._cubeError:
+                    message = self.CUBE_UNREADABLE_MESSAGE.format(reason=self._cubeError)
+                else:
+                    message = self.RESERVED_PANEL_REASONS[self.CUBE_VIEW_NAME]
+                self._showPanelMessage(self.CUBE_VIEW_NAME, message, layoutManager)
             else:
                 self._removePanelMessage(self.CUBE_VIEW_NAME)
                 shown = self._cubeDisplayNode(node)
                 # Every new cube, and every switch between the bands and the
                 # preview, is framed for its own; a redraw of the same volume
                 # keeps the operator's framing and the band they scrolled to.
+                cubeCaptureId = node.GetAttribute(CAPTURE_ID_ATTRIBUTE)
                 if (composite.GetBackgroundVolumeID() != shown.GetID()
-                        or self._fittedCubeCaptureId != self._cubeCaptureId):
+                        or self._fittedCubeCaptureId != cubeCaptureId):
                     composite.SetBackgroundVolumeID(shown.GetID())
                     sliceLogic.FitSliceToBackground()
-                    self._fittedCubeCaptureId = self._cubeCaptureId
+                    self._fittedCubeCaptureId = cubeCaptureId
                     if shown is node:
                         self._showMiddleBand(sliceLogic, node)
                 composite.SetForegroundVolumeID(None)
@@ -921,28 +1021,72 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _updateCubeCaption(self, layoutManager=None) -> None:
         """Name the cube on HS Cube, with the band on screen or the preview's bands."""
-        node = self.logic.cubeNode() if self.logic is not None else None
+        node = self._displayedCubeNode()
         cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME, layoutManager)
         if not self._presentationActive or node is None or cubeWidget is None:
             self._removePanelCaption(self.CUBE_VIEW_NAME)
             return
         composite = cubeWidget.sliceLogic().GetSliceCompositeNode()
         preview = self.logic.colourPreviewNode()
-        lines = [self.CUBE_CAPTION.format(cube=node.GetAttribute(RECORDED_CASE_ATTRIBUTE))]
+        raw = self._isRawCube(node)
+        lines = [self._cubeCaptionLine(node, raw)]
         if preview is not None and composite.GetBackgroundVolumeID() == preview.GetID():
             red, green, blue = self.logic.previewWavelengths(preview)
             lines.append(self.PREVIEW_CAPTION.format(red=red, green=green, blue=blue))
+            if raw:
+                lines.append(self.RAW_PREVIEW_CAPTION)
         else:
             sliceToRas = cubeWidget.mrmlSliceNode().GetSliceToRAS()
             centre = [sliceToRas.GetElement(row, 3) for row in range(3)]
             band = self.logic.cubeBandAt(node, centre)
             wavelengths = self.logic.cubeWavelengths(node)
-            if band is None or band >= len(wavelengths):
+            bands = node.GetImageData().GetDimensions()[2]
+            if band is None:
                 lines.append(self.BAND_OUTSIDE_CAPTION)
+            elif band >= len(wavelengths):
+                lines.append(self.UNKNOWN_WAVELENGTH_BAND_CAPTION.format(band=band + 1,
+                                                                         bands=bands))
+            elif node.GetAttribute(WAVELENGTHS_ASSUMED_ATTRIBUTE):
+                lines.append(self.ASSUMED_BAND_CAPTION.format(
+                    band=band + 1, bands=bands, wavelength=wavelengths[band]))
             else:
                 lines.append(self.BAND_CAPTION.format(
                     band=band + 1, bands=len(wavelengths), wavelength=wavelengths[band]))
         self._showPanelCaption(self.CUBE_VIEW_NAME, "\n".join(lines), layoutManager)
+
+    @staticmethod
+    def _isRawCube(node) -> bool:
+        image = node.GetImageData() if node is not None else None
+        return image is not None and image.GetScalarType() not in (vtk.VTK_FLOAT, vtk.VTK_DOUBLE)
+
+    @staticmethod
+    def _isReceivedCube(node) -> bool:
+        return node is not None and node.GetAttribute(RECORDED_CASE_ATTRIBUTE) == RECEIVED_CUBE_NAME
+
+    def _cubeCaptionLine(self, node, raw: bool) -> str:
+        """The first caption line of HS Cube: which cube it is, and what its values are."""
+        if not self._isReceivedCube(node):
+            return self.CUBE_CAPTION.format(cube=node.GetAttribute(RECORDED_CASE_ATTRIBUTE))
+        kind = self.RAW_KIND if raw else self.CALIBRATED_KIND
+        if node.GetAttribute(DATA_ORIGIN_ATTRIBUTE) == SIMULATED_ORIGIN:
+            return self.STAND_IN_CUBE_CAPTION.format(kind=kind)
+        return self.RECEIVED_CUBE_CAPTION.format(kind=kind)
+
+    def _cubeText(self, caseName, simulated=None) -> dict:
+        """How the texts name the cube a capture ran on: `cube`, `Cube` and `origin`.
+
+        A received cube is named for where it came from (SLIA-036). The cube on
+        disk keeps the wording it always had.
+        """
+        if caseName == RECEIVED_CUBE_NAME:
+            if simulated is None:
+                simulated = self._receivedRunSimulated
+            cube = self.STAND_IN_CUBE_PHRASE if simulated else self.RECEIVED_CUBE_PHRASE
+            origin = self.SIMULATED_ORIGIN_PHRASE if simulated else self.RECEIVED_ORIGIN_PHRASE
+        else:
+            cube = self.RECORDED_CUBE_PHRASE.format(case=caseName)
+            origin = self.SIMULATED_ORIGIN_PHRASE
+        return {"cube": cube, "Cube": cube[:1].upper() + cube[1:], "origin": origin}
 
     def _onCubeSliceModified(self, caller=None, event=None) -> None:
         self._updateCubeCaption()
@@ -956,7 +1100,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME)
         if caller is None or cubeWidget is None or self.logic is None:
             return
-        if self.logic.cubeNode() is None:
+        if self._displayedCubeNode() is None:
             return
         try:
             x, y = caller.GetEventPosition()
@@ -969,7 +1113,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _pickCubePixelAtXYZ(self, xyz) -> None:
         """Plot the stored spectrum of the cube pixel drawn at slice-view XY `xyz`."""
         cubeWidget = self._sliceWidgetOrNone(self.CUBE_VIEW_NAME)
-        node = self.logic.cubeNode() if self.logic is not None else None
+        node = self._displayedCubeNode()
         if cubeWidget is None or node is None:
             return
         # As the Data Probe does: the background layer maps view XY to the IJK
@@ -982,14 +1126,19 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         except IndexError:
             self.ui.spectrumLabel.setText(self.SPECTRUM_OUTSIDE_LABEL)
             return
+        except ValueError:
+            self.ui.spectrumLabel.setText(self.SPECTRUM_NO_WAVELENGTHS_LABEL)
+            return
         viewNode = self.logic.spectrumPlotViewNode()
         viewNode.SetPlotChartNodeID(chart.GetID())
         if self._spectrumPlotWidget is not None:
             if self._spectrumPlotWidget.mrmlPlotViewNode() is not viewNode:
                 self._spectrumPlotWidget.setMRMLPlotViewNode(viewNode)
         self.ui.spectrumCollapsibleButton.collapsed = False
+        simulated = node.GetAttribute(DATA_ORIGIN_ATTRIBUTE) == SIMULATED_ORIGIN
         self.ui.spectrumLabel.setText(self.SPECTRUM_LABEL.format(
-            column=column, row=row, cube=node.GetAttribute(RECORDED_CASE_ATTRIBUTE)))
+            column=column, row=row,
+            cube=self._cubeText(node.GetAttribute(RECORDED_CASE_ATTRIBUTE), simulated)["cube"]))
 
     def _observeCubeView(self, layoutManager=None) -> None:
         """Follow HS Cube's slice (for the band caption) and its clicks (for the spectrum)."""
@@ -1032,9 +1181,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _onUc1Stage(self, stage: str) -> None:
         if stage == Uc1Run.STAGE_RUNNING:
-            self._setStatus(self.CAPTURE_RUNNING_STATUS.format(case=self._captureCaseName))
+            self._setStatus(self.CAPTURE_RUNNING_STATUS.format(
+                **self._cubeText(self._captureCaseName)))
         elif stage == Uc1Run.STAGE_VALIDATING:
-            self._setStatus(self.CAPTURE_VALIDATING_STATUS.format(case=self._captureCaseName))
+            self._setStatus(self.CAPTURE_VALIDATING_STATUS.format(
+                **self._cubeText(self._captureCaseName)))
 
     def _onUc1Finished(self, result) -> None:
         if not self._captureInProgress:
@@ -1044,7 +1195,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._failCapture(result.message)
             return
         try:
-            self.logic.acceptOutputs(result.case, self._captureId, result.outputs)
+            self.logic.acceptOutputs(result.case, self._captureId, result.outputs,
+                                     provenance=self._captureProvenance)
         except Exception as error:
             # acceptOutputs leaves the previous result whole; the capture must
             # still end, or Capture stays disabled and LiveView frozen.
@@ -1060,13 +1212,14 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         elif self.logic is not None:
             self.logic.removeGroundTruthNode()
         self._resultCaseName = result.case.name
+        self._resultSimulated = self._receivedRunSimulated
         self._resultCaptureId = self._captureId
         self._resultStale = False
         self._refreshGroundTruthEntry()
         logging.info("SLIAFlow: %s", result.message)
         self._setStatus(
             self.CAPTURE_DONE_STATUS.format(
-                case=result.case.name, snapshot=self._captureSnapshotName
+                **self._cubeText(result.case.name), snapshot=self._captureSnapshotName
             )
         )
         self._endCapture()
@@ -1075,7 +1228,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _failCapture(self, message: str) -> None:
         if self._captureCaseName is not None:
             status = self.CAPTURE_FAILED_CASE_STATUS.format(
-                case=self._captureCaseName, message=message
+                **self._cubeText(self._captureCaseName), message=message
             )
         else:
             status = self.CAPTURE_FAILED_STATUS.format(message=message)
@@ -1100,6 +1253,12 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._refreshCaptureControls()
         self._updateResultStatus()
         self._updateStaleLine()
+        if self._removeRunCubeAfterCapture:
+            self._removeRunCubeAfterCapture = False
+            self._removeReceivedRunCube()
+        held, self._heldReceivedCube = self._heldReceivedCube, None
+        if held is not None:
+            self._receiveCube(held)
 
     def _cancelCapture(self) -> None:
         """Kill the owned UC1 and UC2 runs and release their locks, without reporting them."""
@@ -1185,35 +1344,34 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         else:
             fileName = self._selectedOutput()
             groundTruthShown = self._groundTruthSelected() and self._groundTruthNode() is not None
+            words = self._cubeText(self._resultCaseName, self._resultSimulated)
             if groundTruthShown:
                 source = self.GROUND_TRUTH_SOURCE_TEXT.format(
                     file=fileName, groundTruth=GROUND_TRUTH_VIEW_NAME,
-                    case=self._resultCaseName, captureId=self._resultCaptureId,
+                    captureId=self._resultCaptureId, **words,
                 )
             else:
                 source = self.RESULT_SOURCE_TEXT.format(
-                    file=fileName, case=self._resultCaseName, captureId=self._resultCaptureId
+                    file=fileName, captureId=self._resultCaptureId, **words
                 )
             if self._resultStale:
-                text = self.RESULT_STALE_STATUS.format(case=self._resultCaseName)
+                text = self.RESULT_STALE_STATUS.format(**words)
                 style = "color: #8A6D1D; font-weight: bold;"
             elif groundTruthShown:
-                text = self.GROUND_TRUTH_STATUS.format(case=self._resultCaseName, file=fileName)
+                text = self.GROUND_TRUTH_STATUS.format(file=fileName, **words)
                 style = "font-weight: bold;"
             elif self._groundTruthSelected() and not self._resultHasGroundTruth:
                 # A gtMap selection kept from an earlier cube: this one has none
                 # to lay over, which is not the same as one that failed to read.
-                text = self.NO_GROUND_TRUTH_STATUS.format(case=self._resultCaseName, file=fileName)
+                text = self.NO_GROUND_TRUTH_STATUS.format(file=fileName, **words)
                 style = "font-weight: bold;"
             elif self._groundTruthSelected():
                 # gtMap was asked for and is not there: say so rather than
                 # showing the result alone as though it had been laid over.
-                text = self.GROUND_TRUTH_MISSING_STATUS.format(
-                    case=self._resultCaseName, file=fileName
-                )
+                text = self.GROUND_TRUTH_MISSING_STATUS.format(file=fileName, **words)
                 style = "color: #8A6D1D; font-weight: bold;"
             else:
-                text = self.RESULT_STATUS.format(case=self._resultCaseName, file=fileName)
+                text = self.RESULT_STATUS.format(file=fileName, **words)
                 style = "font-weight: bold;"
         if label is not None:
             label.setText(text)
@@ -1244,7 +1402,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 # so the panel names its own.
                 self._showPanelCaption(
                     self.RESULT_VIEW_NAME,
-                    self.RESULT_CAPTION.format(case=self._resultCaseName),
+                    self.RESULT_CAPTION.format(
+                        **self._cubeText(self._resultCaseName, self._resultSimulated)),
                     layoutManager,
                 )
                 boundBefore = composite.GetBackgroundVolumeID()
@@ -1375,7 +1534,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 composite.SetLabelVolumeID(None)
                 self._showPanelCaption(
                     self.VASCULAR_VIEW_NAME,
-                    self.VASCULAR_CAPTION.format(case=self._vascularCaseName),
+                    self.VASCULAR_CAPTION.format(
+                        **self._cubeText(self._vascularCaseName, self._vascularSimulated)),
                     layoutManager,
                 )
             vascularView = vascularWidget.sliceView()
@@ -1389,11 +1549,12 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if label is None:
             return
         if self._uc2Pending:
-            text = self.VASCULAR_RUNNING_STATUS.format(case=self._vascularRunningCase)
+            text = self.VASCULAR_RUNNING_STATUS.format(**self._cubeText(self._vascularRunningCase))
         elif self._vascularError:
             text = self.VASCULAR_FAILED_STATUS.format(message=self._vascularError)
         elif self._vascularCaseName is not None:
-            text = self.VASCULAR_STATUS.format(case=self._vascularCaseName,
+            text = self.VASCULAR_STATUS.format(**self._cubeText(self._vascularCaseName,
+                                                                 self._vascularSimulated),
                                                parameters=uc2ParametersText())
         else:
             text = self.VASCULAR_NONE_STATUS
@@ -1482,6 +1643,9 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not rows and connections.lastError:
             details.append(connections.lastError)
         self.ui.connectionsDetailLabel.setText("\n".join(details))
+        cube = connections.takeCompletedCube()
+        if cube is not None:
+            self._receiveCube(cube)
         connected = connections.connected
         self.ui.connectButton.setText(self.DISCONNECT_TEXT if connected else self.CONNECT_TEXT)
         for name in self.CONNECTION_SETTING_CONTROLS:
@@ -1495,6 +1659,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if self._connectionsTimer is not None:
                 self._connectionsTimer.stop()
             connections.disconnect()
+            self._forgetReceivedCube()
             self._refreshConnections()
             return
         self._applyConnectionSettings()
@@ -1508,7 +1673,50 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._connectionsTimer.stop()
         if self.logic is not None:
             self.logic.connections.release()
+        self._forgetReceivedCube()
         self._refreshConnections()
+
+    def _receiveCube(self, cube) -> None:
+        """Show a cube the app completed, or hold it while a capture runs on the last one."""
+        if self.logic is None:
+            return
+        if self._captureInProgress and self._cubeSourceIsApp():
+            self._heldReceivedCube = cube
+            return
+        try:
+            self.logic.acceptReceivedCube(cube)
+        except Exception:
+            logging.exception("SLIAFlow: the cube received from the app could not be shown")
+            return
+        if self._cubeSourceIsApp():
+            self._resetSpectrumLabel()
+            self._showCube()
+
+    def _forgetReceivedCube(self) -> None:
+        """Remove the received cube, any held one, and the cube written for a run.
+
+        The written cube stays while a capture still uses it, and is removed
+        when that capture ends.
+        """
+        self._heldReceivedCube = None
+        if self.logic is None:
+            return
+        self.logic.removeReceivedCubeNode()
+        if self._captureInProgress:
+            self._removeRunCubeAfterCapture = True
+        else:
+            self._removeReceivedRunCube()
+        if self._cubeSourceIsApp():
+            self._resetSpectrumLabel()
+            self._showCube()
+
+    def _removeReceivedRunCube(self) -> None:
+        if self.logic is None:
+            return
+        try:
+            self.logic.removeReceivedRunCube()
+        except OSError:
+            logging.exception("SLIAFlow: the cube written for a run could not be removed")
 
     def _onAboutToQuit(self) -> None:
         self._cancelCapture()

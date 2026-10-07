@@ -1,6 +1,7 @@
 import datetime
 import importlib
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +14,7 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
 from vtk.util import numpy_support
 
 from .SLIAFlowCalibratedCube import (
+    ENVI_DATA_TYPE_FLOAT32,
     CalibratedCube,
     CalibratedCubeError,
     loadCalibratedCube,
@@ -31,19 +33,30 @@ from .SLIAFlowParameterNode import (
     DATA_ORIGIN_ATTRIBUTE,
     OUTPUT_FILE_ATTRIBUTE,
     OWNER_ATTRIBUTE,
+    RECEIVED_CUBE_NAME,
+    RECEIVED_ORIGIN,
     RECORDED_CASE_ATTRIBUTE,
     SIMULATED_ORIGIN,
     SIMULATION_DETAIL_ATTRIBUTE,
     UC2_PARAMETERS_ATTRIBUTE,
+    WAVELENGTHS_ASSUMED_ATTRIBUTE,
     WAVELENGTHS_ATTRIBUTE,
     SLIAFlowParameterNode,
     calibratedCubeDetail,
+    receivedCubeDetail,
     uc1ResultDetail,
     uc2ResultDetail,
 )
-from .SLIAFlowUc1Input import Uc1Input, describeUc1Input
+from .SLIAFlowUc1Input import LCTF_WAVELENGTHS_NM, Uc1Input, describeUc1Input
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES, Uc1Build, Uc1Run, findRepositoryRoot
-from .SLIAFlowUc2Run import OUTPUT_FILE_SUFFIX, Uc2Build, Uc2Run, uc2ParametersText
+from .SLIAFlowUc2Run import (
+    CALIBRATED_DATA_NAME,
+    CALIBRATED_HEADER_NAME,
+    OUTPUT_FILE_SUFFIX,
+    Uc2Build,
+    Uc2Run,
+    uc2ParametersText,
+)
 
 
 class SLIAFlowLogic(ScriptedLoadableModuleLogic):
@@ -79,6 +92,25 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
 
     CUBE_OWNER = "RecordedCube"
 
+    # SLIA-036: the last complete cube received from the app's HS Cube port, and
+    # where Capture writes it for UC1 and UC2 (owner decision 3). One of each.
+    RECEIVED_CUBE_OWNER = "ReceivedCube"
+    RECEIVED_RUN_RELATIVE_PATH = Path("workspace") / "received-cube"
+    # Written when no wavelengths are sent: a 109-band cube is taken to be on
+    # IUMA's LCTF grid (ADR-0004 context), and nothing else is assumed.
+    ASSUMED_WAVELENGTHS_TEXT = "460-1000 nm in 5 nm steps (LCTF grid), assumed: the app sends none"
+    RAW_PIXEL_TYPE = "raw uint16"
+    CALIBRATED_PIXEL_TYPE = "calibrated float32"
+    RECEIVED_RAW_REFUSAL = _(
+        "The cube received from the app is raw uint16 counts. UC1 and the blood-vessel "
+        "enhancement wait for IUMA's calibrated float32 stream: SLIAFlow does no calibration "
+        "of its own."
+    )
+    RECEIVED_NO_WAVELENGTHS_REFUSAL = _(
+        "The cube received from the app has {bands} bands, and the app sends no wavelengths, "
+        "so it is shown but not classified. Only a 109-band cube is taken to be on the LCTF grid."
+    )
+
     # SLIA-021: the one map UC2 writes per capture, named as its file.
     VASCULAR_OWNER = "Uc2Output"
 
@@ -95,6 +127,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     SPECTRUM_OWNER = "PixelSpectrum"
     SPECTRUM_WAVELENGTH_COLUMN = _("Wavelength (nm)")
     SPECTRUM_VALUE_COLUMN = _("Reflectance (stored value)")
+    SPECTRUM_RAW_VALUE_COLUMN = _("Raw count (uncalibrated)")
     SPECTRUM_TITLE_FORMAT = _("{cube}, pixel column {column}, row {row}")
 
     GROUND_TRUTH_OWNER = "RecordedGroundTruth"
@@ -132,6 +165,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         self._processFactory = None
         # SLIA-035: the client connectors to IUMA's acquisition app.
         self.connections = SLIAFlowConnections()
+        # SLIA-036: a received cube is assembled straight into a volume's image.
+        self.connections.allocateCube = self.allocateReceivedCube
         self._calibratedCubeHeaderOverride = None
         self.currentRun: Uc1Run | None = None
         self.currentUc2Run: Uc2Run | None = None
@@ -550,13 +585,15 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         return None
 
     @classmethod
-    def acceptOutputs(cls, case, captureId: str, outputs: dict) -> dict:
+    def acceptOutputs(cls, case, captureId: str, outputs: dict, provenance=None) -> dict:
         """Put the five validated images of one run into the output nodes.
 
         All five are checked, then written into five new nodes. Only when all
         five are complete do they replace the previous result's nodes, so an
         error at any point leaves the previous result whole. Pixels are copied
         exactly as decoded; the volume is given LiveView's upright directions.
+        `provenance` is the (origin, detail) of the cube the run read; by
+        default the configured cube on disk, a simulated acquisition.
         """
         if not captureId:
             raise ValueError(_("An output set needs a capture ID."))
@@ -574,7 +611,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
                 ))
             images[fileName] = np.ascontiguousarray(image[np.newaxis, ...])
 
-        detail = uc1ResultDetail(case.name)
+        origin, cubeDetail = provenance or (SIMULATED_ORIGIN, None)
+        detail = uc1ResultDetail(case.name, cubeDetail)
         nodes = {}
         try:
             for fileName, values in images.items():
@@ -585,7 +623,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
                 slicer.util.updateVolumeFromArray(node, values)
                 cls._applyLiveVolumeGeometry(node)
                 node.SetAttribute(OUTPUT_FILE_ATTRIBUTE, fileName)
-                node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, SIMULATED_ORIGIN)
+                node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, origin)
                 node.SetAttribute(RECORDED_CASE_ATTRIBUTE, case.name)
                 node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, detail)
                 node.SetAttribute(CAPTURE_ID_ATTRIBUTE, captureId)
@@ -735,9 +773,10 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             raise ValueError(_("The cube carries no wavelengths to choose preview bands from."))
         bands = [nearestBand(wavelengths, target) for target in cls.PREVIEW_WAVELENGTHS_NM]
         cube = slicer.util.arrayFromVolume(cubeNode)
+        fullScale = cls.previewFullScale(cube)
         channels = [
-            np.floor(np.clip(cube[band], 0.0, cls.PREVIEW_FULL_SCALE_REFLECTANCE)
-                     * (255.0 / cls.PREVIEW_FULL_SCALE_REFLECTANCE) + 0.5).astype(np.uint8)
+            np.floor(np.clip(cube[band].astype(np.float64), 0.0, fullScale)
+                     * (255.0 / fullScale) + 0.5).astype(np.uint8)
             for band in bands
         ]
         rgb = np.stack(channels, axis=-1)[np.newaxis, ...]
@@ -767,6 +806,13 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         return node
 
     @classmethod
+    def previewFullScale(cls, cube) -> float:
+        """Full brightness: reflectance 1.0, or the brightest count of a raw cube (SLIA-036)."""
+        if np.issubdtype(cube.dtype, np.floating):
+            return cls.PREVIEW_FULL_SCALE_REFLECTANCE
+        return float(max(int(cube.max()), 1))
+
+    @classmethod
     def removeColourPreviewNode(cls) -> None:
         node = cls.colourPreviewNode()
         if node is not None:
@@ -788,6 +834,8 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         if not (0 <= column < samples and 0 <= row < lines):
             raise IndexError(f"Pixel ({column}, {row}) is outside a {samples} x {lines} cube.")
         wavelengths = np.array(cls.cubeWavelengths(cubeNode), dtype=np.float64)
+        if wavelengths.size != cube.shape[0]:
+            raise ValueError("The cube carries no wavelength for each band.")
         return wavelengths, np.array(cube[:, row, column], copy=True)
 
     @classmethod
@@ -808,7 +856,9 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         wavelengthColumn = numpy_support.numpy_to_vtk(wavelengths, deep=True)
         wavelengthColumn.SetName(cls.SPECTRUM_WAVELENGTH_COLUMN)
         valueColumn = numpy_support.numpy_to_vtk(values.astype(np.float32), deep=True)
-        valueColumn.SetName(cls.SPECTRUM_VALUE_COLUMN)
+        valueTitle = (cls.SPECTRUM_VALUE_COLUMN if np.issubdtype(values.dtype, np.floating)
+                      else cls.SPECTRUM_RAW_VALUE_COLUMN)
+        valueColumn.SetName(valueTitle)
         table.AddColumn(wavelengthColumn)
         table.AddColumn(valueColumn)
 
@@ -825,7 +875,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         seriesNode.SetName(title)
         seriesNode.SetAndObserveTableNodeID(tableNode.GetID())
         seriesNode.SetXColumnName(cls.SPECTRUM_WAVELENGTH_COLUMN)
-        seriesNode.SetYColumnName(cls.SPECTRUM_VALUE_COLUMN)
+        seriesNode.SetYColumnName(valueTitle)
         seriesNode.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
         seriesNode.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone)
 
@@ -836,7 +886,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             chartNode.AddAndObservePlotSeriesNodeID(seriesNode.GetID())
         chartNode.SetTitle(title)
         chartNode.SetXAxisTitle(cls.SPECTRUM_WAVELENGTH_COLUMN)
-        chartNode.SetYAxisTitle(cls.SPECTRUM_VALUE_COLUMN)
+        chartNode.SetYAxisTitle(valueTitle)
         chartNode.SetLegendVisibility(False)
         return chartNode
 
@@ -852,6 +902,160 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             for node in list(slicer.util.getNodesByClass(className)):
                 if node.GetAttribute(OWNER_ATTRIBUTE) == cls.SPECTRUM_OWNER:
                     slicer.mrmlScene.RemoveNode(node)
+
+    # ------------------------------------------------------------------
+    # The cube received from the app (SLIA-036)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def allocateReceivedCube(bands: int, lines: int, samples: int, dtype):
+        """The image a received cube is assembled in, and a numpy view of it.
+
+        Called on the reader's thread. A vtkImageData is a plain data object
+        until a node observes it, which happens only on the main thread once
+        the cube is complete, so the cube is never copied.
+        """
+        image = vtk.vtkImageData()
+        image.SetDimensions(samples, lines, bands)
+        scalarType = vtk.VTK_FLOAT if np.dtype(dtype).kind == "f" else vtk.VTK_UNSIGNED_SHORT
+        image.AllocateScalars(scalarType, 1)
+        values = numpy_support.vtk_to_numpy(image.GetPointData().GetScalars())
+        return image, values.reshape(bands, lines, samples)
+
+    @classmethod
+    def receivedCubeNode(cls):
+        """The module-owned volume holding the last complete received cube, or None."""
+        for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+            if node.GetAttribute(OWNER_ATTRIBUTE) == cls.RECEIVED_CUBE_OWNER:
+                return node
+        return None
+
+    @classmethod
+    def acceptReceivedCube(cls, cube):
+        """Put a complete received cube (an AssembledCube) into the module-owned volume.
+
+        The cube keeps its received type, uint16 or float32, and SLIAFlow's own
+        geometry: the app's spacing 1 and centred origin say nothing physical.
+        A 109-band cube is given the LCTF grid, marked as assumed; any other
+        band count has no wavelengths. A cube whose messages said it was
+        simulated (the stand-in) keeps that, with the stand-in's own detail.
+        The previous received cube is replaced, and freed, once this one is in.
+        """
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
+        try:
+            node.SetSaveWithScene(False)
+            if isinstance(cube.owner, vtk.vtkImageData):
+                node.SetAndObserveImageData(cube.owner)
+            else:
+                slicer.util.updateVolumeFromArray(node, np.ascontiguousarray(cube.values))
+            cls._applyLiveVolumeGeometry(node)
+            raw = not np.issubdtype(cube.dtype, np.floating)
+            pixelType = cls.RAW_PIXEL_TYPE if raw else cls.CALIBRATED_PIXEL_TYPE
+            received = receivedCubeDetail(cube.host, cube.port, cube.receivedAt, pixelType)
+            if cube.simulated:
+                origin = SIMULATED_ORIGIN
+                detail = f"{cube.simulationDetail or 'simulated'}; {received}"
+            else:
+                origin, detail = RECEIVED_ORIGIN, received
+            node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, origin)
+            node.SetAttribute(RECORDED_CASE_ATTRIBUTE, RECEIVED_CUBE_NAME)
+            node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, detail)
+            # Until a Capture uses it, the cube is its own reception.
+            node.SetAttribute(CAPTURE_ID_ATTRIBUTE, cls.newCaptureId())
+            if cube.bands == len(LCTF_WAVELENGTHS_NM):
+                node.SetAttribute(WAVELENGTHS_ATTRIBUTE,
+                                  ",".join(f"{value:g}" for value in LCTF_WAVELENGTHS_NM))
+                node.SetAttribute(WAVELENGTHS_ASSUMED_ATTRIBUTE, cls.ASSUMED_WAVELENGTHS_TEXT)
+            if node.GetDisplayNode() is None:
+                node.CreateDefaultDisplayNodes()
+            displayNode = node.GetDisplayNode()
+            if displayNode is not None:
+                displayNode.SetSaveWithScene(False)
+                displayNode.AutoWindowLevelOn()
+        except Exception:
+            cls._removeVolumeNode(node)
+            raise
+        cls.removeReceivedCubeNode()
+        node.SetName(RECEIVED_CUBE_NAME)
+        node.SetAttribute(OWNER_ATTRIBUTE, cls.RECEIVED_CUBE_OWNER)
+        logging.info("SLIAFlow: received cube %d x %d x %d %s from %s:%s",
+                     cube.samples, cube.lines, cube.bands, cube.dtype.name, cube.host, cube.port)
+        return node
+
+    @classmethod
+    def removeReceivedCubeNode(cls) -> None:
+        """Remove the received cube, and the preview and spectrum made from it."""
+        node = cls.receivedCubeNode()
+        if node is None:
+            return
+        captureId = node.GetAttribute(CAPTURE_ID_ATTRIBUTE)
+        preview = cls.colourPreviewNode()
+        if preview is not None and preview.GetAttribute(CAPTURE_ID_ATTRIBUTE) == captureId:
+            cls.removeColourPreviewNode()
+        for className in ("vtkMRMLTableNode",):
+            for table in list(slicer.util.getNodesByClass(className)):
+                if (table.GetAttribute(OWNER_ATTRIBUTE) == cls.SPECTRUM_OWNER
+                        and table.GetAttribute(CAPTURE_ID_ATTRIBUTE) == captureId):
+                    cls.removeSpectrumNodes()
+        cls._removeVolumeNode(node)
+
+    @property
+    def receivedRunFolder(self) -> Path:
+        """Where Capture writes a received cube for UC1 and UC2."""
+        return self.repositoryRoot / self.RECEIVED_RUN_RELATIVE_PATH / RECEIVED_CUBE_NAME
+
+    def writeReceivedCubeForRun(self, node) -> CalibratedCube:
+        """Write a received float32 cube where UC1 and UC2 read it, or say why it cannot be.
+
+        Owner decision 3 of SLIA-036: one ENVI float32 cube under the names UC2
+        reads, in a gitignored workspace folder that the next one overwrites.
+        Each file is written under a temporary name and renamed into place.
+        """
+        values = slicer.util.arrayFromVolume(node)
+        if not np.issubdtype(values.dtype, np.floating):
+            raise CalibratedCubeError(self.RECEIVED_RAW_REFUSAL)
+        wavelengths = self.cubeWavelengths(node)
+        if len(wavelengths) != values.shape[0]:
+            raise CalibratedCubeError(self.RECEIVED_NO_WAVELENGTHS_REFUSAL.format(
+                bands=values.shape[0]))
+        bands, lines, samples = values.shape
+        folder = self.receivedRunFolder
+        folder.mkdir(parents=True, exist_ok=True)
+        dataPath = folder / CALIBRATED_DATA_NAME
+        headerPath = folder / CALIBRATED_HEADER_NAME
+        partialData = dataPath.with_name(dataPath.name + ".partial")
+        partialHeader = headerPath.with_name(headerPath.name + ".partial")
+        try:
+            np.ascontiguousarray(values, dtype="<f4").tofile(partialData)
+            rows = [", ".join(f"{value:g}" for value in wavelengths[index:index + 6])
+                    for index in range(0, len(wavelengths), 6)]
+            partialHeader.write_text(
+                "ENVI\n"
+                # No semicolon: ENVI readers, SLIAFlow's own included, take
+                # one as the start of a comment. The provenance is on the node.
+                f"description = {{{RECEIVED_CUBE_NAME}, a cube received from the app and written "
+                f"by SLIAFlow for UC1 and UC2. Wavelengths {self.ASSUMED_WAVELENGTHS_TEXT}}}\n"
+                f"samples = {samples}\nlines = {lines}\nbands = {bands}\n"
+                f"header offset = 0\ndata type = {ENVI_DATA_TYPE_FLOAT32}\n"
+                "interleave = bsq\nbyte order = 0\nwavelength units = Nanometers\n"
+                "wavelength = {" + ",\n".join(rows) + "}\n",
+                encoding="ascii", errors="replace")
+            os.replace(partialData, dataPath)
+            os.replace(partialHeader, headerPath)
+        finally:
+            partialData.unlink(missing_ok=True)
+            partialHeader.unlink(missing_ok=True)
+        return loadCalibratedCube(headerPath)
+
+    def removeReceivedRunCube(self) -> None:
+        """Delete the received cube written for a run, if there is one."""
+        folder = self.receivedRunFolder
+        for name in (CALIBRATED_DATA_NAME, CALIBRATED_HEADER_NAME):
+            (folder / name).unlink(missing_ok=True)
+
+    def uc1InputFor(self, cube: CalibratedCube) -> Uc1Input:
+        """What UC1 runs on for a given calibrated cube, checked against the band mapping."""
+        return describeUc1Input(cube, self.uc1Build.inputDirectory)
 
     # ------------------------------------------------------------------
     # The ground truth beside the cube, where it has one
@@ -953,7 +1157,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         return None
 
     @classmethod
-    def acceptVascularMap(cls, cube, captureId: str, image):
+    def acceptVascularMap(cls, cube, captureId: str, image, provenance=None):
         """Put one validated UC2 map into the module-owned volume, pixels as UC2 wrote them.
 
         `cube` is the CalibratedCube UC2 ran on. The map is a display
@@ -961,10 +1165,11 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         never compared with another capture's. Its node names the component,
         the cube and the fixed parameters, and that the acquisition is
         simulated (ADR-0004 decision 7). The previous map is replaced only
-        once the new node is complete.
+        once the new node is complete. `provenance` is as for acceptOutputs.
         """
         if not captureId:
             raise ValueError(_("A blood-vessel map needs a capture ID."))
+        origin, cubeDetail = provenance or (SIMULATED_ORIGIN, None)
         image = np.asarray(image)
         expectedShape = (cube.lines, cube.samples, cls.OUTPUT_COMPONENTS)
         if image.dtype != np.uint8 or image.shape != expectedShape:
@@ -977,9 +1182,9 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
             slicer.util.updateVolumeFromArray(node, np.ascontiguousarray(image[np.newaxis, ...]))
             cls._applyLiveVolumeGeometry(node)
             node.SetAttribute(OUTPUT_FILE_ATTRIBUTE, fileName)
-            node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, SIMULATED_ORIGIN)
+            node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, origin)
             node.SetAttribute(RECORDED_CASE_ATTRIBUTE, cube.name)
-            node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, uc2ResultDetail(cube.name))
+            node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, uc2ResultDetail(cube.name, cubeDetail))
             node.SetAttribute(UC2_PARAMETERS_ATTRIBUTE, uc2ParametersText())
             node.SetAttribute(CAPTURE_ID_ATTRIBUTE, captureId)
             if node.GetDisplayNode() is None:

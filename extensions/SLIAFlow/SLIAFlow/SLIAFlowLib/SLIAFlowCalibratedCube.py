@@ -2,8 +2,10 @@
 
 The HS Cube panel shows the calibrated cube IUMA's acquisition app will send
 (ADR-0004 decision 1): reflectance as ENVI float32, band sequential, one
-wavelength per band. Until SLIA-030 receives it, it is read from the configured
-header under `input/`, where `002-04` lies. Nothing here writes to it.
+wavelength per band. It is read from the configured header under `input/`,
+where `002-04` lies; a cube received from the app is written in the same form
+for UC1 and UC2 (SLIA-036, `SLIAFlowLogic.writeReceivedCubeForRun`). Nothing
+here writes to it.
 
 The checks are the ones ADR-0004 decision 6 lists for a float32 cube: the header
 and data file agree (data type 4, bsq, byte order 0, no header offset, size),

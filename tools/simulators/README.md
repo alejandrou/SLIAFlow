@@ -50,8 +50,8 @@ build its CRC64 function, so it loads before any message can be constructed.
 ## The stand-in for IUMA's acquisition app
 
 It is **not IUMA's app**. It serves the app's three ports with a recorded cube
-so that SLIAFlow's Connections section can be tested without the app
-(`SLIA-035`). Run it from `tools\simulators`:
+so that SLIAFlow's Connections section and its HS cube reader can be tested
+without the app (`SLIA-035`, `SLIA-036`). Run it from `tools\simulators`:
 
 ```powershell
 cd tools\simulators
@@ -62,11 +62,17 @@ cd tools\simulators
 | --- | --- | --- |
 | P = 18944 | `LiveView` | a colour preview of the cube (bands nearest 650, 550 and 470 nm, reflectance 0-1 as 0-255), RGB uint8, `--frame-rate` per second (default 10) |
 | P + 1 | `Steroscopic` | that preview beside the 650 nm band in grey, RGB uint8, at the same rate |
-| P + 2 | `HsCube` | while a client is connected, the cube band by band as float32 single-component IMAGE messages, one every `--band-interval` s (default 0.1), again every `--cube-interval` s (default 30) |
+| P + 2 | `HsCube` | while a client is connected, the cube band by band, one single-component IMAGE every `--band-interval` s (default 0.1), again every `--cube-interval` s (default 30). Each IMAGE declares the whole cube and carries its band as the sub-volume at offset (0, 0, band - 1), as the app sends it (`SLIA-036`) |
 
-- `--cube <header>` sends another calibrated ENVI float32 BSQ cube; the default
+- `--cube <header>` sends another ENVI BSQ cube, float32 or uint16; the default
   is `input\002-04\LCTF_Calibrated_Cube_Single.hdr`, read into memory whole
-  (about 0.5 GB) and never written.
+  (about 0.5 GB) and never written. A uint16 cube, such as
+  `input\002-04\raw_data.hdr` (1.93 GB), is sent as uint16, as the app sends
+  its raw cube today; its LiveView preview is scaled to its brightest count.
+- `--app-header` sends `HsCube` exactly as the app does: header version 1, no
+  metadata, timestamp 0. Its data is then not marked simulated on the wire, so
+  SLIAFlow cannot tell it from the app; use it to test the reader on the real
+  form, never to stand for a capture.
 - `--drop-bands 5,17,80-84` leaves those band numbers (from 1) out of every
   cube, to see SLIAFlow name the missing bands.
 - `--base-port P` moves all three ports; `--duration S` stops after S seconds.
@@ -74,7 +80,12 @@ cd tools\simulators
   banner says it is not IUMA's app.
 - Every message carries `SLIAFlow.DataOrigin = simulated` and a
   `SLIAFlow.SimulationDetail` naming it a stand-in; `HsCube` messages also carry
-  `SLIAFlow.BandNumber` and `SLIAFlow.WavelengthNm`.
+  `SLIAFlow.BandNumber` and `SLIAFlow.WavelengthNm`. Without `--app-header` they
+  use header version 2, which the app does not, so that the mark reaches the
+  wire. pyigtl always packs an image as its own whole sub-volume and refuses to
+  unpack any other, so the band is packed by `igtl_transport.ImageSlabMessage`;
+  its tests read it back with the recorder's parser, and SLIAFlow's tests check
+  that OpenIGTLinkIF assembles it into the cube.
 - A band counts as sent only once it was written to the connection in full
   (`ImageStreamServer.writtenMessageCount`), and the next band is queued only
   then. An empty send queue proves nothing: pyigtl takes a message off its queue
@@ -104,13 +115,16 @@ Capture of `002-04`'s raw cube, no cameras;
    are confirmed. But every message declares the whole cube,
    `(samples, lines, bands)`, and carries its band as the sub-volume
    `(samples, lines, 1)` at offset `(0, 0, band - 1)`, with the origin at the
-   centre of the whole cube.
+   centre of the whole cube. The stand-in sends this form since `SLIA-036`.
 2. The per-band keys `SLIAFlow.BandNumber` and `SLIAFlow.WavelengthNm` are the
    stand-in's invention; the app's binary shows no per-band metadata.
    **Confirmed**: the app sends no metadata at all. The band number is in the
    sub-volume offset; the wavelength is not sent.
 3. Messages use header version 2 so that metadata reaches the wire; the app's
-   header version is unknown. **Wrong**: the app sends header version 1.
+   header version is unknown. **Wrong**: the app sends header version 1. The
+   stand-in keeps version 2 by default, for its simulated mark, and sends
+   version 1 without metadata and with timestamp 0 under `--app-header`
+   (`SLIA-036`).
 4. The cube goes out automatically while a client is connected; the real app
    sends it on Capture HSI or Send Capture. **Confirmed** for Send Capture: the
    app sends the cube once, and a client that connects after the first band

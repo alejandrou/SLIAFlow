@@ -1,4 +1,5 @@
 import contextlib
+import datetime
 import importlib
 import io
 import os
@@ -797,10 +798,11 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         # SLIA-027: Start, Stop, Capture and the five-output selector. The
         # links, demo mode, layers and band browser are gone (ADR-0003).
         # SLIA-032: what the HS Cube panel shows, bands or the colour preview.
+        # SLIA-036: which cube HS Cube shows and Capture uses.
         self.assertEqual(
             sorted(control.objectName for control in interactive),
             sorted(("startButton", "stopButton", "captureButton", "resultOutputSelector",
-                    "cubeDisplaySelector")),
+                    "cubeDisplaySelector", "cubeSourceSelector")),
         )
         for control in interactive:
             with self.subTest(control=control.objectName):
@@ -2772,8 +2774,11 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             for name in ("CAPTURE_DONE_STATUS", "RESULT_STATUS", "RESULT_STALE_STATUS",
                          "GROUND_TRUTH_STATUS", "GROUND_TRUTH_MISSING_STATUS",
                          "NO_GROUND_TRUTH_STATUS"):
+                # SLIA-036: the texts name the cube by a phrase; for the cube
+                # on disk it is the wording they always had.
                 shown[name] = getattr(widget, name).format(
-                    case=case.name, file="svm.bmp", snapshot="snapshot.png")
+                    cube=f"recorded cube {case.name}", Cube=f"Recorded cube {case.name}",
+                    origin="simulated acquisition", file="svm.bmp", snapshot="snapshot.png")
         for label, text in shown.items():
             with self.subTest(status=label):
                 self.assertIn(case.name, text)
@@ -2807,7 +2812,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         _, widget = self._moduleRepresentationAndWidget()
         widget.initializeParameterNode()
         widget._setStatus(
-            widget.CAPTURE_DONE_STATUS.format(case="004-02", snapshot="output.png")
+            widget.CAPTURE_DONE_STATUS.format(cube="recorded cube 004-02", snapshot="output.png")
         )
         widget.onSceneStartClose()
         try:
@@ -3591,6 +3596,11 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         monitor.setConnectorState(self.IGTL_STATE_CONNECTED, now=0.0)
         return monitor
 
+    def _progress(self, received, declared=None, *, complete=False, incomplete=None,
+                  previous=None):
+        return self._helperModule("SLIAFlowReceivedCube").CubeProgress(
+            received, declared, complete, incomplete, previous)
+
     # --- The row model, without a network --------------------------------
 
     def test_channelMonitorStatesFollowTheConnector(self) -> None:
@@ -3633,17 +3643,6 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         self.assertEqual(cube.row(now=10.3).lastMessage,
                          "HsCube - IMAGE 1080 x 1080 float32 - band 57, 740 nm - 0.3 s ago")
 
-    def test_channelMonitorRefusesAnythingButBandsOnHsCube(self) -> None:
-        cube = self._connectedMonitor()
-        cube.messageReceived(self._observation(1.0, components=3, scalarType="uint8"))
-        row = cube.row(now=1.1)
-        self.assertEqual(row.state, self.STATE_ERROR)
-        self.assertIn("single-component IMAGE", row.detail)
-        # LiveView carries colour frames, which are not an error there.
-        live = self._connectedMonitor("LiveView", port=18944)
-        live.messageReceived(self._observation(1.0, components=3, scalarType="uint8"))
-        self.assertEqual(live.row(now=1.1).state, self.STATE_RECEIVING)
-
     def test_channelMonitorMeasuresTheMessageRate(self) -> None:
         live = self._connectedMonitor("LiveView", port=18944)
         self.assertEqual(live.row(now=0.0).received, "-")
@@ -3657,60 +3656,71 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         cube = self._connectedMonitor(expectedBands=109)
         for index in range(5):
             cube.messageReceived(self._observation(index * 0.5, band=index + 1))
+        cube.setCubeProgress(self._progress(5, 109))
         self.assertEqual(cube.row(now=2.1).received, "5 / 109 bands - 2.0 bands/s")
 
-    def test_channelMonitorNamesMissingBands(self) -> None:
-        cube = self._connectedMonitor(expectedBands=12)
-        for moment, band in enumerate((1, 2, 4, 6, 7, 8, 12)):
-            cube.messageReceived(self._observation(float(moment), band=band))
-        receiving = cube.row(now=6.5)
-        self.assertEqual(receiving.state, self.STATE_RECEIVING)
-        self.assertTrue(receiving.received.startswith("7 / 12 bands"), receiving.received)
+    def test_channelMonitorFollowsTheCubeProgress(self) -> None:
+        """SLIA-036: the HS Cube row says what the reader's assembler holds."""
+        cube = self._connectedMonitor(expectedBands=109)
+        row = cube.row(now=0.5)
+        self.assertEqual((row.state, row.received), (self.STATE_CONNECTED, "0 / 109 bands"))
 
-        incomplete = cube.row(now=16.0)
-        self.assertEqual(incomplete.state, self.STATE_CUBE_INCOMPLETE)
-        self.assertIn("Missing bands: 3, 5, 9-11", incomplete.detail)
+        # The band count the messages declare replaces the setting.
+        cube.messageReceived(self._observation(1.0, band=7))
+        cube.setCubeProgress(self._progress(7, 12))
+        row = cube.row(now=1.5)
+        self.assertEqual(row.state, self.STATE_RECEIVING)
+        self.assertTrue(row.received.startswith("7 / 12 bands"), row.received)
 
-        complete = self._connectedMonitor(expectedBands=3)
-        for band in (1, 2, 3):
-            complete.messageReceived(self._observation(float(band), band=band))
-        row = complete.row(now=3.1)
+        cube.setCubeProgress(self._progress(7, 12, incomplete="Missing bands: 3, 5, 9-11."))
+        row = cube.row(now=16.0)
+        self.assertEqual(row.state, self.STATE_CUBE_INCOMPLETE)
+        self.assertIn("Missing bands: 3, 5, 9-11.", row.detail)
+
+        cube.messageRefused(self._observation(17.0, name="HsCube", messageType="STRING",
+                                              size=None, components=None, scalarType=None),
+                            "a STRING message, not an IMAGE")
+        row = cube.row(now=17.1)
+        self.assertEqual(row.state, self.STATE_ERROR)
+        self.assertIn("Refused a STRING message, not an IMAGE", row.detail)
+        self.assertIn("unchanged", row.detail)
+
+        # An accepted band clears the refusal; the cube thrown away is still named.
+        cube.messageReceived(self._observation(18.0, band=1))
+        cube.setCubeProgress(self._progress(1, 12, previous="Missing bands: 3."))
+        row = cube.row(now=18.1)
+        self.assertEqual(row.state, self.STATE_RECEIVING)
+        self.assertIn("previous cube was incomplete", row.detail)
+        self.assertIn("Missing bands: 3.", row.detail)
+
+        cube.setCubeProgress(self._progress(12, 12, complete=True))
+        row = cube.row(now=18.2)
         self.assertEqual(row.state, self.STATE_CUBE_COMPLETE)
         self.assertEqual(row.detail, "")
-        self.assertTrue(row.received.startswith("3 / 3 bands"), row.received)
+        self.assertTrue(row.received.startswith("12 / 12 bands"), row.received)
 
-    def test_channelMonitorCountsBandsItCannotName(self) -> None:
-        cube = self._connectedMonitor(expectedBands=4)
-        for index in range(3):
-            cube.messageReceived(self._observation(float(index)))
-        row = cube.row(now=13.0)
-        self.assertEqual(row.state, self.STATE_CUBE_INCOMPLETE)
-        self.assertTrue(row.received.startswith("3 / 4 bands"), row.received)
-        self.assertIn("do not say which band they are", row.detail)
-        self.assertNotIn("Missing bands", row.detail)
-        cube.messageReceived(self._observation(13.5))
-        self.assertEqual(cube.row(now=13.6).state, self.STATE_RECEIVING)
-        self.assertTrue(cube.row(now=13.6).received.startswith("1 / 4 bands"))
+    def test_channelMonitorNamesMissingBandsWhenTheAppLeaves(self) -> None:
+        """SLIA-036: a connection that closed mid-cube still names the bands the cube lacked."""
+        cube = self._connectedMonitor(expectedBands=12)
+        cube.messageReceived(self._observation(1.0, band=5))
+        cube.setCubeProgress(self._progress(5, 12))
+        # As the reader reports it: waiting again, the half cube thrown away.
+        cube.setConnectorState(self.IGTL_STATE_WAITING, now=2.0)
+        cube.setCubeProgress(self._progress(5, 12, incomplete="Missing bands: 6-12."))
+        row = cube.row(now=2.5)
+        self.assertEqual(row.state, self.STATE_WAITING)
+        self.assertIn("last cube was incomplete", row.detail)
+        self.assertIn("Missing bands: 6-12.", row.detail)
+        row = cube.row(now=5.5)
+        self.assertEqual(row.state, self.STATE_NOT_RUNNING)
+        self.assertIn("Nothing answers on 127.0.0.1:18946", row.detail)
+        self.assertIn("Missing bands: 6-12.", row.detail)
 
-    def test_channelMonitorStartsANewCube(self) -> None:
-        cube = self._connectedMonitor(expectedBands=5)
-        for band in (1, 2, 3):
-            cube.messageReceived(self._observation(float(band), band=band))
-        # A band number the current cube already has starts the next cube.
-        cube.messageReceived(self._observation(4.0, band=2))
-        self.assertTrue(cube.row(now=4.1).received.startswith("1 / 5 bands"))
-
-        # So does a message after 10 s without any, and not one before.
-        cube.messageReceived(self._observation(13.9, band=3))
-        self.assertTrue(cube.row(now=14.0).received.startswith("2 / 5 bands"))
-        cube.messageReceived(self._observation(24.5, band=4))
-        self.assertTrue(cube.row(now=24.6).received.startswith("1 / 5 bands"))
-
-        # Without band numbers, a message after a full count starts the next cube.
-        unnamed = self._connectedMonitor(expectedBands=2)
-        for index in range(3):
-            unnamed.messageReceived(self._observation(float(index)))
-        self.assertTrue(unnamed.row(now=2.1).received.startswith("1 / 2 bands"))
+        # A connection that closed after a complete cube has nothing to add.
+        complete = self._connectedMonitor(expectedBands=12)
+        complete.setCubeProgress(self._progress(12, 12, complete=True))
+        complete.setConnectorState(self.IGTL_STATE_WAITING, now=2.0)
+        self.assertEqual(complete.row(now=2.5).detail, "")
 
     def test_channelMonitorMarksTheStandIn(self) -> None:
         live = self._connectedMonitor("LiveView", port=18944)
@@ -3725,6 +3735,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         cube = self._connectedMonitor(expectedBands=3)
         for band in (1, 2, 3):
             cube.messageReceived(self._observation(float(band), band=band, simulated=True))
+        cube.setCubeProgress(self._progress(3, 3, complete=True))
         self.assertEqual(cube.row(now=3.1).state, self.STATE_CUBE_COMPLETE + self.STAND_IN_MARK)
 
         # A lost connection still shows what it last delivered.
@@ -3737,7 +3748,8 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         self.assertEqual(row.state, self.STATE_CONNECTED)
         self.assertEqual(row.lastMessage, "-")
         self.assertEqual(row.received, "0 / 3 bands")
-        cube.messageReceived(self._observation(9.0))
+        cube.messageReceived(self._observation(9.0, band=1))
+        cube.setCubeProgress(self._progress(1, 3))
         row = cube.row(now=9.1)
         self.assertEqual(row.state, self.STATE_RECEIVING)
         self.assertEqual(row.received, "1 / 3 bands")
@@ -3846,39 +3858,47 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             process.terminate()
             process.wait(timeout=10)
 
+    def _writeFixtureRawCube(self, folder: Path, *, bands=5, samples=4, lines=3):
+        """A placeholder uint16 cube laid out like the raw cube the app sends today."""
+        folder.mkdir(parents=True, exist_ok=True)
+        values = ((np.arange(bands * lines * samples) * 37) % 4096).astype("<u2").reshape(
+            bands, lines, samples)
+        header = folder / "raw_data.hdr"
+        header.write_text(
+            "ENVI\n"
+            f"samples = {samples}\nlines = {lines}\nbands = {bands}\nheader offset = 0\n"
+            "data type = 12\ninterleave = bsq\nbyte order = 0\n"
+            "wavelength = {" + ", ".join(str(value) for value in self.LCTF_WAVELENGTHS_NM[:bands])
+            + "}\n", encoding="ascii")
+        values.tofile(folder / "raw_data.dat")
+        return header, values
+
     @contextlib.contextmanager
-    def _runningStandIn(self, *, bands=5, dropBands="", bandInterval=0.05, frameRate=20):
-        """The stand-in for IUMA's app, from the repository .venv, on free ports."""
+    def _runningStandIn(self, *, bands=5, dropBands="", bandInterval=0.05, frameRate=20,
+                        appHeader=False, raw=False, basePort=None, samples=4, lines=3):
+        """The stand-in for IUMA's app, from the repository .venv, on free ports.
+
+        `appHeader` sends HsCube exactly as the app does (SLIA-036), `raw` a
+        uint16 cube, and `basePort` reuses a port pair a test already knows.
+        `samples` and `lines` size a calibrated cube.
+        """
         with self._fixtureDirectory() as folder:
-            header, values = self._writeFixtureCalibratedCube(
-                folder / "cube", wavelengths=self.LCTF_WAVELENGTHS_NM[:bands])
-            basePort = self._freeBasePort()
+            if raw:
+                header, values = self._writeFixtureRawCube(folder / "cube", bands=bands)
+            else:
+                header, values = self._writeFixtureCalibratedCube(
+                    folder / "cube", wavelengths=self.LCTF_WAVELENGTHS_NM[:bands],
+                    samples=samples, lines=lines)
+            basePort = self._freeBasePort() if basePort is None else basePort
             arguments = ["-m", "stratum_sim.iuma_app_standin", "--cube", str(header),
                          "--base-port", str(basePort), "--frame-rate", str(frameRate),
                          "--band-interval", str(bandInterval), "--cube-interval", "600"]
             if dropBands:
                 arguments += ["--drop-bands", dropBands]
+            if appHeader:
+                arguments.append("--app-header")
             with self._runningVenvPython(arguments, "The stand-in") as output:
                 yield {"basePort": basePort, "values": values, "output": output}
-
-    # A sender that, like an app nothing is known about, sends no SLIAFlow
-    # metadata: one 4 x 3 float32 HsCube image, `delay` seconds after a client
-    # connects.
-    PLAIN_SENDER_SCRIPT = (
-        "import sys, time, numpy, pyigtl\n"
-        "server = pyigtl.OpenIGTLinkServer(port=int(sys.argv[1]), local_server=True)\n"
-        "print('ready', flush=True)\n"
-        "while not server.is_connected():\n"
-        "    time.sleep(0.01)\n"
-        "time.sleep(float(sys.argv[2]))\n"
-        "image = numpy.zeros((1, 3, 4), dtype=numpy.float32)\n"
-        "server.send_message(pyigtl.ImageMessage(image, device_name='HsCube'), wait=False)\n"
-        "time.sleep(3600)\n"
-    )
-
-    def _runningPlainSender(self, port, delay):
-        return self._runningVenvPython(["-c", self.PLAIN_SENDER_SCRIPT, str(port), str(delay)],
-                                       "The plain sender")
 
     @contextlib.contextmanager
     def _connectionSettings(self, widget, **values):
@@ -3988,6 +4008,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                     self.assertEqual(node.GetType(), self.IGTL_TYPE_CLIENT)
                     self.assertEqual(node.GetServerHostname(), "127.0.0.1")
                     self.assertFalse(node.GetSaveWithScene())
+            # SLIA-036: SLIAFlow's own reader is the HS Cube port's one client.
+            (cubeConnector,) = [node for node in connectors if node.GetServerPort() == base + 2]
+            self.assertEqual(cubeConnector.GetState(), self.IGTL_STATE_OFF,
+                             "Connect started the HS Cube connector")
             for control in ("connectionsHostLineEdit", "liveViewPortSpinBox",
                             "stereoPortSpinBox", "hsCubePortSpinBox", "expectedBandsSpinBox"):
                 with self.subTest(control=control):
@@ -4005,6 +4029,16 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 widget, **self._standInSettings(standIn, stereoPort=0, hsCubePort=0)):
             (listed,) = self._moduleConnectors()
             self.assertTrue(listed.Start())
+            # As an operator would, Connect comes after the connector received
+            # a frame. Stopped the instant it connected, OpenIGTLinkIO's Stop()
+            # never returns (2026-10-06, the suite hung here).
+            deadline = time.monotonic() + self.CONNECTION_TIMEOUT_SEC
+            while (listed.GetNumberOfIncomingMRMLNodes() == 0
+                   and time.monotonic() < deadline):
+                slicer.app.processEvents()
+                time.sleep(0.02)
+            self.assertGreater(listed.GetNumberOfIncomingMRMLNodes(), 0,
+                               "The connector started as in OpenIGTLinkIF received nothing")
             widget._onConnectClicked()
             row = self._waitForRow(widget, "LiveView",
                                    lambda row: row["state"] != self.STATE_WAITING,
@@ -4050,8 +4084,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
     def test_connectionsCountBandsTheStandInDrops(self) -> None:
         _, widget = self._moduleRepresentationAndWidget()
+        # 2 s of silence ends the cube: a band never takes that long to come
+        # after the one before it, even on a loaded machine (1.0 was flaky).
         with self._runningStandIn(dropBands="3") as standIn, self._connectionSettings(
-                widget, cubeIdleSec=1.0, **self._standInSettings(standIn)):
+                widget, cubeIdleSec=2.0, **self._standInSettings(standIn)):
             widget._onConnectClicked()
             cube = self._waitForRow(
                 widget, "HS Cube",
@@ -4061,14 +4097,16 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertIn("Missing bands: 3", widget.ui.connectionsDetailLabel.text)
 
     def test_connectionsForgetASenderThatLeft(self) -> None:
-        """The stand-in leaves and a sender without SLIAFlow metadata takes its port."""
+        """The stand-in leaves, and a sender in the app's own form takes its port.
+
+        The new sender sends no metadata, so nothing the stand-in said, its
+        simulated mark included, may carry over to it.
+        """
         _, widget = self._moduleRepresentationAndWidget()
-        bandKeys = ("OpenIGTLink.SLIAFlow.BandNumber", "OpenIGTLink.SLIAFlow.WavelengthNm",
-                    "OpenIGTLink.SLIAFlow.DataOrigin")
         standInRun = self._runningStandIn()
         standIn = standInRun.__enter__()
         try:
-            port = standIn["basePort"] + 2
+            basePort = standIn["basePort"]
             with self._connectionSettings(widget, **self._standInSettings(
                     standIn, liveViewPort=0, stereoPort=0)):
                 widget._onConnectClicked()
@@ -4082,39 +4120,50 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                     widget, "HS Cube",
                     lambda row: row["state"] in (self.STATE_WAITING, self.STATE_NOT_RUNNING),
                     "HS Cube to lose the stand-in")
-                (cubeNode,) = [slicer.mrmlScene.GetNodeByID(nodeId)
-                               for nodeId in self._incomingNodeIds(self._moduleConnectors())]
-                for key in bandKeys:
-                    with self.subTest(key=key):
-                        self.assertIsNone(cubeNode.GetAttribute(key),
-                                          "The stand-in's metadata outlived its connection")
 
-                with self._runningPlainSender(port, delay=1.5):
-                    connected = self._waitForRow(
+                with self._runningStandIn(appHeader=True, basePort=basePort):
+                    row = self._waitForRow(
                         widget, "HS Cube",
-                        lambda row: row["state"] not in (self.STATE_WAITING,
-                                                         self.STATE_NOT_RUNNING),
-                        "HS Cube to reach the plain sender")
-                    self.assertEqual(connected["state"], self.STATE_CONNECTED)
-                    self.assertEqual(connected["lastMessage"], "-")
-                    self.assertEqual(connected["received"], "0 / 5 bands")
-
-                    row = self._waitForRow(widget, "HS Cube",
-                                           lambda row: row["lastMessage"] != "-",
-                                           "the plain sender's image")
-                    self.assertEqual(row["state"], self.STATE_RECEIVING)
+                        lambda row: row["state"].startswith(self.STATE_CUBE_COMPLETE),
+                        "HS Cube to complete from the app-form sender")
+                    self.assertEqual(row["state"], self.STATE_CUBE_COMPLETE,
+                                     "The stand-in's mark outlived its connection")
                     self.assertTrue(row["lastMessage"].startswith(
-                        "HsCube - IMAGE 4 x 3 float32 - "), row["lastMessage"])
-                    self.assertNotIn("band", row["lastMessage"])
-                    self.assertTrue(row["received"].startswith("1 / 5 bands"), row["received"])
-                    (cubeNode,) = [slicer.mrmlScene.GetNodeByID(nodeId)
-                                   for nodeId in self._incomingNodeIds(self._moduleConnectors())]
-                    for key in bandKeys:
-                        with self.subTest(key=key, sender="plain"):
-                            self.assertIsNone(cubeNode.GetAttribute(key))
+                        "HsCube - IMAGE 4 x 3 float32 - band 5 - "), row["lastMessage"])
+                    self.assertNotIn(" nm", row["lastMessage"])
         finally:
             if standInRun is not None:
                 standInRun.__exit__(None, None, None)
+
+    def test_hsCubeConnectorIsListedButNeverStarted(self) -> None:
+        """SLIA-036: the app serves one client per port, and SLIAFlow's reader is it."""
+        _, widget = self._moduleRepresentationAndWidget()
+        with self._runningStandIn() as standIn, self._connectionSettings(
+                widget, **self._standInSettings(standIn, liveViewPort=0, stereoPort=0)):
+            (connector,) = self._moduleConnectors()
+            self.assertEqual(connector.GetServerPort(), standIn["basePort"] + 2)
+            widget._onConnectClicked()
+            self._waitForRow(widget, "HS Cube",
+                             lambda row: row["state"].startswith(self.STATE_CUBE_COMPLETE),
+                             "HS Cube to complete")
+            self.assertEqual(connector.GetState(), self.IGTL_STATE_OFF,
+                             "The HS Cube connector was started")
+            self.assertTrue(slicer.mrmlScene.IsNodePresent(connector), "The connector is not listed")
+            # Ticked Active in OpenIGTLinkIF: SLIAFlow stops it and says why,
+            # but not at once. OpenIGTLinkIO's Stop() never returns when called
+            # just after the connector connected (2026-10-06, the suite hung).
+            connector.Start()
+            widget._refreshConnections()
+            self.assertNotEqual(connector.GetState(), self.IGTL_STATE_OFF,
+                                "Stopped at once, inside OpenIGTLinkIO's Stop() race")
+            deadline = time.monotonic() + self.CONNECTION_TIMEOUT_SEC
+            while (connector.GetState() != self.IGTL_STATE_OFF
+                   and time.monotonic() < deadline):
+                slicer.app.processEvents()
+                widget._refreshConnections()
+                time.sleep(0.05)
+            self.assertEqual(connector.GetState(), self.IGTL_STATE_OFF)
+            self.assertIn("stopped the HS Cube connector", widget.ui.connectionsDetailLabel.text)
 
     def test_connectionsCloseOnEveryPath(self) -> None:
         """Disconnect stops the listed connectors, scene close lists new ones, quit removes them."""
@@ -4133,14 +4182,16 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         for path in (disconnectButton, sceneClose, applicationQuit):
             with self.subTest(path=path.__name__), self._runningStandIn() as standIn, (
                     self._connectionSettings(widget, **self._standInSettings(standIn))):
-                existing = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "HsCube")
+                # The LiveView connector adopts a vector volume of its device's
+                # name; the HS Cube port is read without any node (SLIA-036).
+                existing = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", "LiveView")
                 existingId = existing.GetID()
                 try:
                     self._assertConnectionsClose(widget, path, existingId,
                                                  keepsConnectors=path is disconnectButton,
                                                  closesScene=path is sceneClose)
                 finally:
-                    # The next path's own HsCube node must be the first by that name.
+                    # The next path's own LiveView node must be the first by that name.
                     if slicer.mrmlScene.GetNodeByID(existingId) is not None:
                         slicer.mrmlScene.RemoveNode(slicer.mrmlScene.GetNodeByID(existingId))
 
@@ -4156,9 +4207,14 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                          "LiveView to receive")
         before = self._moduleConnectors()
         received = self._incomingNodeIds(before)
-        self.assertIn(existingId, received, "The connector did not take the HsCube node")
+        self.assertIn(existingId, received, "The connector did not take the LiveView node")
+        reader = widget.logic.connections.cubeReader
+        self.assertIsNotNone(reader, "Connect started no HS Cube reader")
         path()
         self.assertFalse(widget.logic.connections.connected)
+        self.assertIsNone(widget.logic.connections.cubeReader)
+        self.assertFalse(reader.running, "The HS Cube reader outlived the connection")
+        self.assertIsNone(widget.logic.receivedCubeNode(), "The received cube outlived it")
         after = self._moduleConnectors()
         self.assertEqual([node.GetName() for node in after
                           if node.GetState() != self.IGTL_STATE_OFF], [],
@@ -4175,9 +4231,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         if not closesScene:
             kept = slicer.mrmlScene.GetNodeByID(existingId)
             self.assertIsNotNone(kept, "A node that existed before Connect was removed")
-            for key in ("OpenIGTLink.SLIAFlow.BandNumber",
-                        "OpenIGTLink.SLIAFlow.WavelengthNm",
-                        "OpenIGTLink.SLIAFlow.DataOrigin"):
+            for key in ("OpenIGTLink.SLIAFlow.DataOrigin",):
                 self.assertIsNone(kept.GetAttribute(key),
                                   f"The kept node still carries the sender's {key}")
         for nodeId in set(received) - {existingId}:
@@ -4267,6 +4321,849 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertNotIn(camera.GetID(), self._incomingNodeIds(self._moduleConnectors()),
                              "The connector took the camera volume")
             np.testing.assert_array_equal(slicer.util.arrayFromVolume(camera), cameraFrame)
+
+    # ----------------------------------------------------------------------
+    # SLIA-036: the HS cube received from IUMA's acquisition app
+    #
+    # Every cube here is a placeholder fixture written by the test, standing
+    # for no imagery. Messages are packed by the test's own code from the
+    # OpenIGTLink IMAGE layout, in the form measured on the app
+    # (docs/hardware/acquisition_app_and_hardware.md 4.1), with a bit-by-bit
+    # CRC written here, never by the module under test.
+    # ----------------------------------------------------------------------
+
+    # CRC-64/ECMA-182, as OpenIGTLink computes it, and its published check value.
+    CRC64_POLYNOMIAL = 0x42F0E1EBA9EA3693
+    CRC64_CHECK = 0x6C40DF5F0B497347
+    # The SLIA-036 card: the name a received cube runs under, and where Capture
+    # writes it for UC1 and UC2 (owner decision 3).
+    RECEIVED_CUBE_NAME = "received-from-app"
+    RECEIVED_RUN_RELATIVE_PATH = Path("workspace") / "received-cube" / "received-from-app"
+    CUBE_SOURCE_APP = "Last cube from the app"
+    CUBE_SOURCE_DISK = "Cube on disk"
+    RECEIVED_AT = datetime.datetime(2026, 10, 6, 14, 25, 30)
+
+    def _receivedCubeModule(self):
+        return self._helperModule("SLIAFlowReceivedCube")
+
+    @classmethod
+    def _bitwiseCrc64(cls, data: bytes) -> int:
+        crc = 0
+        for byte in data:
+            crc ^= byte << 56
+            for _bit in range(8):
+                crc = ((crc << 1) ^ cls.CRC64_POLYNOMIAL) if crc & (1 << 63) else crc << 1
+                crc &= (1 << 64) - 1
+        return crc
+
+    def _packedBand(self, band, *, bands, offset, headerVersion=1, metadata=None,
+                    messageType="IMAGE", components=1, scalarCode=None, subvolume=None,
+                    subvolumeOffset=None, bigEndian=False, endianCode=None, imageVersion=1,
+                    crc=None, pixelBytes=None) -> bytes:
+        """One band of a cube as the app sends it, packed from the OpenIGTLink layout."""
+        import struct
+
+        band = np.asarray(band)
+        lines, samples = band.shape
+        if scalarCode is None:
+            scalarCode = 5 if band.dtype.kind == "u" else 10
+        if endianCode is None:
+            endianCode = 1 if bigEndian else 2
+        if pixelBytes is None:
+            pixelBytes = band.astype(band.dtype.newbyteorder(">" if bigEndian else "<")).tobytes()
+        centre = ((samples - 1) / 2.0, (lines - 1) / 2.0, (bands - 1) / 2.0)
+        content = struct.pack(
+            "> H B B B B 3H 12f 3H 3H", imageVersion, components, scalarCode, endianCode, 2,
+            samples, lines, bands, 1, 0, 0, 0, 1, 0, 0, 0, 1, *centre,
+            *(subvolumeOffset or (0, 0, offset)), *(subvolume or (samples, lines, 1)),
+        ) + pixelBytes
+        if headerVersion >= 2:
+            metadata = metadata or {}
+            entries = b"".join(struct.pack("> H H I", len(key.encode()), 3, len(value.encode()))
+                               for key, value in metadata.items())
+            metadataHeader = struct.pack("> H", len(metadata)) + entries
+            metadataBody = b"".join(key.encode() + value.encode() for key, value in metadata.items())
+            body = (struct.pack("> H H I I", 12, len(metadataHeader), len(metadataBody), 0)
+                    + content + metadataHeader + metadataBody)
+        else:
+            body = content
+        header = struct.pack("> H 12s 20s I I Q Q", headerVersion, messageType.encode(), b"HsCube",
+                             0, 0, len(body), self._bitwiseCrc64(body) if crc is None else crc)
+        return header + body
+
+    def _parsedBand(self, packed):
+        module = self._receivedCubeModule()
+        return module.parseBandMessage(module.parseHeader(packed[:58]), packed[58:])
+
+    def _band(self, values, offset, *, bands, simulated=False):
+        """A band as the parser hands it to the assembler."""
+        values = np.asarray(values)
+        lines, samples = values.shape
+        metadata = {"SLIAFlow.DataOrigin": "simulated"} if simulated else {}
+        return self._receivedCubeModule().BandMessage(
+            "HsCube", 2 if simulated else 1, metadata, values.dtype, samples, lines, bands, offset,
+            values)
+
+    @staticmethod
+    def _floatCubeValues(bands, *, lines=3, samples=4, shift=0.0):
+        values = ((np.arange(bands * lines * samples) % 97) / 64.0 + shift).astype(np.float32)
+        return values.reshape(bands, lines, samples)
+
+    @staticmethod
+    def _rawCubeValues(bands, *, lines=3, samples=4):
+        values = ((np.arange(bands * lines * samples) * 37) % 4096).astype(np.uint16)
+        return values.reshape(bands, lines, samples)
+
+    @contextlib.contextmanager
+    def _rawSender(self, data: bytes):
+        """A local one-client server that sends `data` to the client, then stays open."""
+        import socket
+        import threading
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        clients = []
+
+        def serve():
+            try:
+                client, _address = listener.accept()
+            except OSError:
+                return
+            clients.append(client)
+            client.sendall(data)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            yield listener.getsockname()[1]
+        finally:
+            for client in clients:
+                client.close()
+            listener.close()
+            thread.join(5.0)
+
+    def _pollUntil(self, reader, predicate, description):
+        """Poll a reader until predicate(messages, completed); return both."""
+        messages, completed = [], None
+        deadline = time.monotonic() + self.CONNECTION_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            update = reader.poll()
+            messages += update.messages
+            completed = update.completed or completed
+            if predicate(messages, completed):
+                return messages, completed
+            time.sleep(0.02)
+        self.fail(f"Timed out waiting for {description} after {len(messages)} messages.")
+
+    def test_receivedCubeCrcIsTheOpenIGTLinkCrc64(self) -> None:
+        crc64 = self._receivedCubeModule().crc64
+        self.assertEqual(crc64(b"123456789"), self.CRC64_CHECK)
+        self.assertEqual(crc64(b""), 0)
+        # Long enough for the vectorised path, and not a multiple of its rows.
+        data = np.random.default_rng(36).integers(0, 256, 2**17 + 13, dtype=np.uint8).tobytes()
+        self.assertEqual(crc64(data), self._bitwiseCrc64(data))
+
+    def test_receivedCubeMessageIsParsedInBothHeaderVersions(self) -> None:
+        raw = np.arange(12, dtype=np.uint16).reshape(3, 4) * 300
+        band = self._parsedBand(self._packedBand(raw, bands=109, offset=56))
+        self.assertEqual((band.headerVersion, band.metadata), (1, {}))
+        self.assertEqual((band.samples, band.lines, band.bands), (4, 3, 109))
+        self.assertEqual((band.offset, band.bandNumber), (56, 57))
+        self.assertEqual(band.dtype.name, "uint16")
+        self.assertFalse(band.simulated)
+        np.testing.assert_array_equal(band.pixels, raw)
+        bigEndian = self._parsedBand(self._packedBand(raw, bands=109, offset=0, bigEndian=True))
+        np.testing.assert_array_equal(bigEndian.pixels, raw)
+
+        calibrated = np.arange(12, dtype=np.float32).reshape(3, 4) / 8.0
+        metadata = {"SLIAFlow.BandNumber": "3", "SLIAFlow.WavelengthNm": "470",
+                    "SLIAFlow.DataOrigin": "simulated"}
+        band = self._parsedBand(self._packedBand(calibrated, bands=5, offset=2, headerVersion=2,
+                                                 metadata=metadata))
+        self.assertEqual(band.headerVersion, 2)
+        self.assertEqual(band.metadata, metadata)
+        self.assertTrue(band.simulated)
+        self.assertEqual(band.wavelengthNm, 470.0)
+        self.assertEqual(band.dtype.name, "float32")
+        np.testing.assert_array_equal(band.pixels, calibrated)
+
+    def test_receivedCubeRefusesBadMessages(self) -> None:
+        module = self._receivedCubeModule()
+        band = np.zeros((3, 4), dtype=np.uint16)
+        for defect, options, fragment in (
+            ("bad CRC", {"crc": 1}, "CRC does not match"),
+            ("another type", {"messageType": "STRING"}, "not an IMAGE"),
+            ("three components", {"components": 3, "pixelBytes": band.tobytes() * 3},
+             "3 components"),
+            ("int16", {"scalarCode": 4}, "not uint16 or float32"),
+            ("two bands at once", {"subvolume": (4, 3, 2)}, "not one whole band"),
+            ("offset past the cube", {"subvolumeOffset": (0, 0, 5)}, "not one whole band"),
+            ("part of a band", {"subvolume": (4, 2, 1), "pixelBytes": band[:2].tobytes()},
+             "not one whole band"),
+            ("short pixels", {"pixelBytes": band.tobytes()[:-2]}, "bytes of pixels"),
+            ("band number disagrees", {"headerVersion": 2,
+                                       "metadata": {"SLIAFlow.BandNumber": "4"}},
+             "says it is band 4"),
+            # Undefined in OpenIGTLink: read as little endian, 1 became 256.
+            ("byte order code 0", {"endianCode": 0}, "byte order code 0"),
+            ("byte order code 3", {"endianCode": 3}, "byte order code 3"),
+            ("header version 0", {"headerVersion": 0}, "header version 0"),
+            ("header version 3", {"headerVersion": 3}, "header version 3"),
+            ("image header version 99", {"imageVersion": 99}, "image header version 99"),
+            ("no pixels", {"band": np.zeros((2, 0), dtype=np.uint16), "bands": 1, "offset": 0},
+             "no pixels"),
+        ):
+            with self.subTest(defect=defect):
+                packing = {"band": band, "bands": 5, "offset": 2, **options}
+                with self.assertRaises(module.RefusedMessage) as raised:
+                    self._parsedBand(self._packedBand(**packing))
+                self.assertIn(fragment, str(raised.exception))
+
+        # Through the reader: a refused message leaves the cube being received as it was.
+        values = np.arange(3 * 12, dtype=np.uint16).reshape(3, 3, 4)
+        stream = (self._packedBand(values[0], bands=3, offset=0)
+                  + self._packedBand(values[1] + 1, bands=3, offset=1, crc=1)
+                  + self._packedBand(values[1], bands=3, offset=1)
+                  + self._packedBand(values[2], bands=3, offset=2))
+        with self._rawSender(stream) as port:
+            reader = module.HsCubeReader("127.0.0.1", port)
+            reader.start()
+            try:
+                messages, completed = self._pollUntil(
+                    reader, lambda messages, completed: completed is not None, "the cube")
+            finally:
+                reader.stop()
+        self.assertEqual([message.refusal is not None for message in messages],
+                         [False, True, False, False])
+        self.assertIn("CRC", messages[1].refusal)
+        np.testing.assert_array_equal(completed.values, values)
+
+    def test_receivedCubeAssemblesBandsByOffset(self) -> None:
+        module = self._receivedCubeModule()
+        for dtype in (np.uint16, np.float32):
+            with self.subTest(dtype=np.dtype(dtype).name):
+                cube = (np.arange(4 * 3 * 5).reshape(4, 3, 5) * 3).astype(dtype)
+                assembler = module.CubeAssembler()
+                assembler.connectionOpened()
+                completed = [assembler.accept(self._band(cube[offset], offset, bands=4),
+                                              now=float(index))
+                             for index, offset in enumerate((2, 0, 3, 1))]
+                self.assertEqual(completed[:3], [None, None, None])
+                self.assertIsNotNone(completed[3], "Every band arrived and no cube was handed over")
+                np.testing.assert_array_equal(completed[3].values, cube)
+                self.assertEqual(completed[3].values.dtype, np.dtype(dtype))
+                progress = assembler.progress()
+                self.assertEqual((progress.bandsReceived, progress.bandsDeclared,
+                                  progress.complete), (4, 4, True))
+        assembler = module.CubeAssembler()
+        assembler.connectionOpened()
+        bigEndian = np.array([[1, 258]], dtype=">u2")
+        completed = assembler.accept(self._band(bigEndian, 0, bands=1), now=0.0)
+        np.testing.assert_array_equal(completed.values[0], [[1, 258]])
+        self.assertTrue(completed.values.dtype.isnative)
+
+    def test_receivedCubeStartsANewCube(self) -> None:
+        module = self._receivedCubeModule()
+        assembler = module.CubeAssembler()
+        assembler.connectionOpened()
+        cube = np.arange(5 * 12, dtype=np.uint16).reshape(5, 3, 4)
+        for offset in (0, 1, 2):
+            assembler.accept(self._band(cube[offset], offset, bands=5), now=float(offset))
+        # An offset the cube already holds starts the next cube.
+        assembler.accept(self._band(cube[1], 1, bands=5), now=3.0)
+        progress = assembler.progress()
+        self.assertEqual((progress.bandsReceived, progress.bandsDeclared, progress.complete),
+                         (1, 5, False))
+        self.assertEqual(progress.previousIncompleteDetail, "Missing bands: 4-5.")
+
+        # A size or type that changes ends the cube and starts another.
+        assembler.accept(self._band(cube[2], 2, bands=5), now=4.0)
+        assembler.accept(self._band(cube[0].astype(np.float32), 0, bands=5), now=5.0)
+        progress = assembler.progress()
+        self.assertEqual(progress.bandsReceived, 1)
+        self.assertIn("Missing bands: 1, 4-5.", progress.previousIncompleteDetail)
+        self.assertIn("4 x 3 x 5 float32", progress.previousIncompleteDetail)
+        completed = None
+        for offset in range(1, 5):
+            completed = assembler.accept(
+                self._band(cube[offset].astype(np.float32), offset, bands=5), now=6.0 + offset)
+        np.testing.assert_array_equal(completed.values, cube.astype(np.float32))
+
+    def test_receivedCubeNamesMissingBands(self) -> None:
+        module = self._receivedCubeModule()
+        assembler = module.CubeAssembler(idleSec=10.0)
+        assembler.connectionOpened()
+        cube = np.arange(7 * 12, dtype=np.uint16).reshape(7, 3, 4)
+        for offset in (0, 1, 3, 5):
+            assembler.accept(self._band(cube[offset], offset, bands=7), now=float(offset))
+        assembler.tick(now=14.9)
+        self.assertIsNone(assembler.progress().incompleteDetail, "Ended before 10 s of silence")
+        assembler.tick(now=15.0)
+        self.assertEqual(assembler.progress().incompleteDetail, "Missing bands: 3, 5, 7.")
+        self.assertFalse(assembler.assembling, "An incomplete cube was kept")
+
+        # A sender that disconnects leaves its cube incomplete too.
+        assembler.accept(self._band(cube[0], 0, bands=7), now=20.0)
+        assembler.connectionLost()
+        self.assertEqual(assembler.progress().incompleteDetail, "Missing bands: 2-7.")
+        self.assertFalse(assembler.assembling)
+
+    def test_receivedCubeLateConnectionMissesFirstBand(self) -> None:
+        """Measured on the app: a client that joined late missed band 1 (SLIA-030)."""
+        module = self._receivedCubeModule()
+        assembler = module.CubeAssembler()
+        assembler.connectionOpened()
+        cube = np.arange(5 * 12, dtype=np.uint16).reshape(5, 3, 4)
+        for offset in (1, 2, 4):
+            assembler.accept(self._band(cube[offset], offset, bands=5), now=float(offset))
+        assembler.connectionLost()
+        self.assertEqual(assembler.progress().incompleteDetail,
+                         "Missing bands: 1 (connected after the capture started), 4.")
+
+    def test_receivedCubeLateConnectionNeverMixesTwoCubes(self) -> None:
+        """A connection that joined mid-cube must not fill that cube's gaps from the next one."""
+        module = self._receivedCubeModule()
+        assembler = module.CubeAssembler(idleSec=10.0)
+        assembler.connectionOpened()
+        first = np.full((5, 3, 4), 1, dtype=np.uint16)
+        second = np.full((5, 3, 4), 2, dtype=np.uint16)
+        for offset in (3, 4):
+            assembler.accept(self._band(first[offset], offset, bands=5), now=0.1 * offset)
+        completed = None
+        for offset in (0, 1, 2):
+            completed = assembler.accept(self._band(second[offset], offset, bands=5),
+                                         now=1.0 + 0.1 * offset)
+        self.assertIsNone(completed, "Bands of two cubes were put together as one")
+        progress = assembler.progress()
+        self.assertEqual((progress.bandsReceived, progress.complete), (3, False))
+        self.assertEqual(progress.previousIncompleteDetail,
+                         "Missing bands: 1-3 (connected after the capture started).")
+        # The next cube, received from its first band, completes.
+        for offset in (3, 4):
+            completed = assembler.accept(self._band(second[offset], offset, bands=5),
+                                         now=2.0 + 0.1 * offset)
+        np.testing.assert_array_equal(completed.values, second)
+
+    def test_receivedCubeFromTheStandInInBothHeaderVersions(self) -> None:
+        module = self._receivedCubeModule()
+        for appHeader, raw in ((False, False), (True, False), (True, True)):
+            with self.subTest(appHeader=appHeader, raw=raw), self._runningStandIn(
+                    appHeader=appHeader, raw=raw) as standIn:
+                reader = module.HsCubeReader("127.0.0.1", standIn["basePort"] + 2)
+                reader.start()
+                try:
+                    _messages, completed = self._pollUntil(
+                        reader, lambda messages, completed: completed is not None,
+                        "the stand-in's cube")
+                finally:
+                    reader.stop()
+                np.testing.assert_array_equal(completed.values, standIn["values"])
+                self.assertEqual(completed.dtype.name, standIn["values"].dtype.name)
+                # Only header version 2 carries the stand-in's simulated mark.
+                self.assertEqual(completed.simulated, not appHeader)
+                if not appHeader:
+                    self.assertIn("stand-in", completed.simulationDetail)
+
+    def test_receivedCubeSurvivesABusyMainThread(self) -> None:
+        """No band is lost while the main thread is held for 2 s, as a UC1 load can."""
+        module = self._receivedCubeModule()
+        bands = 40
+        # 20 bands/s, faster than the app's measured 8.8 bands/s.
+        with self._runningStandIn(bands=bands, bandInterval=0.05, appHeader=True) as standIn:
+            reader = module.HsCubeReader("127.0.0.1", standIn["basePort"] + 2)
+            reader.start()
+            try:
+                first, _ = self._pollUntil(reader, lambda messages, completed: messages,
+                                           "the first band")
+                busyUntil = time.monotonic() + 2.0
+                spins = 0
+                while time.monotonic() < busyUntil:
+                    spins += 1
+                rest, completed = self._pollUntil(
+                    reader, lambda messages, completed: completed is not None, "the whole cube")
+            finally:
+                reader.stop()
+        self.assertGreater(spins, 0)
+        self.assertEqual(len(first) + len(rest), bands)
+        self.assertTrue(all(message.refusal is None for message in first + rest))
+        np.testing.assert_array_equal(completed.values, standIn["values"])
+
+    @staticmethod
+    def _waitInTheEventLoop(predicate, timeoutSec: float, checkMs: int = 500) -> bool:
+        """Wait inside Qt's event loop, as Slicer does when no Python runs; True if met.
+
+        A loop of processEvents() and sleep() releases the GIL itself, and
+        hides what another Python thread gets while Slicer is idle.
+        """
+        import qt
+
+        loop = qt.QEventLoop()
+        check = qt.QTimer()
+        check.setInterval(checkMs)
+
+        def onCheck():
+            if predicate():
+                loop.quit()
+
+        check.connect("timeout()", onCheck)
+        deadline = qt.QTimer()
+        deadline.setSingleShot(True)
+        deadline.setInterval(int(timeoutSec * 1000))
+        deadline.connect("timeout()", loop.quit)
+        check.start()
+        deadline.start()
+        try:
+            loop.exec_()
+        finally:
+            check.stop()
+            deadline.stop()
+        return predicate()
+
+    def test_receivedCubeArrivesWhileSlicerWaitsForEvents(self) -> None:
+        """Bands of a real size arrive while the main thread waits in Qt's event loop.
+
+        Slicer's main thread keeps Python's GIL there. The reader then ran a
+        moment every few hundred milliseconds, and the app and the stand-in
+        closed the connection after a few bands (SLIA-036 verification).
+        """
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        bands = 20
+        # 1 MB a band: its CRC and copy take hundreds of GIL hand-overs.
+        with self._runningStandIn(bands=bands, samples=512, lines=512,
+                                  bandInterval=0) as standIn, self._connectionSettings(
+                widget, **self._standInSettings(standIn, liveViewPort=0, stereoPort=0,
+                                                expectedBands=bands)):
+            widget._onConnectClicked()
+            arrived = self._waitInTheEventLoop(
+                lambda: widget.logic.receivedCubeNode() is not None, self.CONNECTION_TIMEOUT_SEC)
+            self.assertTrue(arrived, f"No cube while Slicer waited for events; rows: "
+                                     f"{self._connectionRows(widget)}; detail: "
+                                     f"{widget.ui.connectionsDetailLabel.text}")
+            np.testing.assert_array_equal(
+                slicer.util.arrayFromVolume(widget.logic.receivedCubeNode()), standIn["values"])
+            widget._onConnectClicked()
+            self.assertFalse(widget.logic.connections._gilYieldTimer.isActive(),
+                             "The main thread still sleeps for a reader that was stopped")
+
+    def test_imageSlabMessageIsAssembledByOpenIGTLinkIF(self) -> None:
+        """The stand-in's app form is what OpenIGTLinkIF itself reads as one cube."""
+        self.assertTrue(hasattr(slicer, "vtkMRMLIGTLConnectorNode"),
+                        "OpenIGTLinkIF is not loaded; run-slicer-tests.ps1 must load it")
+        with self._runningStandIn(appHeader=True, bandInterval=0.2) as standIn:
+            connector = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLIGTLConnectorNode")
+            connector.SetSaveWithScene(False)
+            try:
+                connector.SetTypeClient("127.0.0.1", standIn["basePort"] + 2)
+                self.assertTrue(connector.Start())
+                assembled = False
+                deadline = time.monotonic() + self.CONNECTION_TIMEOUT_SEC
+                while not assembled and time.monotonic() < deadline:
+                    slicer.app.processEvents()
+                    for index in range(connector.GetNumberOfIncomingMRMLNodes()):
+                        node = connector.GetIncomingMRMLNode(index)
+                        if node is None or node.GetImageData() is None:
+                            continue
+                        array = slicer.util.arrayFromVolume(node)
+                        assembled = (array.shape == standIn["values"].shape
+                                     and np.array_equal(array, standIn["values"]))
+                    time.sleep(0.01)
+                self.assertTrue(assembled, "OpenIGTLinkIF did not assemble the bands into the cube")
+            finally:
+                connector.Stop()
+                incoming = [connector.GetIncomingMRMLNode(index)
+                            for index in range(connector.GetNumberOfIncomingMRMLNodes())]
+                for node in incoming:
+                    if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                        slicer.mrmlScene.RemoveNode(node)
+                slicer.mrmlScene.RemoveNode(connector)
+
+    # --- The received cube in the module ------------------------------------
+
+    def _receivedCube(self, values, *, simulated=False, detail=None):
+        """A complete cube, in the image SLIAFlow assembles into, as the reader hands it over."""
+        values = np.asarray(values)
+        image, view = SLIAFlowLogic.allocateReceivedCube(*values.shape, values.dtype)
+        view[...] = values
+        return self._receivedCubeModule().AssembledCube(
+            image, view, "HsCube", simulated, detail, host="127.0.0.1", port=18946,
+            receivedAt=self.RECEIVED_AT)
+
+    def _deliverReceivedCube(self, widget, cube):
+        """Hand a completed cube to the widget the way the Connections timer does."""
+        widget.logic.connections._completedCube = cube
+        widget._refreshConnections()
+        return widget.logic.receivedCubeNode()
+
+    @contextlib.contextmanager
+    def _widgetForReceivedCubes(self):
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        try:
+            yield widget
+        finally:
+            widget._forgetReceivedCube()
+
+    def test_receivedCubeProvenance(self) -> None:
+        with self._widgetForReceivedCubes() as widget:
+            node = self._deliverReceivedCube(widget, self._receivedCube(self._floatCubeValues(109)))
+            self.assertIsNotNone(node, "The completed cube was not taken")
+            self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "received")
+            self.assertEqual(node.GetAttribute("SLIAFlow.RecordedCase"), self.RECEIVED_CUBE_NAME)
+            detail = node.GetAttribute("SLIAFlow.SimulationDetail")
+            for fragment in ("calibrated float32 cube", "127.0.0.1:18946",
+                             "IUMA's AcquisitionSystemApp", "2026-10-06 14:25:30",
+                             "captured it live or replayed a stored cube",
+                             "cannot tell apart"):
+                with self.subTest(fragment=fragment):
+                    self.assertIn(fragment, detail)
+            self.assertNotIn("simulated", detail)
+
+    def test_standInCubeStaysSimulated(self) -> None:
+        detail = ("stand-in for IUMA's acquisition app, recorded IUMA LCTF capture cube, "
+                  "calibrated by IUMA (simulated acquisition)")
+        with self._widgetForReceivedCubes() as widget:
+            node = self._deliverReceivedCube(widget, self._receivedCube(
+                self._floatCubeValues(109), simulated=True, detail=detail))
+            self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "simulated")
+            self.assertTrue(node.GetAttribute("SLIAFlow.SimulationDetail").startswith(detail))
+
+    def test_receivedRawCubeKeepsItsCounts(self) -> None:
+        raw = self._rawCubeValues(109)
+        with self._widgetForReceivedCubes() as widget:
+            cube = self._receivedCube(raw)
+            node = self._deliverReceivedCube(widget, cube)
+            self.assertIs(node.GetImageData(), cube.owner, "The received cube was copied")
+            array = slicer.util.arrayFromVolume(node)
+            self.assertEqual(array.dtype, np.uint16)
+            np.testing.assert_array_equal(array, raw)
+            # Raw counts are previewed against the cube's brightest count, not reflectance 1.0.
+            preview = widget.logic.acceptColourPreview(node)
+            rgb = np.array(slicer.util.arrayFromVolume(preview))[0]
+            fullScale = float(raw.max())
+            for channel, nanometres in enumerate(self.PREVIEW_WAVELENGTHS_NM):
+                band = self.LCTF_WAVELENGTHS_NM.index(nanometres)
+                expected = np.floor(raw[band].astype(np.float64) * 255.0 / fullScale + 0.5)
+                np.testing.assert_array_equal(rgb[..., channel], expected.astype(np.uint8))
+            chart = widget.logic.showPixelSpectrum(node, 1, 2)
+            self.assertEqual(chart.GetYAxisTitle(), "Raw count (uncalibrated)")
+
+    def test_receivedCubeWavelengthsAreAssumedOnlyFor109Bands(self) -> None:
+        with self._widgetForReceivedCubes() as widget:
+            node = self._deliverReceivedCube(widget, self._receivedCube(self._floatCubeValues(109)))
+            self.assertEqual(widget.logic.cubeWavelengths(node),
+                             tuple(float(value) for value in self.LCTF_WAVELENGTHS_NM))
+            self.assertIn("assumed", node.GetAttribute("SLIAFlow.WavelengthsAssumed"))
+
+            node = self._deliverReceivedCube(widget, self._receivedCube(self._floatCubeValues(5)))
+            self.assertEqual(widget.logic.cubeWavelengths(node), ())
+            self.assertIsNone(node.GetAttribute("SLIAFlow.WavelengthsAssumed"))
+            with self.assertRaises(ValueError):
+                widget.logic.showPixelSpectrum(node, 0, 0)
+            with self.assertRaises(ValueError):
+                widget.logic.acceptColourPreview(node)
+
+    def test_receivedCubeReplacesThePreviousOne(self) -> None:
+        with self._widgetForReceivedCubes() as widget:
+            first = self._receivedCube(self._floatCubeValues(5))
+            firstId = self._deliverReceivedCube(widget, first).GetID()
+            second = self._receivedCube(self._rawCubeValues(5))
+            secondNode = self._deliverReceivedCube(widget, second)
+            owned = [node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+                     if node.GetAttribute("SLIAFlow.Owner") == "ReceivedCube"]
+            self.assertEqual([node.GetID() for node in owned], [secondNode.GetID()])
+            self.assertIsNone(slicer.mrmlScene.GetNodeByID(firstId))
+            # Nothing but this test still holds the first cube's memory.
+            self.assertEqual(first.owner.GetReferenceCount(), 1)
+
+    @contextlib.contextmanager
+    def _appSourcePresentation(self):
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            self.skipTest("Requires the maintained headful Slicer test target")
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        previousLayout = int(layoutNode.GetViewArrangement())
+        with self._widgetForReceivedCubes() as widget:
+            previousSource = widget._parameterNode.cubeSource
+            try:
+                self.assertTrue(widget._activatePresentation())
+                widget._parameterNode.cubeSource = self.CUBE_SOURCE_APP
+                widget._onCubeSourceChanged()
+                yield widget, layoutManager
+            finally:
+                widget.ui.cubeDisplaySelector.setCurrentIndex(0)
+                widget._parameterNode.cubeSource = previousSource
+                widget._deactivatePresentation(restore=True)
+                if int(layoutNode.GetViewArrangement()) != previousLayout:
+                    layoutManager.setLayout(previousLayout)
+
+    def test_hsCubePanelWaitsForACubeFromTheApp(self) -> None:
+        with self._appSourcePresentation() as (widget, layoutManager):
+            composite = layoutManager.sliceWidget(widget.CUBE_VIEW_NAME).sliceLogic() \
+                .GetSliceCompositeNode()
+            self.assertIn("Waiting for a complete cube from the app",
+                          widget.panelMessage(widget.CUBE_VIEW_NAME))
+            self.assertIsNone(composite.GetBackgroundVolumeID())
+            widget._parameterNode.cubeSource = self.CUBE_SOURCE_DISK
+            widget._onCubeSourceChanged()
+            self.assertEqual(widget.panelMessage(widget.CUBE_VIEW_NAME),
+                             "Waiting for the hyperspectral cube.")
+
+    def test_receivedCubeIsShownInTheHsCubePanel(self) -> None:
+        with self._appSourcePresentation() as (widget, layoutManager):
+            composite = layoutManager.sliceWidget(widget.CUBE_VIEW_NAME).sliceLogic() \
+                .GetSliceCompositeNode()
+            node = self._deliverReceivedCube(widget, self._receivedCube(self._floatCubeValues(109)))
+            self.assertEqual(composite.GetBackgroundVolumeID(), node.GetID())
+            self.assertEqual(widget.panelMessage(widget.CUBE_VIEW_NAME), "")
+            self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME, (
+                "Cube received from the app", "calibrated reflectance", "assumed"))
+            widget.ui.cubeDisplaySelector.setCurrentIndex(widget.CUBE_DISPLAY_PREVIEW)
+            preview = widget.logic.colourPreviewNode()
+            self.assertIsNotNone(preview, "No colour preview was built for the received cube")
+            self.assertEqual(composite.GetBackgroundVolumeID(), preview.GetID())
+            widget.ui.cubeDisplaySelector.setCurrentIndex(widget.CUBE_DISPLAY_BANDS)
+
+            rawNode = self._deliverReceivedCube(widget, self._receivedCube(self._rawCubeValues(109)))
+            self.assertEqual(composite.GetBackgroundVolumeID(), rawNode.GetID())
+            self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME, (
+                "Cube received from the app", "raw counts, uncalibrated"))
+
+            self._deliverReceivedCube(widget, self._receivedCube(self._floatCubeValues(5)))
+            self._waitForCaption(widget, layoutManager, widget.CUBE_VIEW_NAME,
+                                 ("wavelength not sent",))
+
+    # --- Capture on a received cube --------------------------------------------
+
+    @contextlib.contextmanager
+    def _appSourceCaptureSession(self, **options):
+        with self._captureSession(**options) as session:
+            widget = session["widget"]
+            previousSource = widget._parameterNode.cubeSource
+            widget._parameterNode.cubeSource = self.CUBE_SOURCE_APP
+            session["runFolder"] = session["root"] / self.RECEIVED_RUN_RELATIVE_PATH
+            try:
+                yield session
+            finally:
+                widget._cancelCapture()
+                widget._forgetReceivedCube()
+                widget._parameterNode.cubeSource = previousSource
+
+    def _captureReceivedCube(self, session, values):
+        widget = session["widget"]
+        node = self._deliverReceivedCube(widget, self._receivedCube(values))
+        self._startFakeCamera(session)
+        self._showFrame(session, 10)
+        widget._onCaptureClicked()
+        return node
+
+    def _assertCaptureRuns(self, widget):
+        self.assertTrue(widget.captureInProgress,
+                        f"The capture ended at once: {widget.ui.statusLabel.text} / "
+                        f"{widget.ui.vascularStatusLabel.text}")
+
+    def test_captureWithoutAReceivedCubeIsRefused(self) -> None:
+        with self._appSourceCaptureSession(uc2=True) as session:
+            widget = session["widget"]
+            self._startFakeCamera(session)
+            self._showFrame(session, 10)
+            widget._onCaptureClicked()
+            self.assertFalse(widget.captureInProgress)
+            self.assertFalse(widget.liveViewFrozen)
+            self.assertIn("no complete cube has been received", widget.ui.statusLabel.text)
+            self.assertEqual(session["processes"], [])
+            self.assertEqual(list(session["captures"].glob("*.png")), [], "A snapshot was saved")
+
+    def test_captureOnAReceivedFloat32CubeRunsUc1AndUc2(self) -> None:
+        calibrated = self._helperModule("SLIAFlowCalibratedCube")
+        values = self._floatCubeValues(109)
+        with self._appSourceCaptureSession(uc2=True) as session:
+            widget = session["widget"]
+            node = self._captureReceivedCube(session, values)
+            self._assertCaptureRuns(widget)
+            self.assertEqual([Path(process.program).name for process in session["processes"]],
+                             [self.UC2_EXECUTABLE_NAME, "stratum.opt.intermediate.exe"])
+            runFolder = session["runFolder"]
+            written = np.fromfile(runFolder / "LCTF_Calibrated_Cube_Single.dat",
+                                  dtype="<f4").reshape(values.shape)
+            np.testing.assert_array_equal(written, values)
+            cube = calibrated.loadCalibratedCube(runFolder / "LCTF_Calibrated_Cube_Single.hdr")
+            self.assertEqual(cube.wavelengths,
+                             tuple(float(value) for value in self.LCTF_WAVELENGTHS_NM))
+            self.assertEqual(self._uc2Process(session).arguments,
+                             [runFolder.resolve().as_posix()])
+            self.assertEqual(widget.logic.currentRun.case.name, self.RECEIVED_CUBE_NAME)
+            # HS Cube keeps the received node, now this capture's.
+            self.assertEqual(widget.logic.receivedCubeNode().GetID(), node.GetID())
+            self.assertEqual(node.GetAttribute("SLIAFlow.CaptureId"), widget._captureId)
+
+            self._finishUc2(session, seed=3)
+            self._finishCapture(session, seed=4)
+            self.assertFalse(widget.captureInProgress)
+            self.assertIsNotNone(widget.logic.outputNode("imageRGB.bmp"))
+            self.assertIsNotNone(widget.logic.vascularMapNode())
+            self.assertIn("the cube received from the app", widget.ui.statusLabel.text)
+            self.assertIn("received from the app", widget.ui.resultStatusLabel.text)
+            self.assertNotIn("recorded cube", widget.ui.resultStatusLabel.text.lower())
+
+    def test_outputsOfAReceivedCubeCarryItsProvenance(self) -> None:
+        with self._appSourceCaptureSession(uc2=True) as session:
+            widget = session["widget"]
+            self._captureReceivedCube(session, self._floatCubeValues(109))
+            self._assertCaptureRuns(widget)
+            self._finishUc2(session, seed=3)
+            self._finishCapture(session, seed=4)
+            received = "calibrated float32 cube received over OpenIGTLink from 127.0.0.1:18946"
+            outputs = [widget.logic.outputNode(name) for name in self.UC1_OUTPUT_FILE_NAMES]
+            for node, producer in ([(node, "real UC1 pipeline") for node in outputs]
+                                   + [(widget.logic.vascularMapNode(),
+                                       "real UC2 blood-vessel enhancement")]):
+                with self.subTest(node=node.GetName()):
+                    self.assertEqual(node.GetAttribute("SLIAFlow.DataOrigin"), "received")
+                    self.assertEqual(node.GetAttribute("SLIAFlow.RecordedCase"),
+                                     self.RECEIVED_CUBE_NAME)
+                    self.assertTrue(node.GetAttribute("SLIAFlow.SimulationDetail").startswith(
+                        f"{producer}, {received}"), node.GetAttribute("SLIAFlow.SimulationDetail"))
+
+    def test_resultKeepsTheOriginOfItsOwnCube(self) -> None:
+        """A stand-in result stays described as the stand-in's after a capture on the app's fails."""
+        with self._appSourceCaptureSession(uc2=True) as session:
+            widget = session["widget"]
+            standIn = self._receivedCube(self._floatCubeValues(109), simulated=True,
+                                         detail="stand-in fixture")
+            self._deliverReceivedCube(widget, standIn)
+            self._startFakeCamera(session)
+            self._showFrame(session, 10)
+            widget._onCaptureClicked()
+            self._assertCaptureRuns(widget)
+            self._finishUc2(session, seed=3)
+            self._finishCapture(session, seed=4)
+            self.assertIn("stand-in", widget.ui.resultStatusLabel.text)
+
+            # The app's cube, with no wavelengths to map: the capture fails at once
+            # and the stand-in's result stays shown.
+            self._captureReceivedCube(session, self._floatCubeValues(5))
+            self.assertFalse(widget.captureInProgress)
+            self.assertIn("received from the app", widget.ui.statusLabel.text)
+            self.assertIn("stand-in", widget.ui.resultStatusLabel.text)
+            self.assertNotIn("received from the app", widget.ui.resultStatusLabel.text)
+
+    def test_runCubeKeptByADisconnectIsRemovedWhenItsCaptureEnds(self) -> None:
+        with self._appSourceCaptureSession(uc2=True) as session:
+            widget = session["widget"]
+            self._captureReceivedCube(session, self._floatCubeValues(109))
+            self._assertCaptureRuns(widget)
+            runCube = session["runFolder"] / "LCTF_Calibrated_Cube_Single.dat"
+            # Disconnect while UC1 and UC2 still read it.
+            widget._forgetReceivedCube()
+            self.assertTrue(runCube.exists(), "The cube a running capture reads was removed")
+            self._finishUc2(session, seed=3)
+            self.assertTrue(runCube.exists(), "Removed while UC1 still reads it")
+            self._finishCapture(session, seed=4)
+            self.assertFalse(widget.captureInProgress)
+            self.assertFalse(runCube.exists(), "The run cube outlived its capture")
+            self.assertFalse(runCube.with_suffix(".hdr").exists())
+
+    def test_captureOnAReceivedUint16CubeRunsNothing(self) -> None:
+        with self._appSourceCaptureSession(uc2=True) as session:
+            widget = session["widget"]
+            node = self._captureReceivedCube(session, self._rawCubeValues(109))
+            self.assertEqual(session["processes"], [], "A run was started on raw counts")
+            self.assertFalse(widget.captureInProgress)
+            self.assertFalse(widget.liveViewFrozen)
+            for label in (widget.ui.statusLabel, widget.ui.vascularStatusLabel):
+                with self.subTest(label=label.objectName):
+                    self.assertIn("raw uint16", label.text)
+                    self.assertIn("calibrated float32 stream", label.text)
+            self.assertFalse((session["runFolder"] / "LCTF_Calibrated_Cube_Single.dat").exists())
+            self.assertEqual(widget.logic.receivedCubeNode().GetID(), node.GetID(),
+                             "The raw cube left HS Cube")
+
+    def test_captureOnAReceivedCubeOfAnotherBandCountIsRefused(self) -> None:
+        with self._appSourceCaptureSession(uc2=True) as session:
+            widget = session["widget"]
+            self._captureReceivedCube(session, self._floatCubeValues(5))
+            self.assertEqual(session["processes"], [])
+            self.assertFalse(widget.captureInProgress)
+            self.assertIn("no wavelengths", widget.ui.statusLabel.text)
+            self.assertIn("not classified", widget.ui.statusLabel.text)
+
+    def test_cubeCompletedDuringACaptureWaitsForItsEnd(self) -> None:
+        first = self._floatCubeValues(109)
+        second = self._floatCubeValues(109, shift=0.5)
+        with self._appSourceCaptureSession() as session:
+            widget = session["widget"]
+            node = self._captureReceivedCube(session, first)
+            self._assertCaptureRuns(widget)
+            self._deliverReceivedCube(widget, self._receivedCube(second))
+            self.assertEqual(widget.logic.receivedCubeNode().GetID(), node.GetID(),
+                             "A new cube replaced the one the capture runs on")
+            np.testing.assert_array_equal(slicer.util.arrayFromVolume(node), first)
+            self._finishCapture(session, seed=4)
+            self.assertFalse(widget.captureInProgress)
+            np.testing.assert_array_equal(
+                slicer.util.arrayFromVolume(widget.logic.receivedCubeNode()), second)
+
+    # --- Lifetime --------------------------------------------------------------------
+
+    def test_receivedCubeIsFreedOnDisconnectAndSceneClose(self) -> None:
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        with self._fixtureDirectory() as root:
+            widget.logic.setRunEnvironment(repositoryRoot=root)
+            runCube = root / self.RECEIVED_RUN_RELATIVE_PATH / "LCTF_Calibrated_Cube_Single.dat"
+            try:
+                with self._runningStandIn() as standIn, self._connectionSettings(
+                        widget, **self._standInSettings(standIn, liveViewPort=0, stereoPort=0)):
+                    widget._onConnectClicked()
+                    self._waitForRow(widget, "HS Cube",
+                                     lambda row: row["state"].startswith(self.STATE_CUBE_COMPLETE),
+                                     "HS Cube to complete")
+                    self.assertIsNotNone(widget.logic.receivedCubeNode(),
+                                         "The completed cube was not taken")
+                    # As left by an earlier Capture on a received cube.
+                    runCube.parent.mkdir(parents=True, exist_ok=True)
+                    runCube.write_bytes(b"test fixture")
+                    widget._onConnectClicked()
+                    self.assertIsNone(widget.logic.receivedCubeNode(), "Disconnect kept the cube")
+                    self.assertFalse(runCube.exists(), "Disconnect kept the cube written for a run")
+
+                self._deliverReceivedCube(widget, self._receivedCube(self._floatCubeValues(5)))
+                widget._heldReceivedCube = self._receivedCube(self._floatCubeValues(5))
+                runCube.write_bytes(b"test fixture")
+                slicer.mrmlScene.Clear()
+                self.assertIsNone(widget._heldReceivedCube, "Scene close kept a held cube")
+                self.assertFalse(runCube.exists(), "Scene close kept the cube written for a run")
+            finally:
+                widget.initializeParameterNode()
+                widget.logic.setRunEnvironment(repositoryRoot=None)
+
+    def test_readerStopsOnCleanup(self) -> None:
+        """Reload calls cleanup() on the old widget: its HS Cube reader must not outlive it."""
+        _, widget = self._moduleRepresentationAndWidget()
+        widget.initializeParameterNode()
+        names = ("liveViewPort", "stereoPort", "hsCubePort")
+        previous = {name: getattr(widget._parameterNode, name) for name in names}
+        try:
+            widget._parameterNode.liveViewPort = 0
+            widget._parameterNode.stereoPort = 0
+            widget._parameterNode.hsCubePort = self._freeBasePort()
+            widget._refreshConnections()
+            widget._onConnectClicked()
+            reader = widget.logic.connections.cubeReader
+            self.assertIsNotNone(reader)
+            self.assertTrue(reader.running)
+            slicer.util.reloadScriptedModule("SLIAFlow")
+            self.assertFalse(reader.running, "The HS Cube reader outlived the module")
+        finally:
+            if widget.logic.connections.connected:
+                widget._onConnectClicked()
+            _, current = self._moduleRepresentationAndWidget()
+            current.initializeParameterNode()
+            for name, value in previous.items():
+                setattr(current._parameterNode, name, value)
+            current._refreshConnections()
 
     # ----------------------------------------------------------------------
     # SLIA-021: the UC2 blood-vessel map in Enhanced Vascularization
@@ -4662,7 +5559,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 self.assertEqual(widget.panelMessage(widget.VASCULAR_VIEW_NAME), "",
                                  "The waiting text stayed over the map")
                 self.assertEqual(widget.panelCaption(widget.VASCULAR_VIEW_NAME),
-                                 widget.VASCULAR_CAPTION.format(case=self.CALIBRATED_CUBE_NAME))
+                                 "Enhanced vascularization for recorded cube 002-04")
                 for viewName in widget.VIEW_NAMES:
                     if viewName == widget.VASCULAR_VIEW_NAME:
                         continue

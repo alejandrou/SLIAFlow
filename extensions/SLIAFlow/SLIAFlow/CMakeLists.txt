@@ -11,6 +11,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/${MODULE_NAME}Cube.py
   ${MODULE_NAME}Lib/${MODULE_NAME}CalibratedCube.py
   ${MODULE_NAME}Lib/${MODULE_NAME}Connections.py
+  ${MODULE_NAME}Lib/${MODULE_NAME}ReceivedCube.py
   ${MODULE_NAME}Lib/${MODULE_NAME}Uc1Input.py
   ${MODULE_NAME}Lib/${MODULE_NAME}Uc1Run.py
   ${MODULE_NAME}Lib/${MODULE_NAME}Uc2Run.py
