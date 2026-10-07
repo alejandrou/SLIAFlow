@@ -6,7 +6,15 @@ param(
     [string]$Target = "Source",
 
     # Keep the main window for layout-manager and renderer coverage.
-    [switch]$Headful
+    [switch]$Headful,
+
+    # Run only the SLIAFlowTest methods whose names contain one of these
+    # case-sensitive fragments: -Test receivedCube,Connections.
+    [string[]]$Test = @(),
+
+    # Stop Slicer and every process it started after this many seconds.
+    [ValidateRange(1, 2147483)]
+    [int]$TimeoutSeconds = 900
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +34,78 @@ function Stop-WithError {
     Write-Host "ERROR: $Message" -ForegroundColor Red
     Write-Host "No files or configuration were installed or modified."
     exit 1
+}
+
+# The processes this run started, by ID: Slicer, SlicerApp-real, the stand-in
+# for IUMA's app and their console hosts. Each entry holds its process open, so
+# Windows cannot give that ID to another process while the run refers to it,
+# and a process whose parent has already exited is still found through it.
+function Update-ProcessTree {
+    param([System.Collections.Generic.Dictionary[int, object]]$Tree)
+
+    $snapshot = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate, Name)
+    do {
+        $added = $false
+        foreach ($entry in $snapshot) {
+            $id = [int]$entry.ProcessId
+            $parentId = [int]$entry.ParentProcessId
+            if ($Tree.ContainsKey($id) -or -not $Tree.ContainsKey($parentId)) {
+                continue
+            }
+            # A process created before its recorded parent was started by an
+            # earlier process that had the same ID, so it is not part of the run.
+            if ($entry.CreationDate -lt $Tree[$parentId].Created) {
+                continue
+            }
+            try {
+                $candidate = [System.Diagnostics.Process]::GetProcessById($id)
+                $null = $candidate.SafeHandle
+            }
+            catch {
+                continue
+            }
+            # The ID may have passed to a new process since the snapshot; the
+            # held process is the listed one only if it started at that time.
+            if ([math]::Abs(($candidate.StartTime - $entry.CreationDate).TotalMilliseconds) -ge 1) {
+                $candidate.Dispose()
+                continue
+            }
+            $Tree[$id] = [pscustomobject]@{ Process = $candidate; Created = $entry.CreationDate; Name = $entry.Name }
+            $added = $true
+        }
+    } while ($added)
+}
+
+# Stops every process in the tree that is still running, including any started
+# since the last scan, and nothing else.
+function Stop-ProcessTree {
+    param([System.Collections.Generic.Dictionary[int, object]]$Tree)
+
+    $stopped = [System.Collections.Generic.List[string]]::new()
+    for ($pass = 0; $pass -lt 3; $pass++) {
+        Update-ProcessTree -Tree $Tree
+        $running = @($Tree.Values | Where-Object { -not $_.Process.HasExited })
+        if ($running.Count -eq 0) {
+            break
+        }
+        foreach ($member in $running) {
+            try {
+                $member.Process.Kill()
+                $stopped.Add("$($member.Name) ($($member.Process.Id))")
+            }
+            catch { }
+        }
+        foreach ($member in $running) {
+            [void]$member.Process.WaitForExit(5000)
+        }
+    }
+    if ($stopped.Count -gt 0) {
+        Write-Host "Stopped $($stopped.Count) processes this run started: $($stopped -join ', ')"
+    }
+    $survivors = @($Tree.Values | Where-Object { -not $_.Process.HasExited } | ForEach-Object { "$($_.Name) ($($_.Process.Id))" })
+    if ($survivors.Count -gt 0) {
+        Write-Host "WARNING: still running after the stop: $($survivors -join ', ')" -ForegroundColor Red
+    }
 }
 
 function Get-ConfiguredSlicerExecutable {
@@ -116,8 +196,19 @@ else {
 # Fail loudly when the module that Slicer actually loaded is not the one this
 # invocation was supposed to test. Without this guard a stale build copy
 # produces a green run that says nothing about the working tree.
+$fragments = @()
+if ($PSBoundParameters.ContainsKey("Test")) {
+    $fragments = @($Test | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($fragments.Count -eq 0) {
+        Stop-WithError "-Test was given without a test-name fragment."
+    }
+}
+
 $pythonExpectedRoot = $expectedModuleRoot | ConvertTo-Json -Compress
 $pythonTestName = $testName | ConvertTo-Json -Compress
+# The selection reaches Slicer only inside this code, never through the
+# environment, so Reload and Test cannot inherit it.
+$pythonFragments = ConvertTo-Json -InputObject @($fragments) -Compress
 $pythonStatements = @(
     "import os, slicer, slicer.testing, slicer.util",
     "expectedRoot = os.path.normcase(os.path.realpath($pythonExpectedRoot))",
@@ -126,7 +217,13 @@ $pythonStatements = @(
     "os.path.normcase(loadedPath).startswith(expectedRoot) or slicer.testing.exitFailure('SLIAFlow was loaded from ' + loadedPath + ' but this run must exercise ' + expectedRoot + '. A built-in module of a build launcher shadows --additional-module-paths.')",
     # Run the tests from the directory the module was actually loaded from, so
     # the reported test path can never disagree with the checked module path.
-    "slicer.testing.runUnitTest([os.path.dirname(loadedPath)], $pythonTestName)"
+    "import importlib, sys",
+    "sys.path.append(os.path.dirname(loadedPath))",
+    "module = importlib.import_module($pythonTestName)",
+    "testLibrary = importlib.import_module('SLIAFlowLib.SLIAFlowTest')",
+    "hasattr(testLibrary, 'runCommandLineTests') or slicer.testing.exitFailure('This SLIAFlow copy has no runCommandLineTests (SLIA-038). Rebuild it with build-sliaflow.ps1.')",
+    # Prints a Started line before each test, so a hung test is named.
+    "testLibrary.runCommandLineTests(module, module.SLIAFlowTest, $pythonFragments) or slicer.testing.exitFailure('Slicer test failed.')"
 )
 $pythonCode = $pythonStatements -join "; "
 
@@ -194,6 +291,10 @@ if ($null -ne $launcherSettings) {
     Write-Host "OpenIGTLinkIF:     $openIGTLinkBuildPath"
 }
 Write-Host "Test:              $testName"
+if ($fragments.Count -gt 0) {
+    Write-Host "Selection:         $($fragments -join ', ')"
+}
+Write-Host "Timeout:           $TimeoutSeconds s"
 
 $process = [System.Diagnostics.Process]::new()
 $process.StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -205,24 +306,125 @@ $process.StartInfo.Arguments = ($slicerArguments | ForEach-Object {
     ConvertTo-WindowsCommandLineArgument $_
 }) -join " "
 
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$beforeStart = Get-Date
 try {
-    if (-not $process.Start()) {
-        Stop-WithError "Slicer could not be started at '$slicerExecutable'. Verify that the configured file is a usable Slicer executable."
-    }
-    $standardOutput = $process.StandardOutput.ReadToEndAsync()
-    $standardError = $process.StandardError.ReadToEndAsync()
-    $process.WaitForExit()
-    $standardOutput.Result | Write-Host -NoNewline
-    $standardError.Result | Write-Host -ForegroundColor Yellow -NoNewline
-    $exitCode = $process.ExitCode
+    $started = $process.Start()
 }
 catch {
+    $started = $false
+}
+if (-not $started) {
     Stop-WithError "Slicer could not be started at '$slicerExecutable'. Verify that the configured file is a usable Slicer executable."
 }
+try {
+    $processStartTime = $process.StartTime
+}
+catch {
+    $processStartTime = $beforeStart
+}
+# The started process keeps its own handle, so its ID stays reserved too.
+$processTree = [System.Collections.Generic.Dictionary[int, object]]::new()
+$processTree[$process.Id] = [pscustomobject]@{
+    Process = $process
+    Created = $processStartTime
+    Name = [System.IO.Path]::GetFileName($slicerExecutable)
+}
+# Often enough to hold each process before a short-lived parent exits.
+$scanIntervalSeconds = 2
+# How long output is still read after Slicer has exited. A pipe still open by
+# then is held by a process Slicer left running, which the stop below ends.
+$drainSeconds = 2
 
-if ($exitCode -ne 0) {
-    Write-Error "Slicer test '$testName' failed with exit code $exitCode."
-    exit $exitCode
+$lastStarted = $null
+$partialRun = $null
+$timedOut = $false
+$exitCode = 1
+try {
+    # Both streams are read a line at a time as Slicer writes them, and neither
+    # read waits for the other, so a full pipe cannot stall Slicer.
+    $readers = @(
+        @{ Reader = $process.StandardOutput; Color = $null; Line = $null },
+        @{ Reader = $process.StandardError; Color = "Yellow"; Line = $null }
+    )
+    foreach ($reader in $readers) {
+        $reader.Line = $reader.Reader.ReadLineAsync()
+    }
+    $nextScan = 0.0
+    $exitedAt = $null
+    while ($true) {
+        $elapsed = $stopwatch.Elapsed.TotalSeconds
+        if ($elapsed -ge $TimeoutSeconds) {
+            $timedOut = $true
+            break
+        }
+        if ($elapsed -ge $nextScan) {
+            Update-ProcessTree -Tree $processTree
+            $nextScan = $elapsed + $scanIntervalSeconds
+        }
+        $open = @($readers | Where-Object { $null -ne $_.Line })
+        if ($process.HasExited) {
+            if ($null -eq $exitedAt) {
+                $exitedAt = $elapsed
+            }
+            if ($open.Count -eq 0 -or ($elapsed - $exitedAt) -ge $drainSeconds) {
+                break
+            }
+        }
+        if ($open.Count -eq 0) {
+            # The pipes can close before Slicer exits; the timeout still holds.
+            [void]$process.WaitForExit(200)
+            continue
+        }
+        [void][System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]@($open | ForEach-Object { $_.Line }), 200)
+        foreach ($reader in $open) {
+            while ($null -ne $reader.Line -and $reader.Line.IsCompleted) {
+                $line = $reader.Line.Result
+                if ($null -eq $line) {
+                    $reader.Line = $null
+                    break
+                }
+                if ($line -match '^Started: (\S+)') {
+                    $lastStarted = $Matches[1]
+                }
+                elseif ($line.StartsWith("Partial run: ")) {
+                    $partialRun = $line
+                }
+                if ($null -ne $reader.Color) {
+                    Write-Host $line -ForegroundColor $reader.Color
+                }
+                else {
+                    Write-Host $line
+                }
+                $reader.Line = $reader.Reader.ReadLineAsync()
+            }
+        }
+    }
+    if (-not $timedOut) {
+        $exitCode = $process.ExitCode
+    }
+}
+finally {
+    if ($timedOut) {
+        $lastTest = if ($null -ne $lastStarted) { $lastStarted } else { "no test had started" }
+        Write-Host "TIMEOUT after $TimeoutSeconds s. Last test started: $lastTest" -ForegroundColor Red
+    }
+    # Runs whether Slicer timed out, exited, or the run was interrupted with
+    # Ctrl+C, so no process the run started outlives it.
+    Stop-ProcessTree -Tree $processTree
+    foreach ($member in $processTree.Values) {
+        $member.Process.Dispose()
+    }
 }
 
-exit 0
+if ($timedOut) {
+    $exitCode = 1
+}
+elseif ($exitCode -ne 0) {
+    Write-Host "ERROR: Slicer test '$testName' failed with exit code $exitCode." -ForegroundColor Red
+}
+# A partial run says so as the last line, so it cannot pass for the suite.
+if ($null -ne $partialRun) {
+    Write-Host $partialRun
+}
+exit $exitCode

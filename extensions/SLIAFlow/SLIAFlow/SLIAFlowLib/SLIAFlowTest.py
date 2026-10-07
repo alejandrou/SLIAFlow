@@ -4,6 +4,7 @@ import importlib
 import io
 import os
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,74 @@ from .SLIAFlowLogic import SLIAFlowLogic
 # The package re-exports the parameter-node class under the same name as its
 # module, so `from . import SLIAFlowParameterNode` would bind the class.
 parameterModule = importlib.import_module(".SLIAFlowParameterNode", __package__)
+
+
+# The command-line runner, scripts/development/run-slicer-tests.ps1, calls
+# runCommandLineTests from its --python-code. The fragments exist only in that
+# code, so Reload and Test and a normal session can never see a selection.
+
+
+def selectTestNames(testNames, fragments) -> list:
+    """Return the names that contain any fragment, in the order given.
+
+    Raises ValueError naming every fragment that matches no name, so a typo
+    fails the run instead of giving a green run of fewer tests.
+    """
+    if not fragments or any(not fragment for fragment in fragments):
+        raise ValueError(f"The test selection has an empty fragment: {list(fragments)!r}.")
+    unmatched = [
+        fragment for fragment in fragments if not any(fragment in name for name in testNames)
+    ]
+    if unmatched:
+        raise ValueError(
+            "These test-name fragments match no test: "
+            + ", ".join(repr(fragment) for fragment in unmatched)
+            + "."
+        )
+    return [name for name in testNames if any(fragment in name for fragment in fragments)]
+
+
+def commandLineSuite(module, testCaseClass, fragments):
+    """Return the suite to run and, for a partial run, the line that says so.
+
+    Without fragments this loads the module as slicer.testing.runUnitTest does,
+    so a full run counts exactly what it counted before.
+    """
+    loader = unittest.TestLoader()
+    if not fragments:
+        return loader.loadTestsFromModule(module), None
+    allNames = loader.getTestCaseNames(testCaseClass)
+    names = selectTestNames(allNames, fragments)
+    partialRun = (
+        f"Partial run: {len(names)} of {len(allNames)} {testCaseClass.__name__} tests "
+        f"matching {', '.join(fragments)}"
+    )
+    return unittest.TestSuite(testCaseClass(name) for name in names), partialRun
+
+
+class LiveTextTestResult(unittest.TextTestResult):
+    """Name each test on a complete line before its body runs.
+
+    unittest finishes its own line for a test only after the test, and the
+    runner reads Slicer's output line by line, so a hung test would otherwise
+    stay unnamed.
+    """
+
+    def startTest(self, test) -> None:
+        self.stream.writeln(f"Started: {test.id()}")
+        self.stream.flush()
+        super().startTest(test)
+
+
+def runCommandLineTests(module, testCaseClass, fragments) -> bool:
+    """Run the module's tests, or the selected ones, and return whether all passed."""
+    suite, partialRun = commandLineSuite(module, testCaseClass, fragments)
+    if partialRun:
+        print(partialRun, flush=True)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=LiveTextTestResult).run(suite)
+    if partialRun:
+        print(partialRun, flush=True)
+    return result.wasSuccessful()
 
 
 class SLIAFlowTest(ScriptedLoadableModuleTest):
@@ -689,6 +758,94 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(AssertionError):
             FailingProbe().runTest()
+
+    @staticmethod
+    def _commandLineProbeModule():
+        # A stand-in for the SLIAFlow module namespace: the test class the
+        # runner selects from, and a second TestCase the loader also finds.
+        module = types.ModuleType("SLIAFlowCommandLineProbe")
+
+        class ProbeTest(unittest.TestCase):
+            def test_aCube(self) -> None:
+                pass
+
+            def test_bLink(self) -> None:
+                pass
+
+        class OtherProbe(unittest.TestCase):
+            def test_cCube(self) -> None:
+                pass
+
+        module.ProbeTest = ProbeTest
+        module.OtherProbe = OtherProbe
+        return module
+
+    @staticmethod
+    def _testMethodNames(suite) -> list:
+        names = []
+        for test in suite:
+            if isinstance(test, unittest.TestSuite):
+                names += SLIAFlowTest._testMethodNames(test)
+            else:
+                names.append(test._testMethodName)
+        return names
+
+    def test_commandLineSelectionKeepsMatchingTestsInOrder(self) -> None:
+        # run-slicer-tests.ps1 -Test: a name is kept when it contains any
+        # fragment, case-sensitively, once, in the order it was given.
+        names = ["test_aCube", "test_bLink", "test_cCubeLink", "test_dcube"]
+        self.assertEqual(
+            selectTestNames(names, ["Cube", "Link"]),
+            ["test_aCube", "test_bLink", "test_cCubeLink"],
+        )
+
+    def test_commandLineSelectionNamesFragmentsMatchingNothing(self) -> None:
+        # A typo must fail the run, never give a green run of fewer tests.
+        names = ["test_aCube", "test_bLink"]
+        with self.assertRaises(ValueError) as raised:
+            selectTestNames(names, ["noSuch", "Cube", "cube"])
+        message = str(raised.exception)
+        self.assertIn("'noSuch'", message)
+        self.assertIn("'cube'", message)
+        self.assertNotIn("'Cube'", message)
+
+        for fragments in ([], [""]):
+            with self.subTest(fragments=fragments), self.assertRaises(ValueError):
+                selectTestNames(names, fragments)
+
+    def test_commandLineSuiteWithoutSelectionLoadsTheWholeModule(self) -> None:
+        # Without -Test the runner must run what slicer.testing.runUnitTest
+        # ran: every TestCase the loader finds in the module namespace.
+        module = self._commandLineProbeModule()
+        suite, partialRun = commandLineSuite(module, module.ProbeTest, [])
+        self.assertEqual(
+            sorted(self._testMethodNames(suite)), ["test_aCube", "test_bLink", "test_cCube"]
+        )
+        self.assertIsNone(partialRun)
+
+    def test_commandLineSuiteSelectsOnlyFromTheTestClass(self) -> None:
+        # OtherProbe stands for the imported ScriptedLoadableModuleTest base,
+        # which a selection must not pull in.
+        module = self._commandLineProbeModule()
+        suite, partialRun = commandLineSuite(module, module.ProbeTest, ["Cube"])
+        self.assertEqual(self._testMethodNames(suite), ["test_aCube"])
+        self.assertEqual(partialRun, "Partial run: 1 of 2 ProbeTest tests matching Cube")
+
+    def test_commandLineRunNamesEachTestBeforeItRuns(self) -> None:
+        # unittest names a test on a line it finishes only after the test, and
+        # the runner reads whole lines, so a hung test would stay unnamed.
+        stream = io.StringIO()
+        seen = {}
+
+        class StartProbe(unittest.TestCase):
+            def test_probe(self) -> None:
+                seen["output"] = stream.getvalue()
+
+        probe = StartProbe("test_probe")
+        unittest.TextTestRunner(
+            stream=stream, verbosity=2, resultclass=LiveTextTestResult
+        ).run(probe)
+        self.assertIn(f"Started: {probe.id()}\n", seen["output"])
 
     def test_reservedPanelIsBlackWithStatedReason(self) -> None:
         """A panel with nothing to show is black and says why.
