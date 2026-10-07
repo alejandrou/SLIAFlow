@@ -35,8 +35,13 @@ What the connectors rely on was read in the pinned SlicerOpenIGTLink source
 
 No socket of SLIAFlow's own probes the app's ports: the app serves one client
 per port, and a probe connection would be that client.
+
+The LiveView port's frames can be shown in the live pane (SLIA-037):
+`takeLiveViewFrame` copies the newest frame the connector delivered and has
+not handed over yet, so that the connector's own node never reaches a view.
 """
 
+import datetime
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -77,7 +82,9 @@ CONNECTOR_STATE_CONNECTED = 2
 DATA_ORIGIN_ATTRIBUTE = "OpenIGTLink.SLIAFlow.DataOrigin"
 BAND_NUMBER_ATTRIBUTE = "OpenIGTLink.SLIAFlow.BandNumber"
 WAVELENGTH_ATTRIBUTE = "OpenIGTLink.SLIAFlow.WavelengthNm"
-SENDER_METADATA_ATTRIBUTES = (DATA_ORIGIN_ATTRIBUTE, BAND_NUMBER_ATTRIBUTE, WAVELENGTH_ATTRIBUTE)
+SIMULATION_DETAIL_ATTRIBUTE = "OpenIGTLink.SLIAFlow.SimulationDetail"
+SENDER_METADATA_ATTRIBUTES = (DATA_ORIGIN_ATTRIBUTE, BAND_NUMBER_ATTRIBUTE, WAVELENGTH_ATTRIBUTE,
+                              SIMULATION_DETAIL_ATTRIBUTE)
 SIMULATED_ORIGIN = "simulated"
 # The connector's OriginalNodeNameKey: the device name, kept if the node is renamed.
 ORIGINAL_NODE_NAME_ATTRIBUTE = "OriginalNodeName"
@@ -113,6 +120,39 @@ class MessageObservation:
     bandNumber: int | None = None
     wavelengthNm: float | None = None
     simulated: bool = False
+
+
+@dataclass(frozen=True)
+class LiveViewFrame:
+    """One LiveView frame from the app, copied off the connector's node (SLIA-037)."""
+
+    # (1, lines, samples, 3) RGB uint8, row 0 the top of the picture.
+    pixels: object
+    simulated: bool
+    # The sender's own detail when its message carried one (the stand-in).
+    simulationDetail: str | None
+    host: str
+    port: int
+    receivedAt: datetime.datetime
+
+
+@dataclass(frozen=True)
+class LiveViewUpdate:
+    """Whether the LiveView port is connected, and the frame or refusal it brought, if any."""
+
+    connected: bool
+    frame: LiveViewFrame | None = None
+    # The message that cannot be shown, described, or None.
+    refusal: str | None = None
+
+
+def liveViewRefusal(message: MessageObservation) -> str | None:
+    """None for a frame the live pane shows, an RGB uint8 IMAGE of one slice; else the message."""
+    size = message.size or ()
+    if (message.messageType == "IMAGE" and message.components == 3
+            and message.scalarType == "uint8" and len(size) == 3 and size[2] == 1):
+        return None
+    return ChannelMonitor._describe(message)
 
 
 @dataclass(frozen=True)
@@ -378,6 +418,11 @@ class SLIAFlowConnections:
         self._observerTags: list = []
         # Per incoming node ID, the modification time of the data last counted.
         self._countedData: dict = {}
+        # The same for the LiveView frames handed to the live pane.
+        self._liveViewTaken: dict = {}
+        # VTK's modification time when the LiveView connection last began or
+        # was lost: data no newer came from an earlier connection.
+        self._liveViewSince = 0
         # Node IDs in the scene at Connect: never removed on Disconnect.
         self._nodeIdsBeforeConnect: set = set()
         self._connected = False
@@ -505,6 +550,8 @@ class SLIAFlowConnections:
             scene.GetNthNode(index).GetID() for index in range(scene.GetNumberOfNodes())
         }
         self._countedData = {}
+        self._liveViewTaken = {}
+        self._retireLiveViewFrames()
         host = self._host.strip()
         self._completedCube = None
         self._cubeConnectorStartedAt = None
@@ -568,11 +615,63 @@ class SLIAFlowConnections:
                 for name in SENDER_METADATA_ATTRIBUTES:
                     node.RemoveAttribute(name)
         self._countedData = {}
+        self._liveViewTaken = {}
         self._nodeIdsBeforeConnect = set()
         self._connected = False
         now = self._clock()
         for monitor in self._monitors.values():
             monitor.setConnectorState(CONNECTOR_STATE_OFF, now)
+
+    def takeLiveViewFrame(self) -> LiveViewUpdate:
+        """Whether LiveView is connected, and its newest frame not handed over yet, copied.
+
+        A node whose data has not changed since it was last handed over is not
+        a frame, and neither is one last changed before this connection began:
+        a frame left from a lost connection, never taken, is not news from the
+        next one, which may be another sender. A message the live pane cannot
+        show, an image or not, comes back as a refusal.
+        """
+        connector = self._connectors.get(CHANNEL_LIVE_VIEW) if self._connected else None
+        if connector is None or connector.GetState() != CONNECTOR_STATE_CONNECTED:
+            if connector is not None:
+                # Seen here first, the loss is followed up as the rows do:
+                # its metadata goes and its frames are retired.
+                self._follow(CHANNEL_LIVE_VIEW, connector, self._clock())
+            return LiveViewUpdate(connected=False)
+        newest, newestData, newestStamp = None, None, None
+        for index in range(connector.GetNumberOfIncomingMRMLNodes()):
+            node = connector.GetIncomingMRMLNode(index)
+            if node is None:
+                continue
+            data, stamp = self._messageStamp(node)
+            if data is None and node.IsA("vtkMRMLVolumeNode"):
+                continue
+            if stamp <= max(self._liveViewSince, self._liveViewTaken.get(node.GetID(), -1)):
+                continue
+            if newestStamp is None or stamp > newestStamp:
+                newest, newestData, newestStamp = node, data, stamp
+        if newest is None:
+            return LiveViewUpdate(connected=True)
+        self._liveViewTaken[newest.GetID()] = newestStamp
+        observation = self._observation(newest, newestData, self._clock())
+        refusal = liveViewRefusal(observation)
+        if refusal is not None:
+            return LiveViewUpdate(connected=True, refusal=refusal)
+        import numpy
+        import slicer
+        monitor = self._monitors[CHANNEL_LIVE_VIEW]
+        return LiveViewUpdate(connected=True, frame=LiveViewFrame(
+            pixels=numpy.array(slicer.util.arrayFromVolume(newest), copy=True),
+            simulated=observation.simulated,
+            simulationDetail=newest.GetAttribute(SIMULATION_DETAIL_ATTRIBUTE),
+            host=self._host.strip(), port=monitor.port, receivedAt=datetime.datetime.now()))
+
+    def _retireLiveViewFrames(self) -> None:
+        """Take every LiveView message received so far as from a connection that ended."""
+        import vtk
+        marker = vtk.vtkObject()
+        marker.Modified()
+        self._liveViewSince = marker.GetMTime()
 
     def _startGilYield(self) -> None:
         import qt
@@ -665,6 +764,9 @@ class SLIAFlowConnections:
         self._countNewMessages(channel, connector, now)
         if state != CONNECTOR_STATE_CONNECTED:
             self._forgetSenderMetadata(connector)
+            if channel == CHANNEL_LIVE_VIEW:
+                # After the metadata removal, which changes a node without image data.
+                self._retireLiveViewFrames()
 
     def _forgetSenderMetadata(self, connector) -> None:
         """Remove the SLIAFlow metadata the last sender left on the incoming nodes.

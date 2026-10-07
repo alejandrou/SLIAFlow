@@ -56,6 +56,11 @@ CUBE_SOURCES = (CUBE_SOURCE_DISK, CUBE_SOURCE_APP)
 # The name UC1 and UC2 know a received cube by: the folder it is written to.
 RECEIVED_CUBE_NAME = "received-from-app"
 
+# SLIA-037: which source the live pane shows. Stored as shown.
+LIVE_SOURCE_CAMERA = "Laptop camera"
+LIVE_SOURCE_APP = "LiveView from the app"
+LIVE_SOURCES = (LIVE_SOURCE_CAMERA, LIVE_SOURCE_APP)
+
 
 def calibratedCubeDetail(cubeName: str) -> str:
     """The simulation detail of IUMA's calibrated cube read from disk (ADR-0004 decision 7)."""
@@ -69,6 +74,17 @@ def receivedCubeDetail(host: str, port: int, receivedAt, pixelType: str) -> str:
     return (f"{pixelType} cube received over OpenIGTLink from {host}:{port}, the port IUMA's "
             f"AcquisitionSystemApp serves its HS cube on, at {when}; the sender may have "
             "captured it live or replayed a stored cube, which SLIAFlow cannot tell apart")
+
+
+def appLiveViewDetail(host: str, port: int, receivedAt) -> str:
+    """The detail of a frame received from the app's LiveView port (SLIA-037).
+
+    Worded as a received cube's (SLIA-036 owner decision 2).
+    """
+    when = receivedAt.strftime("%Y-%m-%d %H:%M:%S") if receivedAt is not None else "unknown"
+    return (f"LiveView colour frame received over OpenIGTLink from {host}:{port}, the port IUMA's "
+            f"AcquisitionSystemApp serves its LiveView on, at {when}; the sender may have "
+            "captured it live or replayed it, which SLIAFlow cannot tell apart")
 
 
 def uc1ResultDetail(cubeName: str, cubeDetail: str | None = None) -> str:
@@ -98,3 +114,5 @@ class SLIAFlowParameterNode:
     expectedBands: Annotated[int, WithinRange(1, 10000), Default(DEFAULT_EXPECTED_BANDS)]
     # SLIA-036.
     cubeSource: Annotated[str, Choice(list(CUBE_SOURCES)), Default(CUBE_SOURCE_DISK)]
+    # SLIA-037.
+    liveSource: Annotated[str, Choice(list(LIVE_SOURCES)), Default(LIVE_SOURCE_CAMERA)]

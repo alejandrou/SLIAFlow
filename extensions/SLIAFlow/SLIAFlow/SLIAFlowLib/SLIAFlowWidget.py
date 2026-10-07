@@ -19,6 +19,8 @@ from .SLIAFlowParameterNode import (
     CUBE_SOURCES,
     DATA_ORIGIN_ATTRIBUTE,
     DEFAULT_RESULT_OUTPUT,
+    LIVE_SOURCE_APP,
+    LIVE_SOURCES,
     RECEIVED_CUBE_NAME,
     RECORDED_CASE_ATTRIBUTE,
     SIMULATED_ORIGIN,
@@ -96,6 +98,22 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         VASCULAR_VIEW_NAME: _("Waiting for enhanced vascularization."),
     }
     LIVE_WAITING_MESSAGE = _("Waiting for the camera image.\nPress Start.")
+    # SLIA-037: LiveView from IUMA's acquisition app in the live pane.
+    APP_LIVE_WAITING_MESSAGE = _("Waiting for LiveView from the app.\nConnect under Connections.")
+    APP_LIVE_CAPTION = _("LiveView received from the app")
+    STAND_IN_LIVE_CAPTION = _("LiveView from the stand-in for the app, simulated")
+    # Two lines: one line this long is clipped by the pane and runs into the
+    # slice view's corner text.
+    APP_LIVE_STALE_CAPTION = _("{caption}\nThe connection was lost; no longer updated")
+    APP_LIVE_RESUMED_STATUS = _("LiveView from the app arrives again. Capture is available.")
+    APP_LIVE_READY_STATUS =_("Press Start to show LiveView from IUMA's acquisition app.")
+    APP_LIVE_STARTED_STATUS = _(
+        "LiveView from the app is shown as it arrives. Connect under Connections if it is not."
+    )
+    APP_LIVE_REFUSED_STATUS = _(
+        "LiveView from the app sent {message}, which the live pane cannot show: it shows RGB "
+        "uint8 frames of one slice."
+    )
     WAITING_RESULT_MESSAGE = _(
         "Waiting for the tumour delineation.\nPress Start, then Capture."
     )
@@ -131,6 +149,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     CAPTURE_NO_FRAME_STATUS = _(
         "Capture needs a LiveView frame. Wait for the camera image, then press Capture."
+    )
+    CAPTURE_STALE_LIVE_STATUS = _(
+        "Capture needs a current LiveView frame, and the frame from the app is no longer "
+        "updated: the connection was lost. Connect again, or choose Laptop camera."
     )
     CAPTURE_CAPTURING_STATUS = _("Capturing: LiveView is frozen and the frame is being saved.")
     CAPTURE_RUNNING_STATUS = _("Running UC1 on {cube} ({origin})...")
@@ -193,10 +215,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     RESULT_CAPTION = _("Result for {cube}")
     CUBE_UNREADABLE_MESSAGE = _("The hyperspectral cube could not be shown.\n{reason}")
     CAPTION_FONT_SIZE = 13
-    # Top of HS Cube; bottom of Tumour Delineation, whose top carries the stale
-    # line, and of Enhanced Vascularization, to match it.
+    # Top of HS Cube and of the live pane, clear of the volume names and probe
+    # text Slicer writes bottom left; bottom of Tumour Delineation, whose top
+    # carries the stale line, and of Enhanced Vascularization, to match it.
     CAPTION_POSITIONS = {CUBE_VIEW_NAME: (0.5, 0.97), RESULT_VIEW_NAME: (0.5, 0.03),
-                         VASCULAR_VIEW_NAME: (0.5, 0.03)}
+                         VASCULAR_VIEW_NAME: (0.5, 0.03), LIVE_VIEW_NAME: (0.5, 0.97)}
 
     # SLIA-021: the UC2 blood-vessel map in Enhanced Vascularization. The panel
     # names the cube; the Status panel says how the map was made and why one
@@ -323,6 +346,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._vascularSimulated = False
         # The run cube outlived a Disconnect only because a capture used it.
         self._removeRunCubeAfterCapture = False
+        # SLIA-037. The app's frame on screen is from a connection now lost,
+        # and whether it was the stand-in's.
+        self._appLiveStale = False
+        self._appLiveSimulated = False
 
     def setup(self) -> None:
         super().setup()
@@ -346,7 +373,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.installCameraSupportButton.connect(
             "clicked()", self._installCameraSupport
         )
-        self.ui.startButton.connect("clicked()", self._startCamera)
+        self.ui.startButton.connect("clicked()", self._onStartClicked)
+        self.ui.liveSourceSelector.connect("currentIndexChanged(int)", self._onLiveSourceChanged)
         self.ui.stopButton.connect("clicked()", self._onStopCamera)
         self.ui.captureButton.connect("clicked()", self._onCaptureClicked)
         self.ui.resultOutputSelector.connect(
@@ -493,16 +521,19 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.logic is None or not hasattr(self, "ui"):
             return
         cameraActive = self.logic.cameraActive
+        liveActive = self.logic.liveActive
         self.ui.installCameraSupportButton.setEnabled(
             not self._cameraSupportAvailable
             and not self._cameraRestartRequired
             and not cameraActive
         )
         self.ui.cameraIndexSpinBox.setEnabled(
-            self._cameraSupportAvailable and not cameraActive
+            self._cameraSupportAvailable and not liveActive
         )
-        self.ui.startButton.setEnabled(self._cameraSupportAvailable and not cameraActive)
-        self.ui.stopButton.setEnabled(cameraActive)
+        # LiveView from the app opens no camera, so it needs no camera support.
+        self.ui.startButton.setEnabled(
+            (self._liveSourceIsApp() or self._cameraSupportAvailable) and not liveActive)
+        self.ui.stopButton.setEnabled(liveActive)
         self._refreshCaptureControls()
 
     def _setCameraSupportState(self, available: bool) -> None:
@@ -513,7 +544,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         self._cameraSupportAvailable = bool(available)
         self._refreshCameraControls()
-        if self.logic is not None and (self.logic.cameraActive or self._captureInProgress):
+        if self.logic is not None and (self.logic.liveActive or self._captureInProgress):
+            return
+        if self._liveSourceIsApp():
+            self._setStatus(self.APP_LIVE_READY_STATUS)
             return
         self._setStatus(
             self.CAMERA_READY_STATUS
@@ -543,10 +577,36 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             windowTitle=_("Restart Slicer"),
         )
 
+    def _liveSourceIsApp(self) -> bool:
+        return self._parameterNode is not None and self._parameterNode.liveSource == LIVE_SOURCE_APP
+
+    def _onStartClicked(self) -> None:
+        if self._liveSourceIsApp():
+            self._startAppLiveView()
+        else:
+            self._startCamera()
+
+    def _onLiveSourceChanged(self, index=None) -> None:
+        """Stop the source that runs and empty the pane (the image contract's live pane rules).
+
+        This slot runs before the parameter-node binding's own, so the choice
+        is taken from the box; while connectGui refills it, it is not a choice.
+        """
+        if self._bindingResultSelector or self.logic is None:
+            return
+        selector = getattr(getattr(self, "ui", None), "liveSourceSelector", None)
+        if self._parameterNode is None or selector is None or selector.currentText not in LIVE_SOURCES:
+            return
+        self._parameterNode.liveSource = selector.currentText
+        if self.logic.liveActive:
+            self._stopCamera(clearLiveView=True)
+        # Refreshes the controls, and says how to start the chosen source.
+        self._setCameraSupportState(self.logic.openCVAvailable())
+
     def _startCamera(self) -> None:
         if self.logic is None or self._parameterNode is None:
             return
-        self._clearLiveView()
+        self._stopCamera(clearLiveView=True)
         cameraIndex = int(self._parameterNode.cameraIndex)
         started = self.logic.startCamera(
             cameraIndex,
@@ -571,14 +631,74 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._setStatus(message)
 
     def _stopCamera(self, clearLiveView: bool, layoutManager=None) -> None:
+        """Stop the live source that runs, the laptop camera or LiveView from the app."""
         if self.logic is not None:
             self.logic.stopCamera()
+            self.logic.stopAppLiveView()
+            self.logic.removeAppLiveViewNode()
+        self._appLiveStale = False
+        self._removePanelCaption(self.LIVE_VIEW_NAME)
         self._frameDisplayed = False
         if clearLiveView:
             self._clearLiveView(layoutManager=layoutManager)
         self._refreshCameraControls()
 
-    def _clearLiveView(self, layoutManager=None) -> None:
+    def _startAppLiveView(self, poll=None, timerFactory=None) -> None:
+        """Show LiveView from the app in the live pane as it arrives (SLIA-037).
+
+        `poll` and `timerFactory` let a test hand frames in; by default the
+        connections are polled on a Qt timer.
+        """
+        if self.logic is None or self._parameterNode is None:
+            return
+        self._stopCamera(clearLiveView=False)
+        self._clearLiveView(message=self.APP_LIVE_WAITING_MESSAGE)
+        self.logic.startAppLiveView(self._onAppLiveViewUpdate, poll=poll,
+                                    timerFactory=timerFactory)
+        self._refreshCameraControls()
+        self._setStatus(self.APP_LIVE_STARTED_STATUS)
+
+    @property
+    def appLiveViewStale(self) -> bool:
+        """Whether the app's frame on screen is from a connection now lost."""
+        return self._appLiveStale
+
+    def _onAppLiveViewUpdate(self, update, layoutManager=None) -> None:
+        if self.logic is None or self._parameterNode is None:
+            return
+        if not update.connected:
+            # The frame that really arrived stays, said to be no longer updated.
+            if self._frameDisplayed and not self._appLiveStale:
+                self._appLiveStale = True
+                self._updateLiveCaption(layoutManager)
+            return
+        # Frozen by Capture: the frame on screen is the captured one.
+        if self._liveViewFrozen:
+            return
+        if update.refusal is not None:
+            self._setStatus(self.APP_LIVE_REFUSED_STATUS.format(message=update.refusal))
+            return
+        if update.frame is None:
+            return
+        node = self.logic.acceptAppLiveViewFrame(update.frame)
+        if self._appLiveStale:
+            self._setStatus(self.APP_LIVE_RESUMED_STATUS)
+        self._appLiveStale = False
+        self._appLiveSimulated = update.frame.simulated
+        self._bindLiveNode(node, layoutManager)
+        self._updateLiveCaption(layoutManager)
+
+    def _updateLiveCaption(self, layoutManager=None) -> None:
+        """Name the app's LiveView on its pane, and say when it is no longer updated."""
+        if not self._frameDisplayed or not self.logic.appLiveViewActive:
+            self._removePanelCaption(self.LIVE_VIEW_NAME)
+            return
+        caption = self.STAND_IN_LIVE_CAPTION if self._appLiveSimulated else self.APP_LIVE_CAPTION
+        if self._appLiveStale:
+            caption = self.APP_LIVE_STALE_CAPTION.format(caption=caption)
+        self._showPanelCaption(self.LIVE_VIEW_NAME, caption, layoutManager)
+
+    def _clearLiveView(self, layoutManager=None, message=None) -> None:
         self._frameDisplayed = False
         if layoutManager is None:
             layoutManager = slicer.app.layoutManager()
@@ -590,7 +710,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 return
             self._clearSliceLayers(sliceWidget)
             self._showPanelMessage(
-                self.LIVE_VIEW_NAME, self.LIVE_WAITING_MESSAGE, layoutManager
+                self.LIVE_VIEW_NAME, message or self.LIVE_WAITING_MESSAGE, layoutManager
             )
             sliceView = sliceWidget.sliceView()
             if sliceView is not None:
@@ -607,6 +727,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         liveNode = self.logic.getOrCreateLiveVolume(self._parameterNode)
         slicer.util.updateVolumeFromArray(liveNode, rgbKjiFrame)
+        self._bindLiveNode(liveNode, layoutManager)
+
+    def _bindLiveNode(self, liveNode, layoutManager=None) -> None:
+        """Show a live source's volume alone in the live pane."""
         if not self._frameDisplayed:
             self._frameDisplayed = True
             self._refreshCaptureControls()
@@ -650,18 +774,28 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         button = getattr(getattr(self, "ui", None), "captureButton", None)
         if button is None or self.logic is None:
             return
-        button.setEnabled(self.logic.cameraActive and not self._captureInProgress)
-        # The cube a capture runs on stays on HS Cube until the capture ends.
+        button.setEnabled(self.logic.liveActive and not self._captureInProgress)
+        # The cube a capture runs on stays on HS Cube until the capture ends,
+        # and the frozen frame on the live pane.
         self.ui.cubeSourceSelector.setEnabled(not self._captureInProgress)
+        self.ui.liveSourceSelector.setEnabled(not self._captureInProgress)
 
     def _onCaptureClicked(self) -> None:
         if self.logic is None or self._parameterNode is None:
             return
-        if self._captureInProgress or not self.logic.cameraActive:
+        if self._captureInProgress or not self.logic.liveActive:
             return
-        liveNode = self._parameterNode.liveVolume
+        if self.logic.appLiveViewActive:
+            # The timer may not have run since the connection was lost, or
+            # since a newer frame arrived.
+            self.logic.pollAppLiveView()
+        liveNode = (self.logic.appLiveViewNode() if self.logic.appLiveViewActive
+                    else self._parameterNode.liveVolume)
         if not self._frameDisplayed or liveNode is None or liveNode.GetImageData() is None:
             self._setStatus(self.CAPTURE_NO_FRAME_STATUS)
+            return
+        if self.logic.appLiveViewActive and self._appLiveStale:
+            self._setStatus(self.CAPTURE_STALE_LIVE_STATUS)
             return
         if self._cubeSourceIsApp() and self.logic.receivedCubeNode() is None:
             # Refused before anything is frozen or saved.
@@ -699,7 +833,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _startCapture(self, liveNode) -> None:
         frame = np.array(slicer.util.arrayFromVolume(liveNode), copy=True)
         try:
-            self._captureSnapshotName = self.logic.saveSnapshot(frame).name
+            prefix = self.logic.APP_SNAPSHOT_PREFIX if self.logic.appLiveViewActive else None
+            self._captureSnapshotName = self.logic.saveSnapshot(frame, prefix=prefix).name
         except (OSError, ValueError, Uc1RunError) as error:
             self._failCapture(_("The capture snapshot could not be saved: {error}").format(error=error))
             return
