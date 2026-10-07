@@ -410,9 +410,8 @@ The code defaults and the new-file template disagree on the colour gains.
   Until the app sends calibrated cubes, calibration happens outside the
   stream (§8). SLIAFlow should not build its own white/dark handling for
   the live link.
-- **Data type change ahead.** `SLIAFlowCasePool.py` accepts only ENVI data
-  type 12 (uint16). Once the app sends float32, any SLIAFlow code that reads
-  `HsCube` will also have to accept float32. This needs its own task card.
+- **Data type.** Done: SLIAFlow reads IUMA's float32 cube since `SLIA-033`, and
+  the app's `HsCube` messages since `SLIA-036`.
 - **Header dialects.** Readers must handle both the current header keys and
   the earlier prototype's keys (§3.4).
 - **Fragility.** The Kurios serial numbers are hard-coded, the build uses

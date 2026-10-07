@@ -19,10 +19,8 @@ from .SLIAFlowParameterNode import (
     CUBE_SOURCES,
     DATA_ORIGIN_ATTRIBUTE,
     DEFAULT_RESULT_OUTPUT,
-    GROUND_TRUTH_VIEW_NAME,
     RECEIVED_CUBE_NAME,
     RECORDED_CASE_ATTRIBUTE,
-    RESULT_VIEW_NAMES,
     SIMULATED_ORIGIN,
     SIMULATION_DETAIL_ATTRIBUTE,
     WAVELENGTHS_ASSUMED_ATTRIBUTE,
@@ -160,28 +158,12 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         "the current capture. UC1 results on this cube are not validated."
     )
     RESULT_SOURCE_TEXT = _("{file}, {cube}, capture {captureId}")
-    GROUND_TRUTH_STATUS = _(
-        "{Cube} - {origin}. Showing {file} under the recorded "
-        "ground truth. UC1 results on this cube are not validated."
-    )
-    GROUND_TRUTH_SOURCE_TEXT = _("{file} under {groundTruth}, {cube}, capture {captureId}")
-    GROUND_TRUTH_MISSING_STATUS = _(
-        "{Cube} - {origin}. Showing {file}. Its ground truth "
-        "could not be read. UC1 results on this cube are not validated."
-    )
-    NO_GROUND_TRUTH_STATUS = _(
-        "{Cube} - {origin}. Showing {file}. This cube has no ground "
-        "truth. UC1 results on this cube are not validated."
-    )
     # SLIA-036: how the texts name a cube, and where it came from.
     RECORDED_CUBE_PHRASE = _("recorded cube {case}")
     RECEIVED_CUBE_PHRASE = _("the cube received from the app")
     STAND_IN_CUBE_PHRASE = _("the stand-in's cube received on the app's port")
     SIMULATED_ORIGIN_PHRASE = _("simulated acquisition")
     RECEIVED_ORIGIN_PHRASE = _("received from the app, captured live or replayed")
-    # The label layer is drawn over the result, so it is half transparent: both
-    # the labelled class and the classification under it stay readable.
-    GROUND_TRUTH_LABEL_OPACITY = 0.5
 
     # SLIA-032: what HS Cube shows, and the captions that say which cube each
     # panel shows. View text names the input only (owner rule, 2026-09-18).
@@ -292,8 +274,6 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # The accepted result on screen, and whether it is from an earlier
         # capture than the one in progress or the one that failed.
         self._resultCaseName: str | None = None
-        # Whether the cube behind the result on screen has a gtMap beside it.
-        self._resultHasGroundTruth = False
         self._resultCaptureId: str | None = None
         # The result capture the Tumour Delineation view was last framed for.
         self._fittedCaptureId: str | None = None
@@ -327,10 +307,6 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._resultStale = False
         # True only while connectGui refills the output combo box.
         self._bindingResultSelector = False
-        # The output on the background layer. Choosing gtMap lays the ground
-        # truth over this one rather than replacing it, so it is remembered
-        # across a gtMap selection.
-        self._backgroundOutput = DEFAULT_RESULT_OUTPUT
         # SLIA-035. The settings last given to the connections, so that an
         # unchanged setting does not rebuild the rows and lose their errors.
         self._appliedConnectionSettings = None
@@ -480,6 +456,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._parameterNodeGuiTag = None
 
         if self._parameterNode is not None:
+            # A scene saved before ADR-0005 can hold gtMap, which is no longer
+            # a choice; connectGui would raise on it and leave the panel unbound.
+            if self._parameterNode.resultOutput not in OUTPUT_FILE_NAMES:
+                self._parameterNode.resultOutput = DEFAULT_RESULT_OUTPUT
             # connectGui refills the output combo box before it writes the
             # stored value back, and refilling emits currentIndexChanged. Left
             # unguarded, that first index is taken for an operator choice and
@@ -503,29 +483,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             selector = getattr(getattr(self, "ui", None), name, None)
             if selector is not None:
                 selector.setEnabled(self._presentationActive)
-        self._refreshGroundTruthEntry()
         self._refreshCameraControls()
-
-    def _refreshGroundTruthEntry(self) -> None:
-        """Offer gtMap only while the result on screen has a ground truth.
-
-        ADR-0004 decision 8. The entry stays in the list, because the parameter
-        binding selects by position and removing it would shift every index.
-        It is hidden from the popup and disabled, which also keeps the keyboard
-        and the mouse wheel from choosing it. connectGui refills the box, so
-        this runs again after every binding.
-        """
-        selector = getattr(getattr(self, "ui", None), "resultOutputSelector", None)
-        if selector is None:
-            return
-        index = selector.findText(GROUND_TRUTH_VIEW_NAME)
-        if index < 0:
-            return
-        offered = self._resultCaseName is not None and self._resultHasGroundTruth
-        item = selector.model().item(index)
-        if item is not None:
-            item.setEnabled(offered)
-        selector.view().setRowHidden(index, not offered)
 
     # ------------------------------------------------------------------
     # Camera
@@ -886,26 +844,6 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             )
             self._showCube()
 
-    def _showGroundTruth(self, case) -> None:
-        """Load the cube's own labelling for the result just accepted.
-
-        The ground truth is read once per result rather than per selection, and
-        only after the outputs are accepted, so it always carries the capture ID
-        of the result it can be laid over. It is not what the capture is for: if
-        it cannot be read, the run still succeeded, the result is still shown,
-        and choosing gtMap says the ground truth could not be read.
-        """
-        if self.logic is None:
-            return
-        try:
-            self.logic.acceptGroundTruth(case, self._captureId)
-        except Exception as error:
-            logging.exception(
-                "SLIAFlow: the ground truth of cube %s could not be shown: %s",
-                case.name, error,
-            )
-            self.logic.removeGroundTruthNode()
-
     def _forgetCube(self) -> None:
         if self.logic is not None:
             self.logic.removeCubeNode()
@@ -1004,13 +942,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     self._fittedCubeCaptureId = cubeCaptureId
                     if shown is node:
                         self._showMiddleBand(sliceLogic, node)
+                # The cube is shown alone.
                 composite.SetForegroundVolumeID(None)
-                # The cube is shown alone. The ground truth is a labelling of
-                # the image the outputs classify, not of the spectrum, and it
-                # belongs on the result panel (_showResult). It could not be
-                # read here in any case: the bands run along S, and a one-band
-                # label map placed in that stack is off the plane the operator
-                # is scrolling.
                 composite.SetLabelVolumeID(None)
                 self._updateCubeCaption(layoutManager)
             cubeView = cubeWidget.sliceView()
@@ -1204,18 +1137,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                               result.case.name)
             self._failCapture(_("The UC1 outputs could not be shown: {error}").format(error=error))
             return
-        # A ground truth is offered only for a cube that has one (ADR-0004
-        # decision 8); the previous result's is not left behind for this one.
-        self._resultHasGroundTruth = result.case.hasGroundTruth
-        if self._resultHasGroundTruth:
-            self._showGroundTruth(result.case)
-        elif self.logic is not None:
-            self.logic.removeGroundTruthNode()
         self._resultCaseName = result.case.name
         self._resultSimulated = self._receivedRunSimulated
         self._resultCaptureId = self._captureId
         self._resultStale = False
-        self._refreshGroundTruthEntry()
         logging.info("SLIAFlow: %s", result.message)
         self._setStatus(
             self.CAPTURE_DONE_STATUS.format(
@@ -1279,33 +1204,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """The line drawn over the result view, or an empty string."""
         return self.STALE_RESULT_MESSAGE if self._resultStale and self._resultCaseName else ""
 
-    def _selectedView(self) -> str:
-        """The entry chosen in the Delineation output box: an output, or gtMap."""
-        if self._parameterNode is not None and self._parameterNode.resultOutput in RESULT_VIEW_NAMES:
+    def _selectedOutput(self) -> str:
+        """The output chosen in the Delineation output box."""
+        if self._parameterNode is not None and self._parameterNode.resultOutput in OUTPUT_FILE_NAMES:
             return self._parameterNode.resultOutput
         return DEFAULT_RESULT_OUTPUT
-
-    def _groundTruthSelected(self) -> bool:
-        return self._selectedView() == GROUND_TRUTH_VIEW_NAME
-
-    def _groundTruthNode(self):
-        """The ground truth of the result on screen, or None.
-
-        A ground truth from any other capture is not returned. Laying one case's
-        labelling over another case's result would read as agreement or
-        disagreement that was never measured.
-        """
-        if self.logic is None or self._resultCaptureId is None:
-            return None
-        node = self.logic.groundTruthNode()
-        if node is None or node.GetAttribute(CAPTURE_ID_ATTRIBUTE) != self._resultCaptureId:
-            return None
-        return node
-
-    def _selectedOutput(self) -> str:
-        """The output image on the background layer, whether or not gtMap is on."""
-        view = self._selectedView()
-        return view if view in OUTPUT_FILE_NAMES else self._backgroundOutput
 
     def _onResultOutputChanged(self, index=None) -> None:
         if self._bindingResultSelector:
@@ -1313,10 +1216,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         selector = getattr(getattr(self, "ui", None), "resultOutputSelector", None)
         if self._parameterNode is not None and selector is not None:
             selected = selector.currentText
-            if selected in RESULT_VIEW_NAMES:
+            if selected in OUTPUT_FILE_NAMES:
                 self._parameterNode.resultOutput = selected
-                if selected in OUTPUT_FILE_NAMES:
-                    self._backgroundOutput = selected
         self._updateResultStatus()
         self._showResult()
 
@@ -1324,16 +1225,13 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Remove the output nodes and everything that describes them."""
         if self.logic is not None:
             self.logic.removeOutputNodes()
-            self.logic.removeGroundTruthNode()
         self._resultCaseName = None
         self._resultCaptureId = None
-        self._resultHasGroundTruth = False
         self._fittedCaptureId = None
         self._resultStale = False
         self._removeStaleLine()
         self._removePanelCaption(self.RESULT_VIEW_NAME)
         if hasattr(self, "ui"):
-            self._refreshGroundTruthEntry()
             self._updateResultStatus()
 
     def _updateResultStatus(self) -> None:
@@ -1343,32 +1241,12 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             text, style, source = self.RESULT_NONE_STATUS, "", _("None")
         else:
             fileName = self._selectedOutput()
-            groundTruthShown = self._groundTruthSelected() and self._groundTruthNode() is not None
             words = self._cubeText(self._resultCaseName, self._resultSimulated)
-            if groundTruthShown:
-                source = self.GROUND_TRUTH_SOURCE_TEXT.format(
-                    file=fileName, groundTruth=GROUND_TRUTH_VIEW_NAME,
-                    captureId=self._resultCaptureId, **words,
-                )
-            else:
-                source = self.RESULT_SOURCE_TEXT.format(
-                    file=fileName, captureId=self._resultCaptureId, **words
-                )
+            source = self.RESULT_SOURCE_TEXT.format(
+                file=fileName, captureId=self._resultCaptureId, **words
+            )
             if self._resultStale:
                 text = self.RESULT_STALE_STATUS.format(**words)
-                style = "color: #8A6D1D; font-weight: bold;"
-            elif groundTruthShown:
-                text = self.GROUND_TRUTH_STATUS.format(file=fileName, **words)
-                style = "font-weight: bold;"
-            elif self._groundTruthSelected() and not self._resultHasGroundTruth:
-                # A gtMap selection kept from an earlier cube: this one has none
-                # to lay over, which is not the same as one that failed to read.
-                text = self.NO_GROUND_TRUTH_STATUS.format(file=fileName, **words)
-                style = "font-weight: bold;"
-            elif self._groundTruthSelected():
-                # gtMap was asked for and is not there: say so rather than
-                # showing the result alone as though it had been laid over.
-                text = self.GROUND_TRUTH_MISSING_STATUS.format(file=fileName, **words)
                 style = "color: #8A6D1D; font-weight: bold;"
             else:
                 text = self.RESULT_STATUS.format(file=fileName, **words)
@@ -1419,18 +1297,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     sliceLogic.FitSliceToBackground()
                     self._fittedCaptureId = self._resultCaptureId
                 composite.SetForegroundVolumeID(None)
-                # The cube's own labelling belongs over the output it
-                # is read against, on the Label layer, so the layer's opacity
-                # slider and outline toggle work on it. _groundTruthNode()
-                # returns it only when it carries this result's capture ID.
-                groundTruthNode = (
-                    self._groundTruthNode() if self._groundTruthSelected() else None
-                )
-                if groundTruthNode is None:
-                    composite.SetLabelVolumeID(None)
-                else:
-                    composite.SetLabelVolumeID(groundTruthNode.GetID())
-                    composite.SetLabelOpacity(self.GROUND_TRUTH_LABEL_OPACITY)
+                composite.SetLabelVolumeID(None)
             self._updateStaleLine(layoutManager)
             resultView = resultWidget.sliceView()
             if resultView is not None:

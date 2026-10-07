@@ -1,20 +1,18 @@
 """Check that the patched UC2 build does what docs/development/uc2_changes.md says.
 
-Three checks on the staged `uc2_bvmap.exe` built by `build-uc2.ps1`:
+Two checks on the staged `uc2_bvmap.exe` built by `build-uc2.ps1`:
 
 1. Calibrated cube `002-04` (patches 0001 and 0002). UC2 is given the folder
    `input/002-04`, finds `LCTF_Calibrated_Cube_Single.hdr` there, and must
-   write `002-04-BVMap.png` of the cube's lines and samples. That PNG must be
-   pixel-identical to a NumPy replica of UC2's own steps (`computeBVmapLCTF`,
-   `clip_array`, `normalize_rgb_array`) run on the three bands nearest 480, 540
-   and 710 nm. The replica chooses its bands by wavelength from the header, so
-   it also confirms that the fixed indices 4, 16 and 50 in patch 0002 are those
-   bands.
-2. Reference case `020-01`, uint16 with references (patch 0001 leaves it
-   alone). Its folder has no calibrated cube, so UC2 must take its delivered
-   path and write a PNG with the SHA-256 the unpatched build wrote on
-   2026-10-05.
-3. Short calibrated cube (patch 0002). A `LCTF_Calibrated_Cube_Single.dat`
+   write `002-04-BVMap.png` of the cube's lines and samples.
+   - That PNG must be pixel-identical to a NumPy replica of UC2's own steps
+     (`computeBVmapLCTF`, `clip_array`, `normalize_rgb_array`) run on the three
+     bands nearest 480, 540 and 710 nm. The replica chooses its bands by
+     wavelength from the header, so it also confirms that the fixed indices 4,
+     16 and 50 in patch 0002 are those bands.
+   - It must also have the SHA-256 the build wrote on 2026-10-07
+     (RECORDED_PNG_SHA256), which also covers how the PNG is encoded.
+2. Short calibrated cube (patch 0002). A `LCTF_Calibrated_Cube_Single.dat`
    holding only the first five bands of `002-04`, with `002-04`'s header, must
    be refused: exit nonzero, `Error reading band`, and no PNG.
 
@@ -50,7 +48,6 @@ CHECK_ROOT = BUILD_ROOT / "check"
 
 CALIBRATED_FOLDER = REPOSITORY / "input" / "002-04"
 CALIBRATED_STEM = "LCTF_Calibrated_Cube_Single"
-REFERENCE_FOLDER = REPOSITORY / "input" / "reference_hsi_brain_db" / "020-01"
 
 # What patch 0002 hard-codes, and the wavelengths its comments give them.
 PATCH_BANDS = {"blue": (4, 480.0), "green": (16, 540.0), "red": (50, 710.0)}
@@ -59,9 +56,9 @@ HIGH_IN = np.float32(0.15)
 HIGH_OUT = np.float32(0.8)
 B_VALUE = np.float32(3)
 
-# The unpatched build (vendored 1b5e9ae, compiled as build-uc2.ps1 does) on
-# 020-01, 2026-10-05. docs/development/uc2_changes.md.
-REFERENCE_PNG_SHA256 = "C1C7B940A3340ED8A66381692D1AFA231E3883560EBB4972AD3D583D26E01D9A"
+# The patched build (vendored 1b5e9ae plus patches 0001 and 0002, compiled as
+# build-uc2.ps1 does) on 002-04, 2026-10-07. docs/development/uc2_changes.md.
+RECORDED_PNG_SHA256 = "605BF532810C85DC8752CB437E842CB1DC044225976CABF3EECC9FE7899E4CCD"
 
 SHORT_CUBE_BANDS = 5
 RUN_TIMEOUT_SEC = 60
@@ -215,24 +212,17 @@ def checkCalibratedCube() -> list[str]:
     differing = int(np.count_nonzero(np.any(image != expected, axis=-1)))
     if differing:
         raise CheckFailed(f"{png.name}: {differing} pixel(s) differ from the NumPy replica")
+    digest = hashlib.sha256(png.read_bytes()).hexdigest().upper()
+    if digest != RECORDED_PNG_SHA256:
+        raise CheckFailed(f"{png.name} is {digest[:8]}..., the build wrote "
+                          f"{RECORDED_PNG_SHA256[:8]}... on 2026-10-07")
     saturated = ", ".join(f"{channel} at 255 {100 * np.mean(image[..., index] == 255):.1f}%"
                           for index, channel in enumerate("RGB"))
     return [f"002-04: exit 0, {elapsed:.2f} s",
             f"  {png.name}  {image.shape[1]} x {image.shape[0]}, identical to the NumPy replica "
             f"(bands 4, 16, 50 = 480, 540, 710 nm)",
+            f"  {png.name}  identical to the run recorded on 2026-10-07  {digest[:8]}...",
             f"  {saturated}"]
-
-
-def checkReferenceCase() -> list[str]:
-    completed, png, elapsed = runUc2("020-01", REFERENCE_FOLDER)
-    if completed.returncode != 0 or not png.is_file():
-        raise CheckFailed(f"UC2 on 020-01 exited {completed.returncode} without {png.name}")
-    digest = hashlib.sha256(png.read_bytes()).hexdigest().upper()
-    if digest != REFERENCE_PNG_SHA256:
-        raise CheckFailed(f"{png.name} is {digest[:8]}..., the unpatched build wrote "
-                          f"{REFERENCE_PNG_SHA256[:8]}...")
-    return [f"020-01: exit 0, {elapsed:.2f} s",
-            f"  {png.name}  identical to the unpatched build  {digest[:8]}..."]
 
 
 def checkShortCube() -> list[str]:
@@ -268,7 +258,7 @@ def main() -> int:
     os.close(descriptor)
     failures = 0
     try:
-        for check in (checkCalibratedCube, checkReferenceCase, checkShortCube):
+        for check in (checkCalibratedCube, checkShortCube):
             try:
                 print("\n".join(check()))
             except (CheckFailed, subprocess.TimeoutExpired, OSError) as error:

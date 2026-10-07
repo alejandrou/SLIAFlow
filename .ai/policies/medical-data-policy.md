@@ -24,11 +24,10 @@ not listed here is not approved, whatever its licence says.
 
 - Source: `https://hsibraindatabase.iuma.ulpgc.es/`, published by IUMA, ULPGC.
 - Nature: public, anonymized in vivo hyperspectral brain-surface imagery.
-- Local location, both gitignored, since 2026-09-24 (`SLIA-031`, `ADR-0004`):
-  - `input/reference_hsi_brain_db/020-01/`, the one case the module reads, kept
-    as the UC1 reference check;
-  - `input/archive_hsi_brain_db_93_bands/`, every other case (`bin/`) and the
-    full-size images (`bin_full_size_images/`), kept but not read by the module.
+- Local location: none since `SLIA-039` (`ADR-0005`). The cases lay in the
+  gitignored `input/`, archived there by `SLIA-031`, until the project owner
+  removed them after `SLIA-039`. Nothing in the repository reads
+  them. A case brought back needs a task that names it and an update here.
 
   **No case may enter version control**, and no case may be copied into
   `docs/`, `workspace/` or any published material.
@@ -43,7 +42,8 @@ not listed here is not approved, whatever its licence says.
   the cube, and a detail that says otherwise misleads, with nothing else on
   screen to correct it.
 - Not approved for: any accuracy, sensitivity or agreement metric computed
-  against the bundled `gtMap` and presented in the interface or in a deliverable.
+  against the database's `gtMap` labels and presented in the interface or in a
+  deliverable.
   The database's labels are the database's; this repository does not evaluate
   algorithms.
 

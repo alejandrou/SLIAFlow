@@ -16,20 +16,12 @@ from .SLIAFlowConnections import (
     DEFAULT_HOST,
     DEFAULT_PORTS,
 )
-from .SLIAFlowCube import GROUND_TRUTH_FILE_NAME
 from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES
 
 # The Tumour Delineation panel shows one UC1 output image at a time, chosen by
 # its exact file name. A run opens on the calibrated RGB image, which is the
 # one output that is a picture of the case rather than a classification of it.
 DEFAULT_RESULT_OUTPUT = "imageRGB.bmp"
-
-# The cube's own labelling is a sixth thing the panel can show, and the only
-# one UC1 did not produce. It is not a background of its own: it is a label
-# layer laid over whichever output was chosen last, which is the comparison it
-# exists for. It is offered only for a cube that has one (ADR-0004 decision 8).
-GROUND_TRUTH_VIEW_NAME = GROUND_TRUTH_FILE_NAME
-RESULT_VIEW_NAMES = (*OUTPUT_FILE_NAMES, GROUND_TRUTH_VIEW_NAME)
 
 # Provenance on every module-owned output node (ADR-0003 decision 5).
 OWNER_ATTRIBUTE = "SLIAFlow.Owner"
@@ -96,7 +88,7 @@ class SLIAFlowParameterNode:
     liveVolume: slicer.vtkMRMLVectorVolumeNode
     cameraIndex: Annotated[int, WithinRange(0, 99), Default(0)]
     resultOutput: Annotated[
-        str, Choice(list(RESULT_VIEW_NAMES)), Default(DEFAULT_RESULT_OUTPUT)
+        str, Choice(list(OUTPUT_FILE_NAMES)), Default(DEFAULT_RESULT_OUTPUT)
     ]
     # SLIA-035: where the Connections section connects. Port 0 leaves a channel out.
     igtlHost: Annotated[str, Default(DEFAULT_HOST)]

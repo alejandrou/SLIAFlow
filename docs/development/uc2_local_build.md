@@ -16,10 +16,6 @@ simulated, so the map carries `simulated` with the detail
 by IUMA (simulated acquisition)`. It is a visual enhancement, not a quantitative
 map and not a clinical result.
 
-The sections from *Run* on record the first build of 2026-09-16, before any
-patch, on HSI Human Brain Database cases. The Python runner they describe was
-retired with the other standalone producers in `SLIA-028`.
-
 ## Build
 
 ```powershell
@@ -107,74 +103,3 @@ characters for the input, 255 for the output). After it: a non-zero exit, a
 crash, a timeout, any of UC2's error lines on either stream whatever the exit
 code, or a missing, stale, undecodable or wrongly sized PNG fails the run. A
 failed or refused UC2 run never fails UC1's.
-
-## Run (2026-09-16, retired runner)
-
-```powershell
-cd tools\simulators
-# Run UC2 and report the map without opening a server.
-..\..\.venv\Scripts\python.exe -m stratum_sim uc2-real ..\..\input\bin\bin\004-02 --build-root ..\..\build\uc2 --run-only
-# Serve UC2_BV on 127.0.0.1:18946 until Ctrl-C.
-..\..\.venv\Scripts\python.exe -m stratum_sim uc2-real ..\..\input\bin\bin\004-02 --build-root ..\..\build\uc2
-```
-
-The binary runs with `build\uc2\run\` as its working directory, because it writes
-`<case>-BVMap.png` into `"."`.
-
-### Fixed inputs, reported with every run
-
-| Input | Value | Where |
-| --- | --- | --- |
-| Band indices | 54, 20, 8 (710, 540, 480 nm on the recorded grid) | locals in `main()` |
-| `high_in` | 0.15 | local in `main()` |
-| `high_out` | 0.8 | local in `main()` |
-| `gamma` | 1 | local in `main()` |
-| `bValue` | 3 | local in `main()` |
-
-The binary takes one argument, the folder, so none of these can be set from
-outside. The runner prints them and does not pretend otherwise.
-
-### Refusals
-
-Before the process starts: a folder that is not a recorded case; a header whose
-`data type` is not 12 or whose `interleave` is not `bsq`; a `.dat` file whose
-size does not match the header; bands 54, 20 or 8 more than 2.5 nm from 710, 540
-or 480 nm.
-
-After it: a non-zero exit; any of `Usage:`, `Error: Directory path is too long!`,
-`Error: File path is too long!`, `Error opening file`, `Error reading file`,
-`Unknown format.` or `Failed to save the image.` on stdout or stderr, whatever
-the exit code; a missing, empty, stale or undecodable PNG; a PNG that is not
-three-channel `uint8` of the header's lines and samples.
-
-The message scan exists because the binary exits 0 after most failures. A short
-read prints `Error reading file` and processes whatever the buffer held, so a
-fresh PNG from that run looks exactly like a result.
-
-### Results, 2026-09-16
-
-`--run-only` on five recorded cases. Wall-clock is the process alone. The last
-three columns are the fraction of pixels at 255 in each output channel.
-
-| Case | Size (lines x samples) | Wall-clock | R at 255 | G at 255 | B at 255 |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 004-02 | 389 x 345 | 0.196 s | 8.3% | 1.3% | 24.0% |
-| 007-01 | 582 x 400 | 0.201 s | 3.1% | 1.3% | 47.1% |
-| 008-01 | 460 x 549 | 0.223 s | 0.1% | 0.0% | 96.3% |
-| 008-02 | 480 x 553 | 0.214 s | 0.5% | 0.2% | 69.7% |
-| 010-03 | 371 x 461 | 0.136 s | 0.1% | 0.0% | 89.2% |
-
-The PNGs for 007-01, 008-01, 008-02 and 010-03 are **pixel-identical** to the
-ones the earlier `main.out` wrote into the desktop copy, so this build reproduces
-that binary's output.
-
-The blue saturation is the `bValue = 3` multiply clipped at 1.0 before
-normalization, as `WP5_MS5_DEMO_PLAN.md` records. It is reported, not corrected.
-
-`normalize_rgb_array` rescales each channel to its own minimum and maximum within
-one image, so colours are not comparable between captures. That is on the
-partner request list.
-
-A pyigtl client on 18946 received three `UC2_BV` messages from a `--cycles 3`
-run on 004-02: shape `(1, 389, 345, 3)`, `uint8`, with role `bloodVesselMap`,
-origin `simulated` and the recorded-case detail, and no other device name.

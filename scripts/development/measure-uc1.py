@@ -104,7 +104,7 @@ DETERMINISTIC_OUTPUTS = OUTPUTS[:4]
 KMEANS_OUTPUTS = OUTPUTS[4:]
 # Outputs whose colours are classes: counted per colour.
 CLASS_OUTPUTS = ("svm.bmp", "knn.bmp", "imageRGB.bmp")
-# UC1's class colours as #RRGGBB (SLIAFlowCube.GROUND_TRUTH_CLASSES).
+# UC1's class colours as #RRGGBB (FOUR_COLORS_MAP in UC1's BitmapWriter.hpp).
 CLASS_NAMES = {"#00ff00": "normal", "#ff0000": "tumour", "#0000ff": "hypervascularized",
                "#000000": "background", "#ffffff": "unlabelled"}
 

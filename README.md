@@ -29,6 +29,4 @@ Project structure, coding guidance, and testing guidance are in `docs/developmen
 
 See the approved [STRATUM demonstrator implementation roadmap](docs/architecture/SLIAFLOW_IMPLEMENTATION_ROADMAP.md).
 
-See the [cleanup checklist and immediate development steps](docs/SLIAFLOW_CLEANUP_AND_NEXT_STEPS.md).
-
 Codex must start from `AGENTS.md`. Current work is tracked under `tasks/`.

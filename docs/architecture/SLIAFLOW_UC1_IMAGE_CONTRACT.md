@@ -10,8 +10,10 @@
 
 ## SLIA-027 in-Slicer UC1 outputs
 
-SLIAFlow runs `stratum.opt.intermediate.exe` on one recorded case per Capture
-and shows five of the images it writes, by exact file name:
+SLIAFlow runs `stratum.opt.intermediate.exe` on one cube per Capture - IUMA's
+calibrated LCTF cube `002-04` read from disk, or the last cube received from
+IUMA's app, mapped onto the model's 93 bands (`ADR-0004`) - and shows five of the
+images it writes, by exact file name:
 
 | File | Stage |
 | --- | --- |
@@ -24,35 +26,32 @@ and shows five of the images it writes, by exact file name:
 `CalibratedImage_BIP.bmp` is never read: `saveBIPtoBMP` writes it without row
 padding.
 
-A sixth entry, `gtMap`, is not a UC1 output: it is the recorded case's own
-labelling, read from the case folder as one `bil` band of uint16. Its class
-IDs are the indices of `FOUR_COLORS_MAP` in `BitmapWriter.hpp`, the table
-`writeKNNBMP` paints `svm.bmp` and `knn.bmp` from, so those two outputs and
-the ground truth carry one legend:
+`writeKNNBMP` paints `svm.bmp` and `knn.bmp` from `FOUR_COLORS_MAP` in
+`BitmapWriter.hpp`, indexed by class:
 
-| Class ID | Meaning | `FOUR_COLORS_MAP` |
+| Class | Meaning | `FOUR_COLORS_MAP` |
 | --- | --- | --- |
-| 0 | Pixel Not Labeled | white, shown transparent |
+| 0 | Pixel Not Labeled | white |
 | 1 | Normal Tissue | green |
 | 2 | Tumor Tissue | red |
 | 3 | Hypervascularized Tissue | blue |
 | 4 | Background | black |
 
 `kmeans.bmp` is painted from `COLOR_MAP` with arbitrary cluster numbers and
-`pca.bmp` is not a classification, so neither shares this legend. `gtMap` is
-loaded as a `vtkMRMLLabelMapVolumeNode` rather than a colour image, so it sits
-on the Label layer over an output instead of replacing it.
+`pca.bmp` is not a classification, so neither shares this legend. The
+ground-truth overlay that once drew a case's `gtMap` with this legend was
+retired by `ADR-0005`.
 
 ### Validation
 
 A run's outputs are accepted together or not at all. Each file must:
 
-- exist in `build/uc1/UC1/gpu_single_bsq/source/output/<case>/`;
+- exist in `build/uc1/UC1/gpu_single_bsq/source/output/<cube>/`;
 - be no older than the build lock's timestamp, taken immediately before the
   process started (outputs are cleared before every run);
 - start with `BM`, have its pixels at byte 54, a 40-byte info header, one plane,
   24 bits per pixel and no compression;
-- be `samples x lines` of the case, with a positive (bottom-up) height;
+- be `samples x lines` of the cube, with a positive (bottom-up) height;
 - be exactly `54 + lines * (3 * samples + padding)` bytes long. `bfSize` and
   `biSizeImage` are not read: UC1 writes `bfSize` without the padding.
 
@@ -61,10 +60,9 @@ The run itself fails on a nonzero exit, a crash, failure to start, a
 the executable, the SVM model file sizes, a free lock and path lengths under 128
 characters are required.
 
-A case is used only when its `raw`, `darkReference` and `whiteReference`
-headers agree, declare uint16 BSQ little-endian data with no header offset and
-93 bands, its data files have the declared size, and its `gtMap.hdr` carries the
-`HSI Human Brain Database` marker.
+A cube is used only when its ENVI header and data file agree (data type 4,
+BSQ, byte order 0, size), its wavelengths are present, and they are IUMA's LCTF
+grid, which the band mapping is defined for (`ADR-0004` decisions 4 and 6).
 
 ### Presentation and provenance
 
@@ -79,9 +77,9 @@ exit.
 | --- | --- |
 | `SLIAFlow.Owner` | `Uc1Output` |
 | `SLIAFlow.OutputFile` | the file name |
-| `SLIAFlow.RecordedCase` | the case folder name |
+| `SLIAFlow.RecordedCase` | the cube's name, `002-04` |
 | `SLIAFlow.DataOrigin` | `simulated` |
-| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, recorded HSI case <case> (simulated acquisition)` |
+| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, recorded IUMA LCTF capture 002-04, calibrated by IUMA (simulated acquisition)` |
 | `SLIAFlow.CaptureId` | one `uuid4().hex` per Capture, shared by its five outputs, never reused |
 
 While a Capture is processing, and after one fails, the previous result stays

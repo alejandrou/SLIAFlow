@@ -36,28 +36,32 @@ The vendored copy is never written to. The patches are LF files and the
 .\.venv\Scripts\python.exe scripts\development\check-uc1.py
 ```
 
-`check-uc1.py` is the check that the patches leave the reference behaviour
-alone and that each patch does what this document says. It is run after every
-change to a patch. It runs six checks, in about 5 s:
+`check-uc1.py` is the check that the build still writes what it wrote on
+`002-04` when it was recorded, and that each patch does what this document
+says. It is run after every change to a patch. It runs four checks, in about
+7 s:
 
 | Check | Patch | Oracle |
 | --- | --- | --- |
-| Reference case `020-01`, uint16 | all | the unpatched build's hashes and saved run (next section) |
+| Mapped `002-04` | all | `pca`, `svm`, `knn`, `CalibratedImage_BIP` with the hashes recorded on 2026-10-07; `kmeans`, `imageRGB` within 0.02 % of a saved run |
+| Mapped `002-04` | 0002 | `CalibratedImage_BIP.bmp` byte-identical to a prediction made from the cube |
+| Mapped `002-04` | 0003 | `pca.bmp` within one grey level of NumPy's principal component |
 | 109-band header | 0001 | refused, `Band guard:`, no output folder |
-| Float32 `020-01` | 0002 | `CalibratedImage_BIP.bmp` byte-identical to a prediction made from the cube; `pca`, `svm`, `knn` within 0.1 % of the uint16 run; `pca.bmp` against NumPy's principal component |
-| Equal bands | 0003 | `pca.bmp` within one grey level of NumPy's principal component |
 | Float32 cube one value short | 0002 | refused, no output folder |
 | No `../../svm_model` | 0001 | refused, `Band guard: ... cannot be opened` |
 
-Each patch section below says what its checks showed, including against a
-build without that patch.
+Until `SLIA-039` it also compared the patched build with the delivered one on
+the recorded case `020-01`; that case left `input/` with `ADR-0005`. The section
+on `002-04` at the end has the current run and the last run on `020-01`. Each
+patch section below says what its checks showed when the patch was added,
+including against a build without that patch.
 
 ## The reference case, before any patch
 
-UC1's model is known to behave as its authors intended only on the HSI Human
-Brain Database it was trained on. The reference case `020-01`
-(`input/reference_hsi_brain_db/020-01`, 330 x 378 x 93, uint16 with references)
-is the check that the patches did not change that behaviour.
+*Record, until `SLIA-039`.* UC1's model is known to behave as its authors
+intended only on the HSI Human Brain Database it was trained on. The reference
+case `020-01` (330 x 378 x 93, uint16 with references, then in `input/`) was the
+check that the patches did not change that behaviour.
 
 The unpatched build (vendored UC1 as delivered, built by `build-uc1.ps1` with
 the toolchain in `uc1_local_build.md`) was run on `020-01` seven times on
@@ -75,11 +79,13 @@ the toolchain in `uc1_local_build.md`) was run on `020-01` seven times on
 UC1's K-means, and the majority vote that uses it, is not deterministic on this
 GPU: every run found all 24 clusters and 4 classes, with a few border pixels
 assigned differently. This is the delivered behaviour, not something a patch
-introduced; making it deterministic is out of scope. So the reference check is:
+introduced; making it deterministic is out of scope. So the reference check
+was:
 
 - the four deterministic images byte-identical to the hashes above;
 - `kmeans.bmp` and `imageRGB.bmp` differing from a saved unpatched run
-  (`build/uc1/reference-unpatched/`, gitignored) in at most 1 % of pixels.
+  (`build/uc1/reference-unpatched/`, gitignored, deleted in `SLIA-039`) in at
+  most 1 % of pixels.
 
 The vendored `main.cu` SHA-256 is
 `63D0E9EE5E77B06876DFA7D76965B1F67719D841D7A4012742F85E2540C788C0`;
@@ -109,7 +115,9 @@ sequential order, as `raw.dat` with a `raw.hdr` declaring ENVI data type 4, into
 finds `LCTF_Calibrated_Cube_Single` without anything being written into
 `input/`. On `002-04` the file is 433,900,800 bytes and takes 0.4 to 0.7 s to
 write. An independent NumPy mapping written at specification produced a
-byte-identical `raw.dat` (SHA-256 `aaf30f8e...910003e`).
+byte-identical `raw.dat` (SHA-256 `aaf30f8e...910003e`). Since `SLIA-039`
+`check-uc1.py` computes the mapping the same independent way from the header's
+wavelengths, and writes that same `raw.dat`, as the input it checks UC1 on.
 
 Copying the 460 nm band into four more model bands makes five identical bands.
 That is what patch 0003 is for.
@@ -188,9 +196,13 @@ wall, 2.1 s inside UC1) but `pca.bmp` was black and `knn.bmp` and
 `imageRGB.bmp` were a single class. `svm.bmp` and `kmeans.bmp` had structure.
 The cube has no NaN or infinity in 460-900 nm. The cause is in patch 0003.
 
-**How the float32 path is checked.** `002-04` has nothing to compare UC1's
-output with, so `check-uc1.py` makes a float32 cube whose answer is known.
-`020-01` is calibrated in NumPy exactly as UC1's uint16 kernel does it
+**How the float32 path was checked until `SLIA-039`.** `002-04` has nothing to
+compare UC1's classification with, so `check-uc1.py` made a float32 cube whose
+answer was known. Since `SLIA-039` the prediction of `CalibratedImage_BIP.bmp`
+is made from the mapped `002-04` cube instead, and the comparison with the
+uint16 run is gone with `020-01`.
+
+`020-01` was calibrated in NumPy exactly as UC1's uint16 kernel does it
 (`100 * (raw - dark) / (white - dark)` in float32, which the GPU rounds the same
 way: the build does not use fast math), divided by 100 into reflectance, and
 written as `raw.dat` with data type 4 into `build/uc1/UC1/input/float32-check`.
@@ -199,10 +211,10 @@ written as `raw.dat` with data type 4 into `build/uc1/UC1/input/float32-check`.
   new kernel produced: the cube multiplied by 100 and transposed to band
   interleaved. The check predicts that image from the cube, with the scaling of
   UC1's `saveBIPtoBMP`, and requires it byte for byte.
-- It cannot require byte-identity with the uint16 run: for 1,571,543 of the
+- It could not require byte-identity with the uint16 run: for 1,571,543 of the
   11,600,820 calibrated values (13.5 %) no float32 `x` gives `100 * x` equal to
   the value, so dividing by 100 and multiplying again moves those values by one
-  unit in the last place. `pca.bmp`, `svm.bmp` and `knn.bmp` are therefore held
+  unit in the last place. `pca.bmp`, `svm.bmp` and `knn.bmp` were therefore held
   to the uint16 run within 0.1 % of pixels. They came out 0.0064 %, 0 and 0.
 - A copy of the cube one value short is refused.
 
@@ -258,9 +270,11 @@ PASS
 Equal diagonal entries do not occur on the reference case, so its PCA is
 unchanged. The 1.98 s is the whole process, including CUDA start-up.
 
-**How the equal-diagonal branch is checked.** `check-uc1.py` sets bands 1-4 of
-the float32 cube above to band 5, as the band mapping does for an LCTF cube, so
-UC1's Jacobi step meets equal diagonal entries. Changing four bands changes
+**How the equal-diagonal branch was checked until `SLIA-039`.** `check-uc1.py`
+set bands 1-4 of the float32 cube above to band 5, as the band mapping does for
+an LCTF cube, so UC1's Jacobi step met equal diagonal entries. Since `SLIA-039`
+the mapped `002-04` cube itself is used: the mapping makes its model bands 1-5
+equal. Changing four bands changes
 every pixel's min-max normalisation, so the outputs cannot be compared with the
 float32 run. What can be compared is the PCA itself: `pca.bmp` shows 255 times
 the first principal component of the normalised, band-centred cube, truncated
@@ -284,6 +298,9 @@ FAIL: pca.bmp of equal-bands-check is up to 255 grey levels from NumPy's first p
 ```
 
 The 77 % are the pixels NumPy's component also clips to black.
+
+Since `SLIA-039` NumPy accumulates the covariance in chunks of pixels, so the
+comparison on the 1080 x 1080 cube does not hold it in memory twice over.
 
 ## check-uc1.py on the three patches
 
@@ -314,6 +331,65 @@ PASS
 (Messages trimmed; the full output is in the task card.) What none of this
 checks: that UC1's classes are right on an LCTF cube. That needs a labelled
 LCTF cube, which does not exist yet.
+
+## check-uc1.py on 002-04 (SLIA-039)
+
+On 2026-10-07 the build of the three patches above, unchanged since
+2026-09-25, was run on the mapped `002-04` cube five times. `pca.bmp`, `svm.bmp`,
+`knn.bmp` and `CalibratedImage_BIP.bmp` were identical in all five:
+
+| Output | SHA-256, recorded 2026-10-07 |
+| --- | --- |
+| `pca.bmp` | `b4f62bfb71b450f5ec8c6b2c0ee5ae038e769f59d47e9455482dee487f0432cc` |
+| `svm.bmp` | `c0a5eb4a29a556ffbaac6d06bb318d7e61099fb67755878512347ca06bf07464` |
+| `knn.bmp` | `c9769b093eb99fdc2c969cc27d0ba830c0da96cce1db6079bf4dfa7b7f40cd66` |
+| `CalibratedImage_BIP.bmp` | `ea59726ac65cd1ce9516d6c1231e7e63a792a4dad4c526ff500e1f6222deef81` |
+
+`kmeans.bmp` differed between two of the five runs in at most 0.0068 % of
+pixels, and `imageRGB.bmp` in at most 0.0015 %, so `check-uc1.py` bounds both at
+0.02 % against the run it saved with `--save-baseline` in
+`build/uc1/baseline-002-04/` (gitignored). That saved run is pinned too: its
+`kmeans.bmp` is `e8efc5377595fac2...` and its `imageRGB.bmp`
+`0fed1c7a24acfc87...` (`RECORDED_BASELINE_SHA256`), so a folder saved from a
+changed build, or the output under test, is refused instead of compared with.
+After a deliberate change - a new patch, GPU, driver or nvcc - review the
+difference, then run `check-uc1.py --save-baseline --baseline <new folder>` and
+put the hashes it prints in `RECORDED_SHA256` and `RECORDED_BASELINE_SHA256`.
+The folder must not exist yet or be empty, and lie outside the repository or
+under `build/`, not in the UC1 build tree; the script deletes nothing, so the
+owner removes the old saved run.
+
+`check-uc1.py`, exit 0, 7.1 s:
+
+```text
+Mapped cube 002-04: exit 0, 2.12 s
+  six images written, each 1080 x 1080
+  pca.bmp                  identical  b4f62bfb...
+  svm.bmp                  identical  c0a5eb4a...
+  knn.bmp                  identical  c9769b09...
+  CalibratedImage_BIP.bmp  identical  ea59726a...
+  kmeans.bmp               0.0072% of pixels differ from the saved run (within 0.02%)
+  imageRGB.bmp             0.0013% of pixels differ from the saved run (within 0.02%)
+  CalibratedImage_BIP.bmp  identical to the prediction
+  pca.bmp                  99.9709% of pixels equal to NumPy's first component, at most 1 grey level(s) off (within 1)
+Band guard, 109-band header: exit 1, 0.11 s
+short-read-check: exit 1, 0.39 s
+Missing weights: exit 1, 0.12 s
+PASS
+```
+
+With one recorded hash changed and a wrong saved run, it exited 1 naming both
+(`svm.bmp differs from the run recorded on 2026-10-07`, `kmeans.bmp: 89.9252% of
+pixels differ, over 0.02%`).
+
+**The last run on `020-01`.** Before its checks were removed, the earlier
+`check-uc1.py` was run on `020-01` one final time, on 2026-10-07, and passed
+(exit 0): the four deterministic images identical to the unpatched hashes,
+`kmeans.bmp` and `imageRGB.bmp` 0.2750 % and 0.1635 % from the unpatched run,
+the float32 run 0.0064 %, 0 and 0 from the uint16 run. It is the last evidence
+that the patches leave the delivered behaviour unchanged; nothing checks that
+any more (`ADR-0005` decision 4). The full output is in the `SLIA-039` task
+card.
 
 ## UC1 on 002-04, with the three patches
 

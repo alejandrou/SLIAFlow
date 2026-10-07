@@ -22,12 +22,6 @@ from .SLIAFlowCalibratedCube import (
     readCalibratedCube,
 )
 from .SLIAFlowConnections import SLIAFlowConnections
-from .SLIAFlowCube import (
-    GROUND_TRUTH_CLASSES,
-    GROUND_TRUTH_FILE_NAME,
-    UNLABELLED_CLASS_ID,
-    readGroundTruth,
-)
 from .SLIAFlowParameterNode import (
     CAPTURE_ID_ATTRIBUTE,
     DATA_ORIGIN_ATTRIBUTE,
@@ -129,10 +123,6 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     SPECTRUM_VALUE_COLUMN = _("Reflectance (stored value)")
     SPECTRUM_RAW_VALUE_COLUMN = _("Raw count (uncalibrated)")
     SPECTRUM_TITLE_FORMAT = _("{cube}, pixel column {column}, row {row}")
-
-    GROUND_TRUTH_OWNER = "RecordedGroundTruth"
-    GROUND_TRUTH_VOLUME_NAME = GROUND_TRUTH_FILE_NAME
-    GROUND_TRUTH_COLOR_NODE_NAME = "gtMap classes"
 
     CAMERA_UNAVAILABLE_MESSAGE = _(
         "No camera could be opened. Check the camera index, Windows camera "
@@ -1056,93 +1046,6 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     def uc1InputFor(self, cube: CalibratedCube) -> Uc1Input:
         """What UC1 runs on for a given calibrated cube, checked against the band mapping."""
         return describeUc1Input(cube, self.uc1Build.inputDirectory)
-
-    # ------------------------------------------------------------------
-    # The ground truth beside the cube, where it has one
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def groundTruthNode(cls):
-        """The module-owned label map holding the displayed ground truth, or None."""
-        for node in slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode"):
-            if node.GetAttribute(OWNER_ATTRIBUTE) == cls.GROUND_TRUTH_OWNER:
-                return node
-        return None
-
-    @classmethod
-    def groundTruthColorNode(cls):
-        """The module-owned colour table for the gtMap classes, created on first use.
-
-        One table is enough for every case, so it outlives any one result and is
-        looked up by owner rather than rebuilt. Class 0 is the absence of a
-        label over most of the image, so it is given zero opacity: the label
-        layer then shows only what a person actually labelled, and the result
-        underneath stays visible everywhere else.
-        """
-        for node in slicer.util.getNodesByClass("vtkMRMLColorTableNode"):
-            if node.GetAttribute(OWNER_ATTRIBUTE) == cls.GROUND_TRUTH_OWNER:
-                return node
-        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode")
-        node.SetSaveWithScene(False)
-        node.SetTypeToUser()
-        node.SetHideFromEditors(False)
-        node.SetNumberOfColors(len(GROUND_TRUTH_CLASSES))
-        for classId, className, (red, green, blue) in GROUND_TRUTH_CLASSES:
-            opacity = 0.0 if classId == UNLABELLED_CLASS_ID else 1.0
-            node.SetColor(classId, className, red / 255.0, green / 255.0, blue / 255.0, opacity)
-        node.SetName(cls.GROUND_TRUTH_COLOR_NODE_NAME)
-        node.SetAttribute(OWNER_ATTRIBUTE, cls.GROUND_TRUTH_OWNER)
-        return node
-
-    @classmethod
-    def acceptGroundTruth(cls, case, captureId: str):
-        """Put the ground truth beside the cube into the module-owned label map.
-
-        `case` is the run's Uc1Input. The ground truth is someone's labelling of
-        the cube, read from the cube's own folder; it is not a UC1 output and
-        was not computed here. It is a label map rather than a third colour
-        image so that Slicer treats it as a layer: it can sit on the Label
-        layer over svm.bmp or knn.bmp with the layer's own opacity and outline
-        controls, which is the comparison it exists for.
-
-        It carries the same origin, cube and capture attributes as the outputs,
-        so no panel can present it as something acquired here and now, and a
-        stale ground truth is spotted the same way a stale result is.
-        """
-        if not captureId:
-            raise ValueError(_("A ground truth needs a capture ID."))
-        labels = readGroundTruth(case.groundTruthFolder, case.samples, case.lines)
-        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
-        try:
-            node.SetSaveWithScene(False)
-            # One slice, so the label map lies in the same plane as the outputs.
-            slicer.util.updateVolumeFromArray(node, labels[np.newaxis, ...].astype(np.int16))
-            cls._applyLiveVolumeGeometry(node)
-            node.SetAttribute(DATA_ORIGIN_ATTRIBUTE, SIMULATED_ORIGIN)
-            node.SetAttribute(RECORDED_CASE_ATTRIBUTE, case.name)
-            node.SetAttribute(SIMULATION_DETAIL_ATTRIBUTE, calibratedCubeDetail(case.name))
-            node.SetAttribute(CAPTURE_ID_ATTRIBUTE, captureId)
-            if node.GetDisplayNode() is None:
-                node.CreateDefaultDisplayNodes()
-            displayNode = node.GetDisplayNode()
-            if displayNode is not None:
-                displayNode.SetSaveWithScene(False)
-                displayNode.SetAndObserveColorNodeID(cls.groundTruthColorNode().GetID())
-        except Exception:
-            cls._removeVolumeNode(node)
-            raise
-
-        cls.removeGroundTruthNode()
-        # The previous node is gone, so the plain name is free again.
-        node.SetName(cls.GROUND_TRUTH_VOLUME_NAME)
-        node.SetAttribute(OWNER_ATTRIBUTE, cls.GROUND_TRUTH_OWNER)
-        return node
-
-    @classmethod
-    def removeGroundTruthNode(cls) -> None:
-        node = cls.groundTruthNode()
-        if node is not None:
-            cls._removeVolumeNode(node)
 
     # ------------------------------------------------------------------
     # The UC2 blood-vessel map (SLIA-021)

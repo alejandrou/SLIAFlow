@@ -31,7 +31,6 @@ from .SLIAFlowCalibratedCube import (
     CalibratedCubeError,
     loadCalibratedCube,
 )
-from .SLIAFlowCube import hasGroundTruth
 
 try:
     from slicer.i18n import tr as _
@@ -100,15 +99,6 @@ class Uc1Input:
     cube: CalibratedCube
     bandSources: tuple
     fileStamps: tuple
-
-    @property
-    def groundTruthFolder(self) -> Path:
-        """Where a ground truth of this cube would lie: beside the cube itself."""
-        return self.cube.headerPath.parent
-
-    @property
-    def hasGroundTruth(self) -> bool:
-        return hasGroundTruth(self.groundTruthFolder)
 
 
 def fileStamps(cube: CalibratedCube) -> tuple:
