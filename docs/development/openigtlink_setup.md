@@ -3,9 +3,11 @@
 > **Used again since `SLIA-035`.** Capture and UC1 still run inside Slicer with
 > no network hop (`ADR-0003`), but the **Connections** section connects to IUMA's
 > acquisition app on 18944, 18945 and 18946 as an OpenIGTLink client (`ADR-0004`
-> decision 2), so SLIAFlow declares this dependency again. Received data is not
-> yet used by the module; `SLIA-030` receives the cube. The Connections section
-> is described in `extensions/SLIAFlow/README.md`, and the stand-in for the app in
+> decision 2), so SLIAFlow declares this dependency again. Since `SLIA-036` the
+> HS cube is read by SLIAFlow's own reader, not by a connector, and is shown in
+> HS Cube and captured on; LiveView and Stereo frames are counted but not yet
+> shown (`SLIA-037`). The Connections section is described in
+> `extensions/SLIAFlow/README.md`, and the stand-in for the app in
 > `tools/simulators/README.md`.
 
 SLIAFlow will carry `LiveView` frames and UC1 image maps over OpenIGTLink as
@@ -245,7 +247,32 @@ OpenIGTLinkIF assembles such sub-volumes into one volume of the full size
 components are unchanged. It does not clear that volume, so a band that did not
 arrive holds old memory, and the volume node does not say which bands arrived.
 A connector on 18946 therefore yields a whole cube, but not the proof that the
-cube is complete.
+cube is complete. It also keeps only 3 messages per device, emptied on Slicer's
+main thread, so a busy main thread loses bands.
+
+That is why SLIAFlow reads 18946 itself (`SLIA-036`): `HsCubeReader` in
+`SLIAFlowReceivedCube.py` is the port's one client. It reads each message
+whole, checks its CRC-64 (computed with numpy: Slicer's Python has no CRC-64,
+and the pinned `OpenIGTLink.dll` does not export `igtl_crc64`), and places each
+band at its sub-volume offset.
+
+The reader is a Python thread, and Slicer's main thread keeps Python's GIL
+while it waits in Qt's event loop: another Python thread runs only while the
+main thread runs Python (discourse.slicer.org/t/32299). Left so, the reader
+fell behind, and the app and the stand-in (pyigtl's server gives up a send
+after 10 ms) closed the connection after a few bands. While the reader runs,
+`SLIAFlowConnections` therefore sleeps 10 ms on the main thread whenever its
+event loop is idle, as Slicer's SimpleFilters module does. A test that waits
+for a background thread must wait inside Qt's event loop, not in a loop of
+`processEvents()` and `sleep()`: the `sleep()` releases the GIL itself and
+hides the problem.
+
+The HS Cube connector stays listed in
+OpenIGTLinkIF, stopped; SLIAFlow stops it if it is started while connected.
+It waits one second first. OpenIGTLinkIO's `igtlioConnector::Stop()` never
+returns if it is called just after the connector connected, before its
+receiver thread first ran: that thread then exits without removing its
+socket, which `Stop()` waits for.
 
 ## Regression gate
 

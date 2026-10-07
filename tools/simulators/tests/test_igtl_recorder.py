@@ -155,6 +155,37 @@ class RecorderParsingTest(unittest.TestCase):
         self.assertEqual(image_["subvolumeSize"], [5, 3, 1])
         self.assertIsNone(pixels, "Only single-component images are compared with a cube")
 
+    def test_appSlabGeometryIsRecorded(self):
+        """IUMA's app's form: the whole cube's size, one band as the sub-volume, timestamp 0.
+
+        Packed by hand from the IMAGE layout in the OpenIGTLink specification,
+        as the app sends it (docs/hardware/acquisition_app_and_hardware.md 4.1):
+        header version 1, uint16 little endian, identity directions, LPS, the
+        centre of the whole cube, band 3 of 5 at offset (0, 0, 2).
+        """
+        samples, lines, bands, offset = 4, 3, 5, 2
+        band = numpy.arange(samples * lines, dtype="<u2").reshape(lines, samples) + 100
+        centre = ((samples - 1) / 2.0, (lines - 1) / 2.0, (bands - 1) / 2.0)
+        content = struct.pack("> H B B B B 3H 12f 3H 3H", 1, 1, 5, 2, 2,
+                              samples, lines, bands,
+                              1, 0, 0, 0, 1, 0, 0, 0, 1, *centre,
+                              0, 0, offset, samples, lines, 1) + band.tobytes()
+        header, body = splitMessage(rawMessage("IMAGE", content))
+        record, pixels = igtl_recorder.describeMessage(header, body)
+        self.assertEqual(record["headerVersion"], 1)
+        self.assertEqual(record["timestamp"], 0)
+        self.assertTrue(record["crcMatches"])
+        self.assertEqual(record["metadata"], {})
+        image_ = record["image"]
+        self.assertEqual(image_["size"], [samples, lines, bands])
+        self.assertEqual(image_["subvolumeOffset"], [0, 0, offset])
+        self.assertEqual(image_["subvolumeSize"], [samples, lines, 1])
+        self.assertEqual(image_["scalarType"], "uint16")
+        self.assertEqual(image_["coordinateSystem"], "LPS")
+        numpy.testing.assert_allclose(image_["spacing"], [1.0, 1.0, 1.0])
+        numpy.testing.assert_allclose(image_["origin"], [0.0, 0.0, 0.0], atol=1e-4)
+        numpy.testing.assert_array_equal(pixels, band)
+
     def test_badCrcIsMarked(self):
         image = numpy.arange(4, dtype=numpy.uint16).reshape(1, 2, 2)
         packed = bytearray(packedImage(image))
@@ -306,7 +337,9 @@ class RecorderStandInTest(unittest.TestCase):
             self.assertEqual(record["headerVersion"], 2)
             self.assertTrue(record["crcMatches"])
             self.assertEqual(record["image"]["scalarType"], "float32")
-            self.assertEqual(record["image"]["size"], [values.shape[2], values.shape[1], 1])
+            # The app's form (SLIA-036): the whole cube, this band as its sub-volume.
+            self.assertEqual(record["image"]["size"], [values.shape[2], values.shape[1], bandCount])
+            self.assertEqual(record["image"]["subvolumeOffset"], [0, 0, number - 1])
             self.assertEqual(record["metadata"][contract.METADATA_BAND_NUMBER_KEY], str(number))
             self.assertEqual(record["cubeMatch"], {"band": number, "orientation": "as stored"})
         for port, deviceName in ((self.basePort, "LiveView"), (self.basePort + 1, "Steroscopic")):

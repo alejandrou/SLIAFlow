@@ -25,6 +25,7 @@ import os
 import select
 import signal
 import socket
+import struct
 import sys
 import threading
 import time
@@ -136,6 +137,62 @@ def buildImageMessage(
         device_name=deviceName,
     )
     message.header_version = IGTL_HEADER_VERSION_WITH_METADATA
+    message.metadata = dict(metadata)
+    return message
+
+
+class ImageSlabMessage(pyigtl.ImageMessage):
+    """One band of a cube, sent as IUMA's app sends it (SLIA-036).
+
+    Measured on the app (docs/hardware/acquisition_app_and_hardware.md 4.1):
+    the IMAGE declares the whole cube, (samples, lines, bands), and carries one
+    band as the sub-volume (samples, lines, 1) at offset (0, 0, band index),
+    with identity directions, spacing 1, LPS and the centre of the whole cube.
+    pyigtl always packs the whole image as its own sub-volume and refuses to
+    unpack any other, so the IMAGE header is packed here.
+    """
+
+    def __init__(self, band: numpy.ndarray, bandCount: int, bandIndex: int, deviceName: str,
+                 timestamp: float | None = None) -> None:
+        band = numpy.asarray(band)
+        if band.ndim != 2:
+            raise ValueError(f"A band is a (lines, samples) array, not {band.shape}.")
+        if not 0 <= bandIndex < bandCount:
+            raise ValueError(f"Band index {bandIndex} is outside a cube of {bandCount} bands.")
+        super().__init__(image=band[numpy.newaxis, ...], ijk_to_world_matrix=numpy.eye(4),
+                         world_coordinate_system="lps", timestamp=timestamp,
+                         device_name=deviceName)
+        self.bandCount = int(bandCount)
+        self.bandIndex = int(bandIndex)
+
+    def _pack_content(self) -> bytes:
+        lines, samples = self.image.shape[1:3]
+        scalarType = next(code for code, kind in pyigtl.ImageMessage.scalar_types.items()
+                          if self.image.dtype == kind)
+        endianness = 1 if self.image.dtype.byteorder == ">" else 2
+        size = (samples, lines, self.bandCount)
+        centre = [(extent - 1) / 2.0 for extent in size]
+        return (struct.pack("> H B B B B 3H 12f 3H 3H", 1, 1, scalarType, endianness, 2, *size,
+                            1, 0, 0, 0, 1, 0, 0, 0, 1, *centre,
+                            0, 0, self.bandIndex, samples, lines, 1)
+                + numpy.ascontiguousarray(self.image).tobytes())
+
+
+def buildImageSlabMessage(
+    band: numpy.ndarray, *, bandCount: int, bandIndex: int, deviceName: str,
+    metadata: dict[str, str], headerVersion: int = IGTL_HEADER_VERSION_WITH_METADATA,
+    timestamp: float | None = None,
+) -> ImageSlabMessage:
+    """Build one band of a cube as an `ImageSlabMessage`.
+
+    Header version 1 is what the app sends: it carries no metadata, so asking
+    for metadata at version 1 is refused rather than dropped silently.
+    `timestamp` None is the time of the call; the app sends 0.
+    """
+    if headerVersion < IGTL_HEADER_VERSION_WITH_METADATA and metadata:
+        raise ValueError("Header version 1 carries no metadata; use header version 2.")
+    message = ImageSlabMessage(band, bandCount, bandIndex, deviceName, timestamp=timestamp)
+    message.header_version = headerVersion
     message.metadata = dict(metadata)
     return message
 
@@ -697,6 +754,18 @@ class ImageStreamServer:
 
         message = buildImageMessage(image, deviceName, metadata)
         return self._sendMessage(message)
+
+    def sendImageSlab(self, band: numpy.ndarray, **message) -> bool:
+        """Queue one band of a cube as the app sends it; `message` as for `buildImageSlabMessage`.
+
+        `True` means queued, as for `sendImage`.
+        """
+        if self._server is None:
+            raise RuntimeError("The image stream server was not started.")
+        if not self._server.is_connected():
+            return False
+
+        return self._sendMessage(buildImageSlabMessage(band, **message))
 
     def sendString(self, text: str, deviceName: str) -> bool:
         """Queue a string message, returning whether a client was connected."""

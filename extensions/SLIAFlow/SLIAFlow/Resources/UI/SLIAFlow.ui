@@ -138,6 +138,23 @@
         </property>
        </widget>
       </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="cubeSourceLabel">
+        <property name="text">
+         <string>Cube source:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QComboBox" name="cubeSourceSelector">
+        <property name="toolTip">
+         <string>Cube on disk: Capture reads the recorded calibrated cube 002-04 (simulated acquisition). Last cube from the app: HS Cube shows the last complete cube received from IUMA's acquisition app under Connections, and Capture runs UC1 and the blood-vessel enhancement on it. A raw uint16 cube is shown but not classified.</string>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>cubeSource</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>

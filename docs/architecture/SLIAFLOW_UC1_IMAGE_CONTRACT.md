@@ -88,6 +88,15 @@ While a Capture is processing, and after one fails, the previous result stays
 on screen with `PREVIOUS RESULT - not from the current capture` at the top of
 the view and in the result status.
 
+Since `SLIA-036` a Capture can also run on the last cube received from IUMA's
+acquisition app. Its outputs, and the received cube itself, carry
+`SLIAFlow.DataOrigin = received`, `SLIAFlow.RecordedCase = received-from-app`
+and a `SLIAFlow.SimulationDetail` that starts with the producer and names the
+host and port, the reception time, and that the sender may have captured the
+cube live or replayed a stored one. A cube from the stand-in, whose messages
+say `SLIAFlow.DataOrigin = simulated`, keeps `simulated`
+(`extensions/SLIAFlow/README.md`).
+
 This document defines the non-clinical producer/consumer boundary used by the
 SLIAFlow result pane. SLIAFlow consumes image data already present in the MRML
 scene; it does not calculate, normalize, infer, or clinically interpret UC1

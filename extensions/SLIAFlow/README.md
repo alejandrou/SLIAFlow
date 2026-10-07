@@ -140,8 +140,9 @@ Capture while the lock is held is refused with the lock path in the message.
 
 The **Connections** section connects to IUMA's acquisition app as an
 OpenIGTLink client (`ADR-0004` decision 2) and shows, per port, whether it is
-connected and what arrives. It only receives: nothing is sent to the app, and
-nothing received is shown in the panels or used by Capture yet (`SLIA-030`).
+connected and what arrives. It only receives: nothing is sent to the app. The
+HS cube it receives is shown in HS Cube and can be captured on (`SLIA-036`,
+below); LiveView and Stereo frames are not shown in a panel yet (`SLIA-037`).
 
 - **Settings**: host (default `127.0.0.1`), the LiveView, Stereo and HS Cube
   ports (18944, 18945 and 18946, as the app serves them; 0 leaves a channel
@@ -152,19 +153,25 @@ nothing received is shown in the panels or used by Capture yet (`SLIA-030`).
   and named `SLIAFlow <channel> (<port>)`, so **IGT > OpenIGTLinkIF** (and the
   Connector list of **IGT > OpenIGTLink Remote**) shows them, off, before
   anything is connected. Changing a port lists them again for the new port.
-- **Connect** starts those connectors and becomes **Disconnect**, which stops
-  them. Each row shows Port, Channel, State, the Last message (device
-  name, message type, size, data type, band and wavelength when the message
-  says them, and how long ago it arrived) and what was Received (frames or bands
-  per second over the last 5 s; for HS Cube, the bands of the current cube out
-  of the expected bands). The line under the table says what the table has no
-  room for.
+- **Connect** starts the LiveView and Stereo connectors and becomes
+  **Disconnect**, which stops them. The HS Cube connector stays listed but is
+  never started: the app serves one client per port, and SLIAFlow reads that
+  port itself (below). If it is switched on in OpenIGTLinkIF while SLIAFlow is
+  connected, SLIAFlow stops it after a second and the line under the table
+  says so. The second is needed because the connector's `Stop()` never
+  returns if it is called just as the connector connects. Each row
+  shows Port, Channel, State, the Last message (device name, message type,
+  size, data type, band number, the wavelength when the message says it, and
+  how long ago it arrived) and what was Received (frames or bands per second
+  over the last 5 s; for HS Cube, the bands of the current cube out of the
+  bands the messages declare, or the Expected bands setting before the first
+  one). The line under the table says what the table has no room for.
 - **States**: `Not connected`; `Waiting for the app`, then `App not running`
   after 3 s, naming the host and port; `Connected` with no message in the last
   2 s; `Receiving`; for HS Cube, `Cube complete` or `Cube incomplete` with the
-  missing band numbers once nothing has arrived for 10 s; `Error` with its
-  reason. A row whose messages say `SLIAFlow.DataOrigin = simulated` adds
-  `(stand-in)`.
+  missing band numbers once nothing has arrived for 10 s or the sender left;
+  `Error` with its reason, for HS Cube a message it refused. A row whose
+  messages say `SLIAFlow.DataOrigin = simulated` adds `(stand-in)`.
 - **A new connection starts empty.** When the app, or the stand-in, stops and
   a sender connects to the port again, the row forgets the previous
   connection: its state, bands and `(stand-in)` mark do not carry over.
@@ -172,21 +179,48 @@ nothing received is shown in the panels or used by Capture yet (`SLIA-030`).
   key a later message leaves out, so when a connection is lost SLIAFlow removes
   the `OpenIGTLink.SLIAFlow.*` band and origin attributes from the nodes it
   received. The last image stays on its node without them.
-- **Bands** are counted as they reach Slicer. OpenIGTLinkIF keeps a buffer of 3
-  per device name and reads it every 5 ms, so bands arriving faster than that
-  can be lost before SLIAFlow sees them; the count shows it. Missing bands are
-  named only when each message says which band it is; otherwise the line says
-  they cannot be named. A new cube starts when a band number repeats, after 10 s
-  of silence, or, without band numbers, after a full count.
+- **The HS cube is read by SLIAFlow itself** (`SLIA-036`). The app sends one
+  IMAGE per band that declares the whole cube and carries the band as a
+  sub-volume at offset (0, 0, band - 1), header version 1, no metadata
+  (`docs/hardware/acquisition_app_and_hardware.md` section 4.1). OpenIGTLinkIF
+  would assemble these into one volume without saying which band arrived, and
+  keeps only 3 messages per device, read on Slicer's main thread. So a reader
+  thread of SLIAFlow's own is the port's client: it reads every message whole,
+  checks its CRC-64, and puts each band at its offset in the cube's own buffer.
+  - It takes only single-component uint16 or float32 IMAGE messages that carry
+    one whole band. Anything else, a bad CRC, a stand-in band number that
+    disagrees with the offset, a version or byte order OpenIGTLink does not
+    define, or an image with no pixels, is refused by name and leaves the
+    cube alone.
+  - A cube is complete once it holds every band, in any order. A band it
+    already holds starts the next cube; so does a change of size or type, which
+    ends the current one as incomplete. After connecting in mid-cube, a band
+    missed by connecting late that arrives after the cube's last band also
+    starts the next cube, so bands of two captures are never put together. A
+    cube that gets no band for 10 s, or
+    whose sender leaves, is incomplete: its missing bands are named, bands
+    missed by connecting late say so, and it is thrown away. When the sender
+    leaves, the row names them while it waits for the app again. Only complete
+    cubes are shown or used.
+  - The reader must keep up: a sender gives up a send that takes too long
+    (pyigtl, in the stand-in, after 10 ms) and closes the connection. Slicer's
+    main thread keeps Python's GIL while it is idle, so while connected it
+    sleeps 10 ms each time it has nothing else to do, which lets the reader
+    run. A full-size calibrated cube then arrives at the app's pace, and the
+    window keeps responding. Python running on the main thread hands the GIL
+    over by itself. A long call into Slicer's C++ code does not, and a cube
+    arriving meanwhile may be cut off and reported incomplete. SLIAFlow then
+    reconnects, possibly in the middle of the next cube, and throws a cube it
+    joined in mid-cube away too, so one cut-off can cost up to two cubes.
 - **Open in OpenIGTLinkIF** opens Slicer's own view of the connectors and every
   device they received; **IGT > OpenIGTLinkIF** in the Modules menu is the same
   module. Leaving SLIAFlow for any module leaves the connections as they are:
   they stay connected until **Disconnect**.
 - **What a connection received does not stay.** Disconnect, closing the scene,
-  Reload and quitting Slicer stop the connectors and remove the nodes they
-  created. A node that existed before Connect is kept. Closing the scene and
-  Reload also replace the connectors with new, stopped ones; quitting removes
-  them.
+  Reload and quitting Slicer stop the connectors and the HS Cube reader, and
+  remove the nodes they created and the received cube. A node that existed
+  before Connect is kept. Closing the scene and Reload also replace the
+  connectors with new, stopped ones; quitting removes them.
 - A connector switched on from OpenIGTLinkIF's own Active checkbox while
   SLIAFlow is disconnected is not followed by the rows; **Connect** takes it
   over.
@@ -209,5 +243,57 @@ cd tools\simulators
 ```
 
 `--drop-bands 5,17,80-84` leaves bands out, to see them named as missing.
-`tools\simulators\README.md` lists what the stand-in assumes about the real
-app.
+`--app-header` sends the cube exactly as the app does, without the stand-in's
+metadata, so SLIAFlow cannot tell it from the app. `--cube` also takes a uint16
+cube, such as `002-04`'s raw cube. `tools\simulators\README.md` lists what the
+stand-in assumes about the real app.
+
+### The cube from the app in HS Cube and Capture (SLIA-036)
+
+**Cube source** chooses the cube HS Cube shows and Capture uses:
+
+- **Cube on disk** (the default): the configured calibrated cube, `002-04`, as
+  before.
+- **Last cube from the app**: the last complete cube received on the HS Cube
+  port. HS Cube shows it as soon as it completes, with its bands, colour
+  preview and pixel spectrum, keeping its received type. Until one arrives the
+  panel says it is waiting for a complete cube from the app.
+  - The caption says the cube was received from the app, or from the
+    stand-in. A uint16 cube is captioned as raw counts, uncalibrated; its
+    preview is scaled to its own brightest count and its spectrum is labelled
+    as raw counts.
+  - The app sends no wavelengths. A 109-band cube is given the LCTF grid,
+    460-1000 nm in 5 nm steps, and the node and the caption say the grid is
+    assumed. A cube with another band count has no wavelengths: its caption
+    gives the band number only, and it is shown but not classified.
+  - The volume has SLIAFlow's own geometry: the app's spacing 1 and centred
+    origin carry no physical information.
+- **Capture on the cube from the app.** With no complete cube received,
+  Capture is refused before anything is frozen or saved.
+  - On a float32 109-band cube, Capture writes the cube once, as an ENVI
+    float32 cube under the names UC2 reads, to the gitignored
+    `workspace\received-cube\received-from-app` folder, which the next such
+    Capture overwrites. UC1 and UC2 then run on it exactly as on the cube on
+    disk, and HS Cube keeps showing the received cube.
+  - On a uint16 cube, UC1 and UC2 do not run. The status and Enhanced
+    Vascularization say they wait for IUMA's calibrated float32 stream: SLIAFlow
+    does no calibration of its own.
+  - On a cube with another band count, UC1 and UC2 are refused, because it has
+    no wavelengths to map.
+  - A cube completed while a capture runs is held and shown when the capture
+    ends. Only the latest one is held.
+- **Provenance.** A received cube, and the UC1 and UC2 outputs of a capture on
+  it, carry `SLIAFlow.DataOrigin = received`. The detail names the host and
+  port, the reception time, that IUMA's AcquisitionSystemApp serves its HS cube
+  there, and that the sender may have captured it live or replayed a stored
+  cube, which SLIAFlow cannot tell apart. Stand-in data, whose messages say
+  `SLIAFlow.DataOrigin = simulated`, stays `simulated`.
+- **Memory.** A cube is assembled straight into the image its volume then uses.
+  Outside a capture, the peak is the cube on screen plus the one being
+  received: 3.9 GB for two raw 4096 x 2160 x 109 cubes. During a capture on a
+  received float32 cube, a held cube can add a third: 1.5 GB for three
+  1080 x 1080 x 109 float32 cubes. A capture on a raw cube ends at once, so a
+  raw cube is held only while a float32 capture runs, which peaks at 4.4 GB.
+  Disconnect, scene close, Reload and quit remove the received cube, any held
+  one, and the cube written for a run. A run cube still in use is removed when
+  its capture ends.

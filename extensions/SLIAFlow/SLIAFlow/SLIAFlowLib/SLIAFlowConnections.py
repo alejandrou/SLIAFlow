@@ -1,19 +1,27 @@
-"""What arrives on each port of IUMA's acquisition app (SLIA-035).
+"""What arrives on each port of IUMA's acquisition app (SLIA-035, SLIA-036).
 
 SLIAFlow connects to the app's three OpenIGTLink servers as a client
 (ADR-0004 decision 2) and shows, per port, whether it is connected and what
 arrives, in the product's own words.
 
-`ChannelMonitor` turns a connector's state and the messages it imported into
+`ChannelMonitor` turns a connection's state and the messages it received into
 one row of text, from times it is given. It touches neither Slicer nor a
-socket, so every rule about states, rates and bands is testable on its own.
+socket, so every rule about states and rates is testable on its own. For the
+HS Cube port, what the cube holds comes from the reader's assembler.
 
 `SLIAFlowConnections` owns the module's client connectors
 (`vtkMRMLIGTLConnectorNode`) and feeds the monitors. The connectors stay in the
 scene, stopped, while SLIAFlow is disconnected, so that OpenIGTLinkIF lists the
-app's ports as IUMA's team saw them (owner request, 2026-09-25). What it relies
-on was read in the pinned SlicerOpenIGTLink source (commit 85e5f764), not
-assumed:
+app's ports as IUMA's team saw them (owner request, 2026-09-25).
+
+The HS Cube port is read by SLIAFlow's own `HsCubeReader` (SLIA-036), not by
+its connector: OpenIGTLinkIF does not say which band of the app's cube a
+message is, and drops bands it cannot pull in time. Its connector is still
+listed, but never started, because the app serves one client per port and the
+reader is that client (owner decision, 2026-10-06).
+
+What the connectors rely on was read in the pinned SlicerOpenIGTLink source
+(commit 85e5f764), not assumed:
 
 - the connector invokes `DeviceModifiedEvent` once per imported message, after
   the image and the message's metadata (as `OpenIGTLink.<key>` attributes) are
@@ -25,13 +33,20 @@ assumed:
   them (a 5 ms timer, a buffer of 3) overwrite each other. What the monitors
   count is what reached the node.
 
-No socket of SLIAFlow's own touches the app's ports: the app serves one client
+No socket of SLIAFlow's own probes the app's ports: the app serves one client
 per port, and a probe connection would be that client.
 """
 
 import time
 from collections import deque
 from dataclasses import dataclass
+
+from .SLIAFlowReceivedCube import (
+    CUBE_IDLE_SEC,
+    CubeProgress,
+    HsCubeReader,
+    allocateNumpyCube,
+)
 
 try:
     from slicer.i18n import tr as _
@@ -57,8 +72,8 @@ CONNECTOR_STATE_WAITING = 1
 CONNECTOR_STATE_CONNECTED = 2
 
 # Incoming metadata as the connector puts it on the node: "OpenIGTLink." + key.
-# The band keys are the SLIA-035 stand-in's (tools/simulators contract.py); the
-# real app's are measured in SLIA-030.
+# The band keys are the stand-in's (tools/simulators contract.py); the real app
+# sends no metadata (SLIA-030).
 DATA_ORIGIN_ATTRIBUTE = "OpenIGTLink.SLIAFlow.DataOrigin"
 BAND_NUMBER_ATTRIBUTE = "OpenIGTLink.SLIAFlow.BandNumber"
 WAVELENGTH_ATTRIBUTE = "OpenIGTLink.SLIAFlow.WavelengthNm"
@@ -111,17 +126,6 @@ class ChannelRow:
     detail: str
 
 
-def formatBandRanges(bands) -> str:
-    """Band numbers with runs as ranges: `5, 17, 80-84`."""
-    runs = []
-    for band in sorted(bands):
-        if runs and band == runs[-1][1] + 1:
-            runs[-1][1] = band
-        else:
-            runs.append([band, band])
-    return ", ".join(str(first) if first == last else f"{first}-{last}" for first, last in runs)
-
-
 class ChannelMonitor:
     """One port of the app: its connector's state and what arrived on it."""
 
@@ -139,13 +143,12 @@ class ChannelMonitor:
         "Nothing answers on {host}:{port}. Start IUMA's acquisition app or the stand-in; "
         "SLIAFlow keeps trying."
     )
-    MISSING_BANDS_DETAIL = _("Missing bands: {bands}.")
-    UNNAMED_BANDS_DETAIL = _(
-        "The messages do not say which band they are, so missing bands cannot be named."
+    REFUSED_DETAIL = _(
+        "Refused {message}. HS Cube takes one uint16 or float32 band per IMAGE, as the app "
+        "sends it; the cube being received is unchanged."
     )
-    NOT_A_BAND_DETAIL = _(
-        "HS Cube expects one single-component IMAGE per band; it received {message}."
-    )
+    PREVIOUS_INCOMPLETE_DETAIL = _("The previous cube was incomplete and was not used. {detail}")
+    LAST_INCOMPLETE_DETAIL = _("The last cube was incomplete and was not used. {detail}")
 
     # A connector that has tried this long is taken to have nothing to reach.
     # A refused local connection takes about 2 s on Windows (measured, SLIA-035).
@@ -154,20 +157,17 @@ class ChannelMonitor:
     RECEIVING_WINDOW_SEC = 2.0
     # The rate is measured over this window.
     RATE_WINDOW_SEC = 5.0
-    # Silence this long ends a cube. It is longer than the app's pause of up to
-    # 5 s at the VIS/NIR crossover (acquisition_app_and_hardware.md 2.2).
-    CUBE_IDLE_SEC = 10.0
 
     def __init__(self, channel: str, host: str, port: int, expectedBands: int | None = None,
-                 *, notRunningGraceSec: float | None = None,
-                 cubeIdleSec: float | None = None) -> None:
+                 *, notRunningGraceSec: float | None = None) -> None:
         self.channel = channel
         self.host = host
         self.port = int(port)
         self.expectedBands = expectedBands
         self.notRunningGraceSec = (self.NOT_RUNNING_GRACE_SEC if notRunningGraceSec is None
                                    else notRunningGraceSec)
-        self.cubeIdleSec = self.CUBE_IDLE_SEC if cubeIdleSec is None else cubeIdleSec
+        # A sentence about the port itself, added to the row's detail.
+        self.note: str | None = None
         self._connectorState = CONNECTOR_STATE_OFF
         self._stateSince: float | None = None
         self._error: str | None = None
@@ -186,9 +186,7 @@ class ChannelMonitor:
         self._messageError: str | None = None
         self._last: MessageObservation | None = None
         self._times: deque = deque()
-        self._cubeBands: set = set()
-        self._cubeUnnamed = 0
-        self._lastBandTime: float | None = None
+        self._progress = CubeProgress()
 
     def setError(self, reason: str | None) -> None:
         self._error = reason
@@ -207,52 +205,25 @@ class ChannelMonitor:
         self._times.append(message.time)
         while self._times and self._times[0] < message.time - self.RATE_WINDOW_SEC:
             self._times.popleft()
-        if not self.isCubeChannel:
-            return
-        if message.messageType != "IMAGE" or message.components != 1:
-            self._messageError = self.NOT_A_BAND_DETAIL.format(message=self._describe(message))
-            return
         self._messageError = None
-        if self._startsNewCube(message):
-            self._cubeBands = set()
-            self._cubeUnnamed = 0
-        if message.bandNumber is None:
-            self._cubeUnnamed += 1
-        else:
-            self._cubeBands.add(message.bandNumber)
-        self._lastBandTime = message.time
 
-    def _startsNewCube(self, message: MessageObservation) -> bool:
-        if self._lastBandTime is None or message.time - self._lastBandTime >= self.cubeIdleSec:
-            return True
-        if message.bandNumber is not None:
-            return message.bandNumber in self._cubeBands
-        return bool(self.expectedBands) and self.bandsReceived >= self.expectedBands
+    def messageRefused(self, message: MessageObservation, reason: str) -> None:
+        """A message the HS Cube reader refused: an error until a band is accepted."""
+        self.messageReceived(message)
+        self._messageError = self.REFUSED_DETAIL.format(message=reason)
+
+    def setCubeProgress(self, progress: CubeProgress) -> None:
+        """What the cube holds, as the reader's assembler counts it."""
+        self._progress = progress
 
     @property
     def bandsReceived(self) -> int:
-        return len(self._cubeBands) + self._cubeUnnamed
+        return self._progress.bandsReceived
 
     @property
-    def bandsNamed(self) -> bool:
-        """Whether every band of the current cube said which band it is."""
-        return self._cubeUnnamed == 0
-
-    def missingBands(self) -> list:
-        if not self.expectedBands or not self.bandsNamed:
-            return []
-        return [band for band in range(1, self.expectedBands + 1) if band not in self._cubeBands]
-
-    def _cubeComplete(self) -> bool:
-        if not self.expectedBands or self.bandsReceived == 0:
-            return False
-        if self.bandsNamed:
-            return not self.missingBands()
-        return self.bandsReceived >= self.expectedBands
-
-    def _cubeIncomplete(self, now: float) -> bool:
-        return (self.bandsReceived > 0 and not self._cubeComplete()
-                and now - self._lastBandTime >= self.cubeIdleSec)
+    def bandsExpected(self) -> int | None:
+        """The band count the messages declare, or the setting until one arrived."""
+        return self._progress.bandsDeclared or self.expectedBands
 
     def _state(self, now: float) -> str:
         if self._error:
@@ -265,24 +236,33 @@ class ChannelMonitor:
             return self.STATE_WAITING
         if self.isCubeChannel and self._messageError:
             return self.STATE_ERROR
-        if self.isCubeChannel and self._cubeComplete():
+        if self.isCubeChannel and self._progress.complete:
             return self.STATE_CUBE_COMPLETE
         if self._last is not None and now - self._last.time < self.RECEIVING_WINDOW_SEC:
             return self.STATE_RECEIVING
-        if self.isCubeChannel and self._cubeIncomplete(now):
+        if self.isCubeChannel and self._progress.incompleteDetail:
             return self.STATE_CUBE_INCOMPLETE
         return self.STATE_CONNECTED
 
     def _detail(self, state: str) -> str:
         if state == self.STATE_ERROR:
-            return self._error or self._messageError or ""
-        if state == self.STATE_NOT_RUNNING:
-            return self.NOT_RUNNING_DETAIL.format(host=self.host, port=self.port)
-        if state == self.STATE_CUBE_INCOMPLETE:
-            if not self.bandsNamed:
-                return self.UNNAMED_BANDS_DETAIL
-            return self.MISSING_BANDS_DETAIL.format(bands=formatBandRanges(self.missingBands()))
-        return ""
+            detail = self._error or self._messageError or ""
+        elif state == self.STATE_NOT_RUNNING:
+            detail = self.NOT_RUNNING_DETAIL.format(host=self.host, port=self.port)
+        elif state == self.STATE_CUBE_INCOMPLETE:
+            detail = self._progress.incompleteDetail or ""
+        elif self.isCubeChannel and self._progress.previousIncompleteDetail:
+            detail = self.PREVIOUS_INCOMPLETE_DETAIL.format(
+                detail=self._progress.previousIncompleteDetail)
+        else:
+            detail = ""
+        lost = ""
+        if (self.isCubeChannel and self._progress.incompleteDetail
+                and state in (self.STATE_WAITING, self.STATE_NOT_RUNNING)):
+            # The connection closed with a cube half received: the waiting
+            # state must not hide which bands it lacked.
+            lost = self.LAST_INCOMPLETE_DETAIL.format(detail=self._progress.incompleteDetail)
+        return " ".join(part for part in (detail, lost, self.note) if part)
 
     @staticmethod
     def _describe(message: MessageObservation) -> str:
@@ -329,7 +309,7 @@ class ChannelMonitor:
         rate = self._rate(now)
         if self.isCubeChannel:
             received = _("{received} / {expected} bands").format(
-                received=self.bandsReceived, expected=self.expectedBands or "?")
+                received=self.bandsReceived, expected=self.bandsExpected or "?")
             if rate:
                 received += f" - {rate}"
         else:
@@ -356,13 +336,40 @@ class SLIAFlowConnections:
     )
     NO_PORT_ERROR = _("No channel has a port. Give at least one channel a port other than 0.")
     START_FAILED_ERROR = _("The connector for {host}:{port} could not start.")
+    HS_CUBE_CONNECTOR_STOPPED_NOTE = _(
+        "SLIAFlow stopped the HS Cube connector started in OpenIGTLinkIF: the app serves one "
+        "client per port, and SLIAFlow reads this one itself."
+    )
+    # OpenIGTLinkIO's Stop() never returns if it is called just after the
+    # connector connected, before its receiver thread first ran: that thread
+    # then exits without removing its socket, which Stop() waits for. A
+    # connector started elsewhere is stopped only once it has run this long.
+    STARTED_CONNECTOR_STOP_DELAY_SEC = 1.0
+    # Slicer's main thread keeps Python's GIL while it waits in Qt's event
+    # loop, and hands it to another Python thread only while it runs Python
+    # itself (discourse.slicer.org/t/32299). The reader then ran a moment every
+    # few hundred milliseconds, and the app and the stand-in, whose sends time
+    # out, closed the connection after a few bands (SLIA-036 verification).
+    # While the reader runs, the main thread sleeps this long, which releases
+    # the GIL, whenever its event loop has nothing else to do, as Slicer's
+    # SimpleFilters module does.
+    GIL_YIELD_SEC = 0.01
 
     def __init__(self, openIGTLinkAvailable=None, clock=time.monotonic) -> None:
         self._openIGTLinkAvailable = openIGTLinkAvailable or self._connectorClassLoaded
         self._clock = clock
-        # Timings the monitors use; a test can shorten them.
+        # Timings the monitors and the reader use; a test can shorten them.
         self.notRunningGraceSec = ChannelMonitor.NOT_RUNNING_GRACE_SEC
-        self.cubeIdleSec = ChannelMonitor.CUBE_IDLE_SEC
+        self.cubeIdleSec = CUBE_IDLE_SEC
+        # How the HS Cube reader allocates a cube. SLIAFlowLogic gives one that
+        # allocates the vtkImageData the volume node then uses without a copy.
+        self.allocateCube = allocateNumpyCube
+        self.readerFactory = HsCubeReader
+        self._reader: HsCubeReader | None = None
+        self._gilYieldTimer = None
+        self._completedCube = None
+        # When the listed HS Cube connector was first seen started, or None.
+        self._cubeConnectorStartedAt: float | None = None
         self._host = DEFAULT_HOST
         self._ports = dict(DEFAULT_PORTS)
         self._expectedBands = DEFAULT_EXPECTED_BANDS
@@ -408,6 +415,20 @@ class SLIAFlowConnections:
 
     def connectorNodes(self) -> list:
         return list(self._connectors.values())
+
+    @property
+    def cubeReader(self) -> HsCubeReader | None:
+        """The HS Cube reader while connected, or None."""
+        return self._reader
+
+    def takeCompletedCube(self):
+        """The last complete cube received since this was last called, or None.
+
+        Only the latest is kept: one not taken before the next completes is
+        dropped, and its memory with it.
+        """
+        cube, self._completedCube = self._completedCube, None
+        return cube
 
     def settingsError(self) -> str | None:
         if not self._openIGTLinkAvailable():
@@ -470,7 +491,6 @@ class SLIAFlowConnections:
         for monitor in self._monitors.values():
             monitor.reset()
             monitor.notRunningGraceSec = self.notRunningGraceSec
-            monitor.cubeIdleSec = self.cubeIdleSec
             monitor.setConnectorState(CONNECTOR_STATE_OFF, now)
         self.lastError = self.settingsError()
         if self.lastError:
@@ -486,8 +506,11 @@ class SLIAFlowConnections:
         }
         self._countedData = {}
         host = self._host.strip()
+        self._completedCube = None
+        self._cubeConnectorStartedAt = None
         for channel, connector in self._connectors.items():
             monitor = self._monitors[channel]
+            monitor.note = None
             # What the row describes is what the connector reaches, whatever
             # was changed on the listed connector in OpenIGTLinkIF, where its
             # Active checkbox may also have started it: Start() refuses a
@@ -495,6 +518,14 @@ class SLIAFlowConnections:
             if connector.GetState() != CONNECTOR_STATE_OFF:
                 connector.Stop()
             connector.SetTypeClient(host, monitor.port)
+            if channel == CHANNEL_HS_CUBE:
+                # Listed, never started: the reader is the port's one client.
+                self._reader = self.readerFactory(host, monitor.port, allocate=self.allocateCube,
+                                                  idleSec=self.cubeIdleSec, clock=self._clock)
+                self._reader.start()
+                self._startGilYield()
+                monitor.setConnectorState(CONNECTOR_STATE_WAITING, now)
+                continue
             for event in (connector.ConnectedEvent, connector.DisconnectedEvent,
                           connector.ActivatedEvent, connector.DeactivatedEvent,
                           connector.DeviceModifiedEvent):
@@ -514,6 +545,11 @@ class SLIAFlowConnections:
         """
         import slicer
         scene = slicer.mrmlScene
+        if self._reader is not None:
+            self._stopGilYield()
+            self._reader.stop()
+            self._reader = None
+        self._completedCube = None
         for connector, tag in self._observerTags:
             connector.RemoveObserver(tag)
         self._observerTags = []
@@ -538,6 +574,22 @@ class SLIAFlowConnections:
         for monitor in self._monitors.values():
             monitor.setConnectorState(CONNECTOR_STATE_OFF, now)
 
+    def _startGilYield(self) -> None:
+        import qt
+        if self._gilYieldTimer is None:
+            self._gilYieldTimer = qt.QTimer()
+            # 0: each time the event loop has handled what was pending.
+            self._gilYieldTimer.setInterval(0)
+            self._gilYieldTimer.connect("timeout()", self._yieldGil)
+        self._gilYieldTimer.start()
+
+    def _stopGilYield(self) -> None:
+        if self._gilYieldTimer is not None:
+            self._gilYieldTimer.stop()
+
+    def _yieldGil(self) -> None:
+        time.sleep(self.GIL_YIELD_SEC)
+
     def release(self) -> None:
         """Disconnect, and remove the connectors from the scene too."""
         if self._connected:
@@ -558,13 +610,46 @@ class SLIAFlowConnections:
         if now is None:
             now = self._clock()
         for channel, connector in self._connectors.items():
-            self._follow(channel, connector, now)
+            if channel == CHANNEL_HS_CUBE:
+                self._followReader(connector, now)
+            else:
+                self._follow(channel, connector, now)
 
     def _onConnectorEvent(self, caller, event) -> None:
         for channel, connector in self._connectors.items():
-            if connector is caller:
+            if connector is caller and channel != CHANNEL_HS_CUBE:
                 self._follow(channel, connector, self._clock())
                 return
+
+    def _followReader(self, connector, now: float) -> None:
+        """Take the HS Cube reader's state, messages and cube progress."""
+        monitor = self._monitors[CHANNEL_HS_CUBE]
+        if connector is None or connector.GetState() == CONNECTOR_STATE_OFF:
+            self._cubeConnectorStartedAt = None
+        elif self._cubeConnectorStartedAt is None:
+            self._cubeConnectorStartedAt = now
+        elif now - self._cubeConnectorStartedAt >= self.STARTED_CONNECTOR_STOP_DELAY_SEC:
+            connector.Stop()
+            self._cubeConnectorStartedAt = None
+            monitor.note = self.HS_CUBE_CONNECTOR_STOPPED_NOTE
+        if self._reader is None:
+            return
+        update = self._reader.poll()
+        monitor.setConnectorState(update.state, update.stateSince)
+        for message in update.messages:
+            observation = MessageObservation(
+                time=message.time, deviceName=message.deviceName,
+                messageType=message.messageType, size=message.size,
+                components=1 if message.size else None, scalarType=message.scalarType,
+                bandNumber=message.bandNumber, wavelengthNm=message.wavelengthNm,
+                simulated=message.simulated)
+            if message.refusal is None:
+                monitor.messageReceived(observation)
+            else:
+                monitor.messageRefused(observation, message.refusal)
+        monitor.setCubeProgress(update.progress)
+        if update.completed is not None:
+            self._completedCube = update.completed
 
     def _follow(self, channel: str, connector, now: float) -> None:
         """Take the connector's state, count what arrived, and forget a sender that left.

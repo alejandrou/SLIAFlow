@@ -7,11 +7,18 @@ docs/hardware/acquisition_app_and_hardware.md section 4):
 - P, `LiveView`: a colour preview of the cube, RGB uint8;
 - P + 1, `Steroscopic` (spelled as the app spells it): that preview and one band
   in grey, side by side, RGB uint8;
-- P + 2, `HsCube`: the calibrated cube band by band, one float32 IMAGE per band,
-  while a client is connected.
+- P + 2, `HsCube`: the cube band by band while a client is connected, as the
+  app sends it (SLIA-036): every IMAGE declares the whole cube and carries one
+  band as the sub-volume at offset (0, 0, band - 1).
+
+By default the bands go out at header version 2 with the stand-in's metadata,
+so that its data stays marked simulated. `--app-header` sends header version 1,
+no metadata and timestamp 0, exactly as the app does. The cube is IUMA's
+calibrated float32 cube, or a uint16 cube such as the raw cube the app sends
+today.
 
 What it assumes about the real app is listed in tools/simulators/README.md and
-checked against the app in SLIA-030. Run it from tools/simulators:
+was checked against the app in SLIA-030. Run it from tools/simulators:
 
     ..\\..\\.venv\\Scripts\\python.exe -m stratum_sim.iuma_app_standin
 
@@ -52,8 +59,9 @@ MONO_WAVELENGTH_NM = 650.0
 # How often a waiting loop looks again.
 POLL_SEC = 0.01
 
-# ENVI data type 4 is float32, IUMA's calibrated cube (ADR-0004 decision 6).
-_ENVI_FLOAT32 = "4"
+# ENVI data types: 4 is float32, IUMA's calibrated cube (ADR-0004 decision 6);
+# 12 is uint16, the raw cube the app sends today (acquisition_app_and_hardware.md 4.1).
+_ENVI_TYPES = {"4": numpy.dtype("<f4"), "12": numpy.dtype("<u2")}
 _DATA_FILE_SUFFIXES = (".dat", ".raw")
 _WAVELENGTH_BLOCK = re.compile(r"^\s*wavelength\s*=\s*\{([^}]*)\}", re.IGNORECASE | re.MULTILINE)
 _HEADER_LINE = re.compile(r"^\s*([^=]+?)\s*=\s*([^{].*?)\s*$")
@@ -68,7 +76,7 @@ class CubeError(ValueError):
 class StandInCube:
     name: str
     headerPath: Path
-    # (bands, lines, samples) float32, read-only, as stored.
+    # (bands, lines, samples) float32 or uint16, read-only, as stored.
     bands: numpy.ndarray
     wavelengths: tuple
 
@@ -78,10 +86,11 @@ class StandInCube:
 
 
 def readCube(headerPath) -> StandInCube:
-    """Read an ENVI float32 BSQ little-endian cube with one wavelength per band.
+    """Read an ENVI float32 or uint16 BSQ little-endian cube with one wavelength per band.
 
     A deliberately small reader: the stand-in runs outside Slicer, so it cannot
-    use SLIAFlow's own, and it needs only the format IUMA's calibrated cube has.
+    use SLIAFlow's own, and it needs only the formats of IUMA's calibrated and
+    raw cubes.
     """
     headerPath = Path(headerPath)
     if not headerPath.is_file():
@@ -96,8 +105,12 @@ def readCube(headerPath) -> StandInCube:
         samples, lines, bandCount = (int(values[key]) for key in ("samples", "lines", "bands"))
     except (KeyError, ValueError) as error:
         raise CubeError(f"{headerPath.name} does not declare samples, lines and bands.") from error
-    for key, expected in (("data type", _ENVI_FLOAT32), ("interleave", "bsq"),
-                          ("byte order", "0"), ("header offset", "0")):
+    dataType = values.get("data type")
+    if dataType not in _ENVI_TYPES:
+        raise CubeError(f"{headerPath.name} declares data type {dataType}, not 4 (float32) "
+                        "or 12 (uint16).")
+    dtype = _ENVI_TYPES[dataType]
+    for key, expected in (("interleave", "bsq"), ("byte order", "0"), ("header offset", "0")):
         found = values.get(key, "0" if key == "header offset" else None)
         if found is None or found.lower() != expected:
             raise CubeError(f"{headerPath.name} declares {key} {found}, not {expected}.")
@@ -113,13 +126,13 @@ def readCube(headerPath) -> StandInCube:
                      if headerPath.with_suffix(suffix).is_file()), None)
     if dataPath is None:
         raise CubeError(f"{headerPath.name} has no .dat or .raw file beside it.")
-    expectedBytes = samples * lines * bandCount * 4
+    expectedBytes = samples * lines * bandCount * dtype.itemsize
     if dataPath.stat().st_size != expectedBytes:
         raise CubeError(f"{dataPath.name} is {dataPath.stat().st_size} bytes but "
                         f"{headerPath.name} describes {expectedBytes}.")
     # Read whole rather than mapped: a mapped file cannot be deleted on Windows
     # while the mapping lives, and 002-04 is half a gigabyte.
-    bands = numpy.fromfile(dataPath, dtype="<f4").reshape(bandCount, lines, samples)
+    bands = numpy.fromfile(dataPath, dtype=dtype).reshape(bandCount, lines, samples)
     bands.flags.writeable = False
     return StandInCube(headerPath.parent.name, headerPath.resolve(), bands, wavelengths)
 
@@ -158,27 +171,39 @@ def nearestBand(wavelengths, nanometres: float) -> int:
                                                           index))
 
 
-def _toUint8(reflectance: numpy.ndarray) -> numpy.ndarray:
-    return (numpy.clip(numpy.nan_to_num(reflectance), 0.0, 1.0) * 255.0 + 0.5).astype(numpy.uint8)
+def _fullScale(cube: StandInCube) -> float:
+    """Reflectance 1 for a calibrated cube; the brightest count for a raw one."""
+    if cube.bands.dtype.kind == "f":
+        return 1.0
+    return float(max(int(cube.bands.max()), 1))
+
+
+def _toUint8(values: numpy.ndarray, fullScale: float = 1.0) -> numpy.ndarray:
+    scaled = numpy.nan_to_num(values.astype(numpy.float32)) / fullScale
+    return (numpy.clip(scaled, 0.0, 1.0) * 255.0 + 0.5).astype(numpy.uint8)
 
 
 def colourPreview(cube: StandInCube) -> numpy.ndarray:
     """(lines, samples, 3) RGB uint8 from the bands nearest 650, 550 and 470 nm."""
-    channels = [_toUint8(cube.bands[nearestBand(cube.wavelengths, nm)])
+    fullScale = _fullScale(cube)
+    channels = [_toUint8(cube.bands[nearestBand(cube.wavelengths, nm)], fullScale)
                 for nm in PREVIEW_WAVELENGTHS_NM]
     return numpy.ascontiguousarray(numpy.stack(channels, axis=-1))
 
 
 def stereoFrame(cube: StandInCube) -> numpy.ndarray:
     """The colour preview on the left and the 650 nm band in grey on the right."""
-    mono = _toUint8(cube.bands[nearestBand(cube.wavelengths, MONO_WAVELENGTH_NM)])
+    mono = _toUint8(cube.bands[nearestBand(cube.wavelengths, MONO_WAVELENGTH_NM)],
+                    _fullScale(cube))
     return numpy.ascontiguousarray(numpy.concatenate(
         [colourPreview(cube), numpy.repeat(mono[..., numpy.newaxis], 3, axis=-1)], axis=1))
 
 
 def simulationDetail(cube: StandInCube) -> str:
+    calibration = ("calibrated by IUMA" if cube.bands.dtype.kind == "f"
+                   else "raw and uncalibrated")
     return (f"stand-in for IUMA's acquisition app, recorded IUMA LCTF capture {cube.name}, "
-            "calibrated by IUMA (simulated acquisition)")
+            f"{calibration} (simulated acquisition)")
 
 
 class StandIn:
@@ -188,7 +213,7 @@ class StandIn:
                  frameRate: float = DEFAULT_FRAME_RATE,
                  bandInterval: float = DEFAULT_BAND_INTERVAL_SEC,
                  cubeInterval: float = DEFAULT_CUBE_INTERVAL_SEC,
-                 dropBands=(), report=None) -> None:
+                 dropBands=(), appHeader: bool = False, report=None) -> None:
         if frameRate <= 0:
             raise ValueError("The frame rate must be positive.")
         if bandInterval < 0 or cubeInterval < 0:
@@ -199,6 +224,8 @@ class StandIn:
         self.bandInterval = bandInterval
         self.cubeInterval = cubeInterval
         self.dropBands = frozenset(dropBands)
+        # Header version 1, no metadata and timestamp 0, as the app sends.
+        self.appHeader = appHeader
         self._report = report or (lambda line: None)
         self._detail = simulationDetail(cube)
         self._stopRequested = threading.Event()
@@ -285,11 +312,16 @@ class StandIn:
                     break
                 if bandNumber in self.dropBands:
                     continue
-                band = numpy.ascontiguousarray(cube.bands[index])[numpy.newaxis, ...]
-                metadata = contract.hsCubeBandMetadata(self._detail, bandNumber,
-                                                       cube.wavelengths[index])
+                if self.appHeader:
+                    form = {"metadata": {}, "headerVersion": 1, "timestamp": 0.0}
+                else:
+                    form = {"metadata": contract.hsCubeBandMetadata(
+                        self._detail, bandNumber, cube.wavelengths[index])}
                 writtenBefore = server.writtenMessageCount
-                if not (server.sendImage(band, contract.HS_CUBE_DEVICE_NAME, metadata)
+                if not (server.sendImageSlab(
+                            numpy.ascontiguousarray(cube.bands[index]),
+                            bandCount=cube.bandCount, bandIndex=index,
+                            deviceName=contract.HS_CUBE_DEVICE_NAME, **form)
                         and self._waitUntilWritten(server, writtenBefore)):
                     break
                 sent.append(bandNumber)
@@ -335,7 +367,8 @@ def _parseArguments(argv):
         description="A stand-in for IUMA's acquisition app: serves its three OpenIGTLink ports "
                     "with a recorded cube. It is not IUMA's app.")
     parser.add_argument("--cube", type=Path, default=DEFAULT_CUBE_HEADER,
-                        help="ENVI header of a calibrated float32 BSQ cube (default: 002-04)")
+                        help="ENVI header of a float32 or uint16 BSQ cube (default: 002-04's "
+                             "calibrated cube)")
     parser.add_argument("--base-port", type=int, default=contract.APP_BASE_PORT,
                         help="LiveView port P; Steroscopic is P + 1 and HsCube P + 2")
     parser.add_argument("--frame-rate", type=float, default=DEFAULT_FRAME_RATE,
@@ -346,6 +379,10 @@ def _parseArguments(argv):
                         help="seconds between two cubes to a connected client")
     parser.add_argument("--drop-bands", default="",
                         help="band numbers from 1 to leave out, for example 5,17,80-84")
+    parser.add_argument("--app-header", action="store_true",
+                        help="send HsCube bands at header version 1 without metadata and with "
+                             "timestamp 0, as IUMA's app does; the data is then not marked "
+                             "simulated on the wire")
     parser.add_argument("--duration", type=float, default=None,
                         help="stop after this many seconds (default: until Ctrl+C)")
     return parser.parse_args(argv)
@@ -371,10 +408,15 @@ def main(argv=None) -> int:
 
     print("This is a stand-in for IUMA's acquisition app, not IUMA's app.")
     print(f"It sends recorded cube {cube.name} ({cube.bands.shape[2]} x {cube.bands.shape[1]}, "
-          f"{cube.bandCount} bands), marked as a simulated acquisition.")
+          f"{cube.bandCount} bands, {cube.bands.dtype.name}), marked as a simulated "
+          "acquisition.")
+    if arguments.app_header:
+        print("HsCube goes out as the app sends it, without metadata, so SLIAFlow cannot tell "
+              "it from the app.")
     standIn = StandIn(cube, basePort=arguments.base_port, frameRate=arguments.frame_rate,
                       bandInterval=arguments.band_interval,
-                      cubeInterval=arguments.cube_interval, dropBands=dropBands, report=print)
+                      cubeInterval=arguments.cube_interval, dropBands=dropBands,
+                      appHeader=arguments.app_header, report=print)
     try:
         standIn.start()
     except igtl_transport.PortRefusedError as refusal:
