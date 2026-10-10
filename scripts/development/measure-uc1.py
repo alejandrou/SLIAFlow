@@ -83,8 +83,10 @@ TRIAL_INPUT_ROOT = TRIALS_ROOT / "input"
 CUBES_ROOT = TRIALS_ROOT / "cubes"
 RESULTS_ROOT = TRIALS_ROOT / "results"
 SLIAFLOW_LIBRARY = REPOSITORY_ROOT / "extensions" / "SLIAFlow" / "SLIAFlow" / "SLIAFlowLib"
-# SLIAFlowLogic.CALIBRATED_CUBE_RELATIVE_PATH: the cube every Capture runs on.
-CONFIGURED_CUBE = REPOSITORY_ROOT / "input" / "002-04" / "LCTF_Calibrated_Cube_Single.hdr"
+# The capture every SLIAFlow session starts on (SLIAFlowCaptures.DEFAULT_CAPTURE_ID):
+# S-N-002-04, the cube that was input/002-04 until 2026-10-08.
+CONFIGURED_CUBE = (REPOSITORY_ROOT / "input" / "S-N-002-04" / "S-N-002-04"
+                   / "LCTF_Calibrated_Cube_Single.hdr")
 BASELINE_TRIAL = "baseline"
 
 # parameters.txt, in the order main.cu reads it.

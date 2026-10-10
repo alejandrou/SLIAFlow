@@ -27,7 +27,8 @@ not listed here is not approved, whatever its licence says.
 - Local location: none since `SLIA-039` (`ADR-0005`). The cases lay in the
   gitignored `input/`, archived there by `SLIA-031`, until the project owner
   removed them after `SLIA-039`. Nothing in the repository reads
-  them. A case brought back needs a task that names it and an update here.
+  them. A case the owner places in `input/` again is covered by the entry
+  below.
 
   **No case may enter version control**, and no case may be copied into
   `docs/`, `workspace/` or any published material.
@@ -47,33 +48,33 @@ not listed here is not approved, whatever its licence says.
   The database's labels are the database's; this repository does not evaluate
   algorithms.
 
-### IUMA LCTF capture 002-04
+### Any data placed in `input/`
 
-- Source: IUMA, Universidad de Las Palmas de Gran Canaria (ULPGC), which
-  delivered it to the project owner for this project.
-- Nature: an in vivo hyperspectral capture made with IUMA's LCTF acquisition
-  system: the calibrated float32 cube `LCTF_Calibrated_Cube_Single`, its raw
-  uint16 cube `raw_data`, the references `WR`, `DR`, `DR_WR` and `DR_DC`, and a
-  photograph `M01.jpg`. It is not public data.
-- Permission: given by the project owner and by IUMA on 2026-09-24 for any data
-  placed in `input/`, and recorded here before any code in this repository reads
-  or names the capture (`ADR-0004`, `SLIA-031`).
-- Local location: `input/002-04/`, which is gitignored, copied from the owner's
-  delivery folder. **No file of it may enter version control**, and none may be
-  copied into `docs/`, `workspace/` or any published material, in whole or in
-  part, including screenshots of it.
-- Approved for: development and demonstration of SLIAFlow, as the reference cube
-  of `ADR-0004`: display, and input to the UC1 and UC2 pipelines.
-- Read-only. The folder is never a write target.
-- Provenance: while it is read from disk the acquisition is simulated, so data
-  derived from it travels as `SLIAFlow.DataOrigin = simulated`, and the detail
-  names `002-04` as a recorded IUMA LCTF capture calibrated by IUMA
-  (`ADR-0004` decision 7).
-- Results on it are behavioural, not validated: the UC1 model was trained on
-  another camera, so an output shows that the pipeline runs and what it
-  produces, never how accurate it is (`ADR-0004` decision 5).
-- The approval lasts until IUMA or the project owner withdraws it; on
-  withdrawal the folder is deleted and this entry removed.
+- Permission: the project owner and IUMA permit the use of **any file the
+  project owner places in `input/`**, for any purpose of this project. Given on
+  2026-09-24 and extended to every file in the folder on 2026-10-08. A new
+  delivery needs no entry or task here before code reads it.
+- Today the folder holds IUMA's LCTF captures `S-N-PPP-CC` (PPP a patient
+  number, CC a capture number), delivered on 2026-10-08. Each holds the
+  calibrated float32 cube `LCTF_Calibrated_Cube_Single`, its raw uint16 cube
+  `raw_data`, the references `WR`, `DR`, `DR_WR` and `DR_DC`, and up to four
+  photographs `M0n.jpg`. They are in vivo captures from IUMA, Universidad de
+  Las Palmas de Gran Canaria (ULPGC), and are not public data. `S-N-002-04` is
+  the capture called `002-04` before 2026-10-08 (`ADR-0004`).
+- Local location: the gitignored `input/`. **No file of it may enter version
+  control**, because the repository must not contain medical data. For the same
+  reason none is copied into `docs/` or `workspace/`.
+- Read-only. Code never writes into `input/`; the project owner adds and
+  removes its files.
+- Provenance: while a capture is read from disk the acquisition is simulated,
+  so data derived from it travels as `SLIAFlow.DataOrigin = simulated`, and the
+  detail names the capture as a recorded IUMA LCTF capture calibrated by IUMA
+  (`ADR-0004` decision 7, `ADR-0006`).
+- Results on these captures are behavioural, not validated: the UC1 model was
+  trained on another camera, so an output shows that the pipeline runs and what
+  it produces, never how accurate it is (`ADR-0004` decision 5).
+- The permission lasts until IUMA or the project owner withdraws it; on
+  withdrawal the affected files are deleted and this entry updated.
 
 ## Prohibited Data
 
