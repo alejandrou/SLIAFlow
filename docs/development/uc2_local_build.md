@@ -8,13 +8,15 @@ that the vendored copy is untouched and that the staged sources are that copy
 plus the versioned patches. The patches and their results are recorded in
 [`uc2_changes.md`](uc2_changes.md).
 
-Since `SLIA-021` SLIAFlow runs UC2 itself on every Capture, on IUMA's
-calibrated LCTF cube `input\002-04` (`extensions\SLIAFlow\README.md`). The
-enhancement is the vendored C code doing real work. Only the acquisition is
-simulated, so the map carries `simulated` with the detail
-`real UC2 blood-vessel enhancement, recorded IUMA LCTF capture 002-04, calibrated
-by IUMA (simulated acquisition)`. It is a visual enhancement, not a quantitative
-map and not a clinical result.
+Since `SLIA-021` SLIAFlow runs UC2 itself on every Capture, on the calibrated
+LCTF cube of the IUMA capture chosen under Recorded capture, by default
+`input\S-N-002-04\S-N-002-04` (`extensions\SLIAFlow\README.md`, `SLIA-040`;
+the cube was `input\002-04` until 2026-10-08, and the runs below that name
+`002-04` were made on it). The enhancement is the vendored C code doing real
+work. Only the acquisition is simulated, so the map carries `simulated` with
+the detail `real UC2 blood-vessel enhancement, recorded IUMA LCTF capture
+S-N-002-04, calibrated by IUMA (simulated acquisition)`, with the capture's ID.
+It is a visual enhancement, not a quantitative map and not a clinical result.
 
 ## Build
 
@@ -90,10 +92,12 @@ acceptance oracle.
 ## How SLIAFlow runs it
 
 On Capture, `SLIAFlowUc2Run.py` starts `build\uc2\source\uc2_bvmap.exe` with
-one argument, the cube's folder in forward slashes (`C:/.../input/002-04`), and
+one argument, the cube's folder in forward slashes
+(`C:/.../input/S-N-002-04/S-N-002-04`), and
 `build\uc2\run\` as its working directory, as a background `QProcess` with no
 shell and a 30 s timeout, holding `build\uc2\.uc2-runner.lock`. UC2 wrote
-`002-04-BVMap.png` (1080 x 1080) in 0.2 to 0.35 s.
+`002-04-BVMap.png` (1080 x 1080) in 0.2 to 0.35 s; the file is named after the
+folder, so it is now `S-N-002-04-BVMap.png`.
 
 Before the process starts: the cube is described again and must be unchanged
 since Capture; its files must be `LCTF_Calibrated_Cube_Single.hdr` and `.dat`;

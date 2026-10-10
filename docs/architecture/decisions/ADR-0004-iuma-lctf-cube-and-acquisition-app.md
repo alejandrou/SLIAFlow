@@ -6,7 +6,7 @@ date: 2026-09-24
 accepted: 2026-09-24
 related_tasks: SLIA-031, SLIA-028, SLIA-032, SLIA-033, SLIA-034, SLIA-035, SLIA-030, SLIA-021, SLIA-009
 supersedes: ADR-0003 (decision 1 in part, decision 2 in part, decision 5 input validation)
-superseded_in_part_by: ADR-0005
+superseded_in_part_by: ADR-0005, ADR-0006
 ---
 
 # ADR-0004 - One IUMA LCTF cube as reference, and IUMA's acquisition app as the future source
@@ -20,6 +20,11 @@ chosen at the same time.
 Superseded in part by `ADR-0005` on 2026-10-07, accepted during the
 specification of `SLIA-039`: decision 8, and the reference case and archive of
 decision 1. `input/` holds `002-04` only, and the build checks run on it.
+
+Superseded in part by `ADR-0006` on 2026-10-08, accepted by the project owner
+when IUMA's 16 captures arrived: what remained of decision 1 (one cube, no
+choice), and decision 7's naming of `002-04`. Every capture in `input/` is
+offered, of any dimensions; `002-04` is now `S-N-002-04`.
 
 Proposed on 2026-09-24 from decisions the project owner made in conversation
 that day. It is accepted by the project owner during the specification of

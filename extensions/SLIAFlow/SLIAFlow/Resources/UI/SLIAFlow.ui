@@ -148,12 +148,46 @@
       <item row="5" column="1">
        <widget class="QComboBox" name="cubeSourceSelector">
         <property name="toolTip">
-         <string>Cube on disk: Capture reads the recorded calibrated cube 002-04 (simulated acquisition). Last cube from the app: HS Cube shows the last complete cube received from IUMA's acquisition app under Connections, and Capture runs UC1 and the blood-vessel enhancement on it. A raw uint16 cube is shown but not classified.</string>
+         <string>Cube on disk: Capture reads the calibrated cube of the capture chosen under Recorded capture (simulated acquisition). Last cube from the app: HS Cube shows the last complete cube received from IUMA's acquisition app under Connections, and Capture runs UC1 and the blood-vessel enhancement on it. A raw uint16 cube is shown but not classified.</string>
         </property>
         <property name="SlicerParameterName" stdset="0">
          <string>cubeSource</string>
         </property>
        </widget>
+      </item>
+      <item row="6" column="0">
+       <widget class="QLabel" name="captureListLabel">
+        <property name="text">
+         <string>Recorded capture:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <layout class="QHBoxLayout" name="captureListLayout">
+        <item>
+         <widget class="QComboBox" name="captureSelector">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+            <horstretch>1</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="toolTip">
+           <string>The IUMA capture under input/ that Capture reads while Cube source is Cube on disk. Every session starts on S-N-002-04. A capture that is no longer in input/ is marked (not found). The list is read when SLIAFlow is entered and when Refresh is pressed. docs/development/capture_compatibility.md says which captures run through UC1 and UC2.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="captureRefreshButton">
+          <property name="toolTip">
+           <string>Read the captures in input/ again, for one added or removed while Slicer runs.</string>
+          </property>
+          <property name="text">
+           <string>Refresh</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
       </item>
      </layout>
     </widget>

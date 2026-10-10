@@ -21,6 +21,7 @@ from .SLIAFlowCalibratedCube import (
     nearestBand,
     readCalibratedCube,
 )
+from .SLIAFlowCaptures import DEFAULT_CAPTURE_ID, captureHeader, findCaptures
 from .SLIAFlowConnections import SLIAFlowConnections
 from .SLIAFlowParameterNode import (
     CAPTURE_ID_ATTRIBUTE,
@@ -43,11 +44,17 @@ from .SLIAFlowParameterNode import (
     uc2ResultDetail,
 )
 from .SLIAFlowUc1Input import LCTF_WAVELENGTHS_NM, Uc1Input, describeUc1Input
-from .SLIAFlowUc1Run import OUTPUT_FILE_NAMES, Uc1Build, Uc1Run, findRepositoryRoot
+from .SLIAFlowUc1Run import (
+    OUTPUT_FILE_NAMES,
+    Uc1Build,
+    Uc1Run,
+    Uc1RunError,
+    assertUc1PathsFit,
+    findRepositoryRoot,
+)
 from .SLIAFlowUc2Run import (
     CALIBRATED_DATA_NAME,
     CALIBRATED_HEADER_NAME,
-    OUTPUT_FILE_SUFFIX,
     Uc2Build,
     Uc2Run,
     uc2ParametersText,
@@ -76,12 +83,10 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
 
     # Where a capture's files live, relative to the repository root.
     CAPTURES_RELATIVE_PATH = Path("workspace") / "captures"
-    # The one cube every Capture shows in HS Cube and runs UC1 on (ADR-0004
-    # decision 1): IUMA's calibrated float32 LCTF capture. UC1 reads it mapped
-    # onto its model's bands (SLIA-033, `SLIAFlowUc1Input`).
-    CALIBRATED_CUBE_RELATIVE_PATH = (
-        Path("input") / "002-04" / "LCTF_Calibrated_Cube_Single.hdr"
-    )
+    # IUMA's recorded captures (ADR-0006): Capture shows the chosen one's
+    # calibrated float32 cube in HS Cube and runs UC1 on it, mapped onto the
+    # model's bands (SLIA-033, `SLIAFlowUc1Input`), and UC2.
+    INPUT_RELATIVE_PATH = Path("input")
     SNAPSHOT_PREFIX = "output_laptop_camera_"
     APP_SNAPSHOT_PREFIX = "output_app_liveview_"
     SNAPSHOT_TIME_FORMAT = "%Y%m%d-%H%M%S"
@@ -169,6 +174,12 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         # SLIA-036: a received cube is assembled straight into a volume's image.
         self.connections.allocateCube = self.allocateReceivedCube
         self._calibratedCubeHeaderOverride = None
+        # ADR-0006: the recorded capture Capture reads, by ID. It is kept here
+        # and not in the parameter node, so a saved scene does not carry it
+        # into another session (SLIA-040 owner decision 1). The widget sets
+        # captureIdChanged to keep its list on the capture Capture reads.
+        self.captureIdChanged = None
+        self._captureId = DEFAULT_CAPTURE_ID
         self.currentRun: Uc1Run | None = None
         self.currentUc2Run: Uc2Run | None = None
 
@@ -487,14 +498,15 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
     def setRunEnvironment(self, repositoryRoot=None, processFactory=None) -> None:
         """Point runs at another repository tree and process type, or back.
 
-        Any run in progress is cancelled first, and the calibrated cube returns
-        to the new environment's default, so nothing from the previous
-        environment carries over.
+        Any run in progress is cancelled first, and the calibrated cube and the
+        chosen capture return to the new environment's default, so nothing from
+        the previous environment carries over.
         """
         self.cancelRun()
         self._repositoryRootOverride = None if repositoryRoot is None else Path(repositoryRoot)
         self._processFactory = processFactory
         self._calibratedCubeHeaderOverride = None
+        self.captureId = DEFAULT_CAPTURE_ID
 
     @property
     def repositoryRoot(self) -> Path:
@@ -507,15 +519,35 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         return self.repositoryRoot / self.CAPTURES_RELATIVE_PATH
 
     @property
-    def calibratedCubeHeader(self) -> Path:
-        """The header of the one cube every Capture shows in HS Cube and runs UC1 on.
+    def inputDirectory(self) -> Path:
+        return self.repositoryRoot / self.INPUT_RELATIVE_PATH
 
-        By default IUMA's 002-04 under the repository; assigning a header
-        replaces it and assigning None restores the default.
+    def captures(self) -> tuple:
+        """The recorded captures in `input/` now, in ID order (ADR-0006 decision 1)."""
+        return findCaptures(self.inputDirectory)
+
+    @property
+    def captureId(self) -> str:
+        """The recorded capture the next Capture reads, by ID (S-N-002-04 at first)."""
+        return self._captureId
+
+    @captureId.setter
+    def captureId(self, captureId: str) -> None:
+        changed = captureId != self._captureId
+        self._captureId = captureId
+        if changed and self.captureIdChanged is not None:
+            self.captureIdChanged()
+
+    @property
+    def calibratedCubeHeader(self) -> Path:
+        """The header of the cube the next Capture shows in HS Cube and runs UC1 and UC2 on.
+
+        The chosen capture's (`captureId`, S-N-002-04 by default); assigning a
+        header replaces it and assigning None restores the chosen capture's.
         """
         if self._calibratedCubeHeaderOverride is not None:
             return self._calibratedCubeHeaderOverride
-        return self.repositoryRoot / self.CALIBRATED_CUBE_RELATIVE_PATH
+        return captureHeader(self.inputDirectory, self.captureId)
 
     @calibratedCubeHeader.setter
     def calibratedCubeHeader(self, header) -> None:
@@ -542,13 +574,16 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
 
         The configured calibrated cube, checked as for the HS Cube panel and
         then against the band mapping UC1 is run with (ADR-0004 decisions 4
-        and 6). Nothing is written until the run starts.
+        and 6), and with the paths UC1 is given short enough for it. Nothing
+        is written until the run starts.
         """
         header = self.calibratedCubeHeader
         try:
-            return describeUc1Input(self.loadConfiguredCalibratedCube(),
-                                    self.uc1Build.inputDirectory)
-        except CalibratedCubeError as error:
+            uc1Input = describeUc1Input(self.loadConfiguredCalibratedCube(),
+                                        self.uc1Build.inputDirectory)
+            assertUc1PathsFit(uc1Input)
+            return uc1Input
+        except (CalibratedCubeError, Uc1RunError) as error:
             raise CalibratedCubeError(
                 _("The configured cube {header} cannot be used: {reason}").format(
                     header=header, reason=error)
@@ -1193,7 +1228,7 @@ class SLIAFlowLogic(ScriptedLoadableModuleLogic):
         if image.dtype != np.uint8 or image.shape != expectedShape:
             raise ValueError(_("The blood-vessel map is {shape} {dtype}, not {expected} uint8.").format(
                 shape=image.shape, dtype=image.dtype, expected=expectedShape))
-        fileName = f"{cube.name}{OUTPUT_FILE_SUFFIX}"
+        fileName = Uc2Build.outputFileName(cube)
         node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode")
         try:
             node.SetSaveWithScene(False)

@@ -1,13 +1,15 @@
-"""Check that the patched UC1 build still writes what it wrote on 002-04, and that each patch does its job.
+"""Check that the patched UC1 build still writes what it wrote on S-N-002-04, and that each patch does its job.
 
 Four checks on the staged `stratum.opt.intermediate.exe` built by
 `build-uc1.ps1` (see docs/development/uc1_changes.md):
 
-1. Mapped cube 002-04. IUMA's calibrated cube `input/002-04` is mapped onto
-   the 93 model bands as ADR-0004 decision 4 states it - 460-900 nm one to one,
-   440-455 nm from the 460 nm band, 905-1000 nm dropped - computed here from
-   the header's wavelengths, not taken from SLIAFlow, and written as a float32
-   cube where UC1 is given its input. UC1 must exit 0 and write its six images,
+1. Mapped cube S-N-002-04. IUMA's calibrated cube
+   `input/S-N-002-04/S-N-002-04`, byte for byte the cube that was
+   `input/002-04` until 2026-10-08, is mapped onto the 93 model bands as
+   ADR-0004 decision 4 states it - 460-900 nm one to one, 440-455 nm from the
+   460 nm band, 905-1000 nm dropped - computed from the header's wavelengths by
+   `uc_oracles.py`, not taken from SLIAFlow, and written as a float32 cube
+   where UC1 is given its input. UC1 must exit 0 and write its six images,
    each of the cube's samples x lines.
    - `pca.bmp`, `svm.bmp`, `knn.bmp` and `CalibratedImage_BIP.bmp` must have the
      SHA-256 the build wrote on 2026-10-07 (RECORDED_SHA256). It wrote these same
@@ -19,13 +21,13 @@ Four checks on the staged `stratum.opt.intermediate.exe` built by
      a folder saved from another build, or the output under test, is refused.
    - Float32 path (patch 0002). UC1 multiplies the cube by 100 and transposes it
      to band interleaved, which is what `CalibratedImage_BIP.bmp` shows: it must
-     be byte for byte the image predicted here from the cube, with UC1's own BMP
-     scaling.
+     be byte for byte the image `uc_oracles.py` predicts from the cube, with
+     UC1's own BMP scaling.
    - Equal bands (patch 0003). The mapping makes model bands 1-5 equal, so
      UC1's Jacobi step meets equal diagonal entries; unpatched, it divides by
      zero and `pca.bmp` is black. `pca.bmp` shows 255 times the first principal
      component of the normalised cube, clipped to 0-255. NumPy computes that
-     component here in double precision, independently of UC1's Jacobi
+     component in `uc_oracles.py` in double precision, independently of UC1's Jacobi
      rotations, and every pixel must be within MAX_PCA_LEVEL_DIFFERENCE grey
      level of it. An eigenvector's sign is arbitrary, so the sign that fits
      better is taken.
@@ -59,7 +61,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -67,18 +68,25 @@ import time
 from pathlib import Path
 
 import numpy as np
+from uc_oracles import (
+    MAX_PCA_LEVEL_DIFFERENCE,
+    calibratedBmpDifference,
+    pcaDifference,
+    readBmp,
+    writeMappedCube,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BUILD_ROOT = REPOSITORY_ROOT / "build" / "uc1" / "UC1"
 SOURCE_DIRECTORY = BUILD_ROOT / "gpu_single_bsq" / "source"
 EXECUTABLE = SOURCE_DIRECTORY / "stratum.opt.intermediate.exe"
 LOCK_PATH = BUILD_ROOT / ".uc1-runner.lock"
-CUBE_FOLDER = REPOSITORY_ROOT / "input" / "002-04"
-CUBE_STEM = "LCTF_Calibrated_Cube_Single"
+# The capture that was input/002-04 until 2026-10-08, byte for byte (SLIA-040).
+CUBE_FOLDER = REPOSITORY_ROOT / "input" / "S-N-002-04" / "S-N-002-04"
 DEFAULT_BASELINE = REPOSITORY_ROOT / "build" / "uc1" / "baseline-002-04"
 RUN_TIMEOUT_SEC = 120
 
-# SHA-256 of the build's outputs on the mapped 002-04 cube: build-uc1.ps1 with
+# SHA-256 of the build's outputs on the mapped 002-04 cube, now S-N-002-04: build-uc1.ps1 with
 # patches 0001-0003, run on 2026-10-07 (recorded in
 # docs/development/uc1_changes.md). The authority is that run, not the build
 # under test.
@@ -99,13 +107,6 @@ OUTPUTS = (*RECORDED_SHA256, *KMEANS_OUTPUTS)
 # 2026-10-07: 0.0068 % of kmeans.bmp, 0.0015 % of imageRGB.bmp.
 MAX_KMEANS_DIFFERING_FRACTION = 0.0002
 
-# The staged SVM model is sized for 93 bands at 440-900 nm in 5 nm steps.
-MODEL_WAVELENGTHS_NM = tuple(440 + 5 * band for band in range(93))
-# IUMA's LCTF grid, which the mapping is defined for.
-LCTF_WAVELENGTHS_NM = tuple(460 + 5 * band for band in range(109))
-WAVELENGTH_TOLERANCE_NM = 0.01
-WAVELENGTHS_PER_HEADER_LINE = 6
-
 GUARD_CASE_NAME = "band-guard-check"
 GUARD_FOLDER = BUILD_ROOT / "input" / GUARD_CASE_NAME
 GUARD_BAND_COUNT = 109
@@ -113,157 +114,14 @@ GUARD_MARKER = "Band guard"
 # The guard refuses in about 0.1 s, before any image is read.
 GUARD_TIMEOUT_SEC = 20
 
-MAPPED_CASE_NAME = "check-002-04"
+MAPPED_CASE_NAME = "check-S-N-002-04"
 SHORT_READ_CASE_NAME = "short-read-check"
 # `../../svm_model` from here does not exist; UC1 also needs parameters.txt here.
 NO_MODEL_DIRECTORY = BUILD_ROOT / "no-model-check" / "run" / "source"
-# The bands and order UC1 writes CalibratedImage_BIP.bmp with (functions_cuda.cu).
-CALIBRATED_BMP_BANDS = (54, 20, 8)
-# UC1 normalises in float32 and stops its Jacobi rotations at a tolerance, so a
-# pixel can round to the next grey level. On 2026-09-25 99.99 % were exact.
-MAX_PCA_LEVEL_DIFFERENCE = 1
-# Pixels per step when NumPy computes the principal component, to bound memory.
-PCA_CHUNK_PIXELS = 1 << 17
-
-
-def readBmp(path: Path) -> np.ndarray:
-    """A 24-bit bottom-up BMP as a (rows, columns, 3) array, as stored.
-
-    UC1 pads the rows of most outputs to 4 bytes but not those of
-    CalibratedImage_BIP.bmp, so the row length is taken from the file size.
-    """
-    data = path.read_bytes()
-    if data[:2] != b"BM" or int.from_bytes(data[28:30], "little") != 24:
-        raise ValueError(f"{path.name} is not a 24-bit BMP")
-    offset = int.from_bytes(data[10:14], "little")
-    width = int.from_bytes(data[18:22], "little", signed=True)
-    height = abs(int.from_bytes(data[22:26], "little", signed=True))
-    stride = (len(data) - offset) // height
-    if stride not in (width * 3, (width * 3 + 3) // 4 * 4):
-        raise ValueError(f"{path.name} holds {len(data) - offset} bytes for {height} rows of {width}")
-    rows = np.frombuffer(data, np.uint8, count=stride * height, offset=offset)
-    return rows.reshape(height, stride)[:, :width * 3].reshape(height, width, 3)
-
-
-def readCubeHeader(path: Path) -> dict:
-    """samples, lines, bands, data type, interleave and wavelengths of an ENVI header."""
-    text = path.read_text(encoding="ascii", errors="replace")
-    values = {}
-    for key in ("samples", "lines", "bands", "data type", "interleave", "byte order",
-                "header offset"):
-        match = re.search(rf"^\s*{key}\s*=\s*(\S+)", text, re.MULTILINE | re.IGNORECASE)
-        values[key] = match.group(1) if match else None
-    block = re.search(r"^\s*wavelength\s*=\s*\{([^}]*)\}", text, re.MULTILINE | re.IGNORECASE)
-    values["wavelengths"] = ([float(value) for value in block.group(1).split(",")]
-                             if block else [])
-    return values
-
-
-def modelBandSources(wavelengths: list[float]) -> list[int]:
-    """For each model band, the cube band that feeds it (ADR-0004 decision 4)."""
-    onGrid = len(wavelengths) == len(LCTF_WAVELENGTHS_NM) and all(
-        abs(actual - expected) <= WAVELENGTH_TOLERANCE_NM
-        for actual, expected in zip(wavelengths, LCTF_WAVELENGTHS_NM, strict=True))
-    if not onGrid:
-        raise ValueError(f"{CUBE_STEM}.hdr is not on IUMA's LCTF grid, which the mapping is "
-                         "defined for")
-    return [LCTF_WAVELENGTHS_NM.index(max(wavelength, LCTF_WAVELENGTHS_NM[0]))
-            for wavelength in MODEL_WAVELENGTHS_NM]
-
-
-def writeMappedCube() -> tuple[Path, np.ndarray]:
-    """Write 002-04 on the model bands where UC1 is given its input.
-
-    Returns the folder and the mapped cube, (bands, lines, samples) float32,
-    read back from what was written.
-    """
-    header = readCubeHeader(CUBE_FOLDER / f"{CUBE_STEM}.hdr")
-    expected = {"data type": "4", "interleave": "bsq", "byte order": "0", "header offset": "0"}
-    actual = {key: (header[key] or "").lower() for key in expected}
-    if actual != expected:
-        raise ValueError(f"{CUBE_STEM}.hdr declares {actual}, not {expected}")
-    samples, lines, bands = (int(header[key]) for key in ("samples", "lines", "bands"))
-    sources = modelBandSources(header["wavelengths"])
-    cube = np.memmap(CUBE_FOLDER / f"{CUBE_STEM}.dat", "<f4", "r", shape=(bands, lines, samples))
-    folder = BUILD_ROOT / "input" / MAPPED_CASE_NAME
-    folder.mkdir(parents=True, exist_ok=True)
-    with open(folder / "raw.dat", "wb") as target:
-        for source in sources:
-            target.write(np.ascontiguousarray(cube[source]).tobytes())
-    del cube
-    rows = [", ".join(str(value) for value in
-                      MODEL_WAVELENGTHS_NM[index:index + WAVELENGTHS_PER_HEADER_LINE])
-            for index in range(0, len(MODEL_WAVELENGTHS_NM), WAVELENGTHS_PER_HEADER_LINE)]
-    (folder / "raw.hdr").write_text(
-        f"ENVI\nsamples = {samples}\nlines = {lines}\nbands = {len(sources)}\n"
-        "header offset = 0\ndata type = 4\ninterleave = bsq\nbyte order = 0\n"
-        "wavelength = {" + ",\n".join(rows) + "}\n",
-        encoding="ascii",
-    )
-    mapped = np.memmap(folder / "raw.dat", "<f4", "r", shape=(len(sources), lines, samples))
-    return folder, mapped
-
-
-def predictCalibratedBmp(reflectance: np.ndarray) -> np.ndarray:
-    """CalibratedImage_BIP.bmp as UC1 must write it from a float32 reflectance cube.
-
-    Patch 0002 multiplies by 100 in float32. saveBIPtoBMP then scales each of
-    three bands from its own minimum to its maximum, 255 * (x - min) / (max -
-    min) in float32, truncates to a byte, and writes blue, green, red, bottom
-    row first.
-    """
-    channels = []
-    for band in reversed(CALIBRATED_BMP_BANDS):
-        values = np.float32(100) * np.asarray(reflectance[band])
-        low, high = values.min(), values.max()
-        channels.append((np.float32(255) * (values - low) / (high - low)).astype(np.uint8))
-    return np.stack(channels, axis=2)[::-1]
-
-
-def predictPcaLevels(reflectance: np.ndarray) -> np.ndarray:
-    """The first principal component UC1 draws in pca.bmp, times 255: (lines, samples).
-
-    As UC1 prepares it: each pixel scaled from its own minimum to its maximum
-    over the bands (normalizeImgKernel_optimized, in float32), each band's mean
-    removed, and the covariance divided by the pixel count minus one. The
-    eigenvector comes from NumPy, not from UC1's Jacobi rotations. The
-    covariance is accumulated in double precision over chunks of pixels.
-    """
-    bands = reflectance.shape[0]
-    flat = reflectance.reshape(bands, -1)
-    count = flat.shape[1]
-
-    def normalized(start):
-        percent = np.float32(100) * np.asarray(flat[:, start:start + PCA_CHUNK_PIXELS])
-        low, high = percent.min(axis=0), percent.max(axis=0)
-        scaled = (percent - low) * (np.float32(1) / (high - low + np.float32(1e-8)))
-        return scaled.astype(np.float64)
-
-    total = np.zeros(bands)
-    products = np.zeros((bands, bands))
-    for start in range(0, count, PCA_CHUNK_PIXELS):
-        chunk = normalized(start)
-        total += chunk.sum(axis=1)
-        products += chunk @ chunk.T
-    mean = total / count
-    covariance = (products - count * np.outer(mean, mean)) / (count - 1)
-    _, vectors = np.linalg.eigh(covariance)
-    component = vectors[:, -1]
-    levels = np.empty(count)
-    for start in range(0, count, PCA_CHUNK_PIXELS):
-        chunk = normalized(start)
-        levels[start:start + chunk.shape[1]] = 255 * (component @ (chunk - mean[:, None]))
-    return levels.reshape(reflectance.shape[1:])
 
 
 def checkPca(output: Path, reflectance: np.ndarray) -> list[str]:
-    written = output / "pca.bmp"
-    # Grey, bottom row first; pcaValue is truncated towards zero, then clipped.
-    actual = readBmp(written)[::-1, :, 0].astype(np.int64)
-    levels = predictPcaLevels(reflectance)
-    difference = min((np.abs(np.clip((sign * levels).astype(np.int64), 0, 255) - actual)
-                      for sign in (1, -1)), key=lambda values: int(values.sum()))
-    worst, exact = int(difference.max()), float((difference == 0).mean())
+    worst, exact = pcaDifference(output, reflectance)
     within = worst <= MAX_PCA_LEVEL_DIFFERENCE
     print(f"  {'pca.bmp':<24} {exact:.4%} of pixels equal to NumPy's first component, "
           f"at most {worst} grey level(s) off ({'within' if within else 'OVER'} "
@@ -300,7 +158,7 @@ def runMappedCube(folder: Path, reflectance: np.ndarray) -> tuple[Path, list[str
     result, elapsed = runUc1(folder)
     if result is None:
         return output, [f"UC1 did not finish on {MAPPED_CASE_NAME} within {RUN_TIMEOUT_SEC} s"]
-    print(f"Mapped cube 002-04: exit {result.returncode}, {elapsed:.2f} s")
+    print(f"Mapped cube S-N-002-04: exit {result.returncode}, {elapsed:.2f} s")
     if result.returncode != 0:
         return output, [f"UC1 exited with {result.returncode} on {MAPPED_CASE_NAME}: "
                         f"{result.stderr.strip()[-300:]}"]
@@ -354,16 +212,11 @@ def compareWithRecordedRun(output: Path, baseline: Path) -> list[str]:
 
 def checkPatchedPaths(output: Path, reflectance: np.ndarray) -> list[str]:
     failures = []
-    written = output / "CalibratedImage_BIP.bmp"
-    actual, predicted = readBmp(written), predictCalibratedBmp(reflectance)
-    same = actual.shape == predicted.shape and bool(np.array_equal(actual, predicted))
-    detail = ("identical" if same else
-              f"{np.any(actual != predicted, axis=2).sum()} pixels differ"
-              if actual.shape == predicted.shape else f"{actual.shape}, not {predicted.shape}")
-    print(f"  {written.name:<24} {'identical to the prediction' if same else detail}")
-    if not same:
-        failures.append(f"{written.name} of {MAPPED_CASE_NAME} is not the predicted image: "
-                        f"{detail}")
+    name = "CalibratedImage_BIP.bmp"
+    detail = calibratedBmpDifference(output, reflectance)
+    print(f"  {name:<24} {'identical to the prediction' if detail is None else detail}")
+    if detail is not None:
+        failures.append(f"{name} of {MAPPED_CASE_NAME} is not the predicted image: {detail}")
     return failures + checkPca(output, reflectance)
 
 
@@ -481,9 +334,9 @@ def saveBaseline(output: Path, baseline: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE,
-                        help="folder holding a saved run's kmeans.bmp and imageRGB.bmp on 002-04")
+                        help="folder holding a saved run's kmeans.bmp and imageRGB.bmp on S-N-002-04")
     parser.add_argument("--save-baseline", action="store_true",
-                        help="run on 002-04 and save that run in --baseline instead of checking")
+                        help="run on S-N-002-04 and save that run in --baseline instead of checking")
     arguments = parser.parse_args()
 
     problem = baselineLocationProblem(arguments.baseline)
@@ -501,7 +354,8 @@ def main() -> int:
     try:
         os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
         os.close(descriptor)
-        mappedFolder, reflectance = writeMappedCube()
+        mappedFolder = BUILD_ROOT / "input" / MAPPED_CASE_NAME
+        reflectance = writeMappedCube(CUBE_FOLDER, mappedFolder)
         output, failures = runMappedCube(mappedFolder, reflectance)
         if arguments.save_baseline:
             if not failures:

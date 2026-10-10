@@ -65,7 +65,7 @@ CHANNEL_HS_CUBE = "HS Cube"
 CHANNELS = (CHANNEL_LIVE_VIEW, CHANNEL_STEREO, CHANNEL_HS_CUBE)
 
 # IUMA's app (docs/hardware/acquisition_app_and_hardware.md section 4) and the
-# band count of 002-04 (ADR-0004 decision 1).
+# band count of IUMA's LCTF captures (ADR-0004 context).
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORTS = {CHANNEL_LIVE_VIEW: 18944, CHANNEL_STEREO: 18945, CHANNEL_HS_CUBE: 18946}
 DEFAULT_EXPECTED_BANDS = 109

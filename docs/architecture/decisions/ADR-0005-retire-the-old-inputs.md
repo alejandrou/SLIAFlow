@@ -6,6 +6,7 @@ date: 2026-10-07
 accepted: 2026-10-07
 related_tasks: SLIA-039
 supersedes: ADR-0004 (decision 8; decision 1, the reference case and the archive), ADR-0003 (the 2026-09-18 amendment of decision 3)
+superseded_in_part_by: ADR-0006
 ---
 
 # ADR-0005 - Retire the HSI Human Brain Database inputs and the ground-truth overlay
@@ -16,6 +17,10 @@ Accepted by the project owner on 2026-10-07. The owner decided that day, while
 `SLIA-038` was in progress, that nothing kept only for the old inputs stays in
 the project, and made the two decisions on `020-01` and the archive during the
 specification of `SLIA-039`.
+
+Superseded in part by `ADR-0006` on 2026-10-08: decision 2 (`input/` holds
+`002-04` only) and the folder of decision 3. `input/` holds IUMA's 16
+`S-N-PPP-CC` captures, and the build checks run on `S-N-002-04`, the same cube.
 
 On acceptance, `ADR-0003` and `ADR-0004` gain `superseded_in_part_by: ADR-0005`
 in their front matter and a line in their Status sections. Their bodies are not
