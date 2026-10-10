@@ -171,6 +171,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         "Capture uses the last cube from the app, and no complete cube has been received. "
         "Connect under Connections, or choose Cube on disk."
     )
+    # SLIA-040: a chosen capture that is no longer in input/ stays in the list.
+    CAPTURE_NOT_FOUND_ITEM = _("{capture} (not found)")
     RESULT_NONE_STATUS = _("No UC1 result yet. Press Capture.")
     RESULT_STATUS = _(
         "{Cube} - {origin}. Showing {file}. UC1 results on this cube are not validated."
@@ -350,6 +352,10 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # and whether it was the stand-in's.
         self._appLiveStale = False
         self._appLiveSimulated = False
+        # SLIA-040. The capture ID behind each entry of Recorded capture, and
+        # whether the list is being refilled, which is not a choice.
+        self._captureListIds: list[str] = []
+        self._fillingCaptureList = False
 
     def setup(self) -> None:
         super().setup()
@@ -360,6 +366,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         uiWidget.setMRMLScene(slicer.mrmlScene)
 
         self.logic = SLIAFlowLogic()
+        self.logic.captureIdChanged = self._onChosenCaptureChanged
         self.addObserver(
             slicer.mrmlScene,
             slicer.mrmlScene.StartCloseEvent,
@@ -386,6 +393,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "currentIndexChanged(int)", self._onCubeDisplayChanged
         )
         self.ui.cubeSourceSelector.connect("currentIndexChanged(int)", self._onCubeSourceChanged)
+        self.ui.captureSelector.connect("currentIndexChanged(int)", self._onCaptureChosen)
+        self.ui.captureRefreshButton.connect("clicked()", self._refreshCaptureList)
         self._spectrumPlotWidget = slicer.qMRMLPlotWidget()
         self._spectrumPlotWidget.setMRMLScene(slicer.mrmlScene)
         self.ui.spectrumPlotContainer.layout().addWidget(self._spectrumPlotWidget)
@@ -427,6 +436,8 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._forgetVascularMap()
         self.setParameterNode(None)
         self.removeObservers()
+        if self.logic is not None:
+            self.logic.captureIdChanged = None
 
     def enter(self) -> None:
         self.initializeParameterNode()
@@ -500,6 +511,9 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._configureResultControls()
         self._updateResultStatus()
         self._showResult()
+        # Setup, enter and a new scene all come here, so the list is read
+        # whenever SLIAFlow is entered.
+        self._refreshCaptureList()
         self._observeConnectionSettings()
         self._refreshConnections()
         if self._parameterNode is not None and self.logic is not None:
@@ -779,6 +793,11 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # and the frozen frame on the live pane.
         self.ui.cubeSourceSelector.setEnabled(not self._captureInProgress)
         self.ui.liveSourceSelector.setEnabled(not self._captureInProgress)
+        # Recorded capture says what the next Capture reads, which it is only
+        # with Cube on disk.
+        captureChoice = not self._captureInProgress and not self._cubeSourceIsApp()
+        self.ui.captureSelector.setEnabled(captureChoice)
+        self.ui.captureRefreshButton.setEnabled(captureChoice)
 
     def _onCaptureClicked(self) -> None:
         if self.logic is None or self._parameterNode is None:
@@ -801,6 +820,16 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             # Refused before anything is frozen or saved.
             self._setStatus(self.CAPTURE_NO_RECEIVED_CUBE_STATUS)
             return
+        if not self._cubeSourceIsApp():
+            # SLIA-040: the chosen capture is the one this Capture reads. One
+            # UC1 cannot run on (gone from input/, a bad cube, a name or path
+            # it cannot take) is refused before anything is frozen, saved or
+            # started, with the reason a run would give.
+            try:
+                self.logic.loadConfiguredUc1Input()
+            except CalibratedCubeError as error:
+                self._setStatus(self.CAPTURE_FAILED_STATUS.format(message=error))
+                return
 
         self._captureInProgress = True
         self._uc1Pending = True
@@ -1011,8 +1040,56 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if (self._parameterNode is not None and selector is not None
                 and selector.currentText in CUBE_SOURCES):
             self._parameterNode.cubeSource = selector.currentText
+        self._refreshCaptureControls()
         self._resetSpectrumLabel()
         self._showCube()
+
+    def _refreshCaptureList(self) -> None:
+        """Fill Recorded capture from input/, with the chosen capture selected (SLIA-040).
+
+        A chosen capture that is no longer there stays at the end, marked not
+        found, so the list always shows what the next Capture reads.
+        """
+        selector = getattr(getattr(self, "ui", None), "captureSelector", None)
+        if selector is None or self.logic is None:
+            return
+        chosen = self.logic.captureId
+        ids = [capture.id for capture in self.logic.captures()]
+        texts = list(ids)
+        if chosen and chosen not in ids:
+            ids.append(chosen)
+            texts.append(self.CAPTURE_NOT_FOUND_ITEM.format(capture=chosen))
+        self._fillingCaptureList = True
+        try:
+            selector.clear()
+            for text in texts:
+                selector.addItem(text)
+            self._captureListIds = ids
+            selector.setCurrentIndex(ids.index(chosen) if chosen in ids else -1)
+        finally:
+            self._fillingCaptureList = False
+        self._refreshCaptureControls()
+
+    def _onCaptureChosen(self, index=None) -> None:
+        if self._fillingCaptureList or self.logic is None:
+            return
+        index = self.ui.captureSelector.currentIndex
+        if 0 <= index < len(self._captureListIds):
+            self.logic.captureId = self._captureListIds[index]
+
+    def _onChosenCaptureChanged(self) -> None:
+        """Show the capture the logic now reads, when it was not chosen from the list.
+
+        A choice from Python or a new run environment reads input/ again, so
+        the list never names one capture while Capture reads another.
+        """
+        selector = getattr(getattr(self, "ui", None), "captureSelector", None)
+        if selector is None:
+            return
+        index = selector.currentIndex
+        shown = self._captureListIds[index] if 0 <= index < len(self._captureListIds) else None
+        if shown != self.logic.captureId:
+            self._refreshCaptureList()
 
     def _onCubeDisplayChanged(self, index=None) -> None:
         selector = getattr(getattr(self, "ui", None), "cubeDisplaySelector", None)

@@ -21,10 +21,12 @@ workflow by itself. No console, Python service or OpenIGTLink link is involved.
 1. Build the UC1 binaries once: `scripts\development\build-uc1.ps1`. It applies
    the versioned UC1 patches recorded in `docs\development\uc1_changes.md`.
    SLIAFlow runs `build\uc1\UC1\gpu_single_bsq\source\stratum.opt.intermediate.exe`.
-2. Capture reads one cube, IUMA's calibrated LCTF cube
-   `input\002-04\LCTF_Calibrated_Cube_Single.hdr` (`ADR-0004`). It is the cube
-   HS Cube shows and the cube UC1 runs on. `input\README.txt` describes the rest
-   of `input\`.
+2. Capture reads the calibrated LCTF cube of the IUMA capture chosen under
+   **Recorded capture** (`ADR-0006`, below). Every session starts on
+   `S-N-002-04`, whose cube is
+   `input\S-N-002-04\S-N-002-04\LCTF_Calibrated_Cube_Single.hdr`. It is the
+   cube HS Cube shows and the cube UC1 and UC2 run on. `input\README.txt`
+   describes the rest of `input\`.
 3. Open SLIAFlow and press **Start**. With **Live source** `Laptop camera`
    (the default) the laptop camera stands in for the acquisition system's
    LiveView; with `LiveView from the app` the live pane shows the app's own
@@ -34,7 +36,7 @@ workflow by itself. No console, Python service or OpenIGTLink link is involved.
    LiveView, `output_app_liveview_<date>-<time>.png`), the configured
    cube is checked, and UC1 runs on it in the background (timeout 60 s). UC1's
    model was trained on 93 bands at 440-900 nm, so SLIAFlow first writes the
-   cube mapped onto those bands to `build\uc1\UC1\input\002-04\raw.dat`:
+   cube mapped onto those bands to `build\uc1\UC1\input\<capture>\raw.dat`:
    460-900 nm one to one, 440-455 nm from the 460 nm band, 905-1000 nm dropped
    (`SLIAFlowUc1Input.py`; the mapping is described in `uc1_changes.md`).
    Nothing is written into `input\`. The status names the cube and the stage. A
@@ -54,9 +56,41 @@ workflow by itself. No console, Python service or OpenIGTLink link is involved.
 
 Every output is marked `SLIAFlow.DataOrigin = simulated`, names its cube in
 `SLIAFlow.RecordedCase`, and carries the detail `real UC1 pipeline, recorded
-IUMA LCTF capture 002-04, calibrated by IUMA (simulated acquisition)`: the
-pipeline and the cube are real, the acquisition is simulated, and nothing shown
-is a clinical result.
+IUMA LCTF capture S-N-002-04, calibrated by IUMA (simulated acquisition)`, with
+the chosen capture's ID: the pipeline and the cube are real, the acquisition
+is simulated, and nothing shown is a clinical result.
+
+## Recorded capture: which IUMA capture Capture reads (SLIA-040)
+
+IUMA's LCTF captures lie in `input\` as `S-N-PPP-CC\S-N-PPP-CC\` (patient,
+capture). A folder of `input\` is a capture when it holds
+`LCTF_Calibrated_Cube_Single.hdr` itself or in one nested folder of the same
+name (`SLIAFlowCaptures.py`, `ADR-0006`).
+
+- **Recorded capture**, under Cube source, lists every capture in ID order.
+  Every session starts on `S-N-002-04`; a choice lasts until Slicer closes
+  and is not saved with the scene, so loading a saved scene does not bring
+  it back.
+  It is read when SLIAFlow is entered and when **Refresh** is pressed, so a
+  capture added while Slicer runs appears without a restart.
+- The choice applies with **Cube source** `Cube on disk`, and is greyed out with
+  `Last cube from the app` and while a capture runs.
+- A chosen capture that has gone from `input\` stays in the list as
+  `<ID> (not found)`. Capture on it is refused before LiveView freezes, with
+  the missing header named.
+- Every capture is offered, also one that does not run through UC1 or UC2;
+  Capture then says why. `docs\development\capture_compatibility.md` lists each
+  capture's result, from `scripts\development\check-captures.py`.
+- A capture's ID is its folder's name, also when that folder links to one of
+  another name.
+- Capture refuses a capture UC1 cannot run on before LiveView freezes, so no
+  snapshot is saved and neither UC1 nor UC2 starts: one gone from `input\`, a
+  cube that fails its checks, an ID with other than ASCII characters (UC1's
+  header and the paths given to UC1 and UC2 are built from it), a header path
+  of 260 characters or more (Slicer cannot open it), or a path UC1 would cut
+  at 127 characters. Each is still listed.
+- Captures differ in size: most are 1080 x 1301, two are 1080 x 1080. Every
+  panel shows a cube at its own lines and samples.
 
 ## The Enhanced Vascularization panel: UC2 (SLIA-021)
 
@@ -68,14 +102,15 @@ Vascularization.
    versioned UC2 patches recorded in `docs\development\uc2_changes.md` and
    builds `build\uc2\source\uc2_bvmap.exe` with the MSYS2 GCC
    (`docs\development\uc2_local_build.md`).
-2. Capture gives UC2 the cube's folder, `input\002-04`. UC2 reads only the three
+2. Capture gives UC2 the cube's folder, for example
+   `input\S-N-002-04\S-N-002-04`. UC2 reads only the three
    bands at 480, 540 and 710 nm from `LCTF_Calibrated_Cube_Single.dat`, applies
    its own fixed parameters (`high_in 0.15`, `high_out 0.8`, `gamma 1`,
-   `bValue 3`) and writes `build\uc2\run\002-04-BVMap.png`. Nothing is written
+   `bValue 3`) and writes `build\uc2\run\<capture>-BVMap.png`. Nothing is written
    into `input\`. A cube with other file names, or whose bands 4, 16 and 50 are
    not 480, 540 and 710 nm, is refused before UC2 starts.
-3. The map is shown alone, named `002-04-BVMap.png`, with the caption
-   `Enhanced vascularization for recorded cube 002-04`. The last line of the
+3. The map is shown alone, named `<capture>-BVMap.png`, with the caption
+   `Enhanced vascularization for recorded cube <capture>`. The last line of the
    Status section says how it was made: the fixed bands and parameters, that it
    is a display enhancement whose colours are rescaled within each image and are
    not comparable between captures, and that it is not validated.
@@ -87,19 +122,19 @@ Vascularization.
    never kept from an earlier capture.
 
 The map node carries `SLIAFlow.DataOrigin = simulated`,
-`SLIAFlow.RecordedCase = 002-04`, the detail `real UC2 blood-vessel
-enhancement, recorded IUMA LCTF capture 002-04, calibrated by IUMA (simulated
+`SLIAFlow.RecordedCase = <capture>`, the detail `real UC2 blood-vessel
+enhancement, recorded IUMA LCTF capture <capture>, calibrated by IUMA (simulated
 acquisition)` and `SLIAFlow.Uc2Parameters` with the fixed bands and
 parameters. `build\uc2\.uc2-runner.lock` keeps one UC2 run at a time.
 
 ## The HS Cube panel: IUMA's calibrated cube (SLIA-032)
 
-Every Capture also shows the configured cube,
-`input\002-04\LCTF_Calibrated_Cube_Single.hdr` and its `.dat` (ENVI float32,
-BSQ, 1080 x 1080 x 109, 460-1000 nm), in HS Cube. It is read for the panel
-separately from the run. Both panels name it: HS Cube reads
-`Recorded cube 002-04, calibrated reflectance`, and Tumour Delineation reads
-`Result for recorded cube 002-04`.
+Every Capture also shows the chosen capture's cube,
+`LCTF_Calibrated_Cube_Single.hdr` and its `.dat` (ENVI float32, BSQ, 109 bands
+at 460-1000 nm, 1080 lines by 1301 or 1080 samples), in HS Cube. It is read for
+the panel separately from the run. Both panels name it: HS Cube reads, for
+example, `Recorded cube S-N-002-04, calibrated reflectance`, and Tumour
+Delineation reads `Result for recorded cube S-N-002-04`.
 
 - **Bands.** The cube opens at its middle band. Scroll the panel to change band.
   The caption gives the band and its wavelength, for example
@@ -121,9 +156,9 @@ separately from the run. Both panels name it: HS Cube reads
   and the reason, and the status gives the same reason for UC1.
 
 The cube, its preview and the spectrum table carry
-`SLIAFlow.DataOrigin = simulated`, `SLIAFlow.RecordedCase = 002-04` and the
-detail `recorded IUMA LCTF capture 002-04, calibrated by IUMA (simulated
-acquisition)` (`ADR-0004` decision 7).
+`SLIAFlow.DataOrigin = simulated`, `SLIAFlow.RecordedCase = <capture>` and the
+detail `recorded IUMA LCTF capture <capture>, calibrated by IUMA (simulated
+acquisition)` (`ADR-0004` decision 7, `ADR-0006` decision 4).
 
 The staged build's `.uc1-runner.lock` keeps one UC1 run at a time, and a
 Capture while the lock is held is refused with the lock path in the message.
@@ -139,7 +174,7 @@ below). Stereo frames are not shown in a panel.
 
 - **Settings**: host (default `127.0.0.1`), the LiveView, Stereo and HS Cube
   ports (18944, 18945 and 18946, as the app serves them; 0 leaves a channel
-  out) and the expected bands of one cube (109, as `002-04` has). They can be
+  out) and the expected bands of one cube (109, as IUMA's captures have). They can be
   changed only while disconnected.
 - **The ports are listed in OpenIGTLinkIF from the start.** As soon as SLIAFlow
   opens, it puts one client connector per configured port in the scene, stopped
@@ -278,15 +313,15 @@ cd tools\simulators
 `--drop-bands 5,17,80-84` leaves bands out, to see them named as missing.
 `--app-header` sends the cube exactly as the app does, without the stand-in's
 metadata, so SLIAFlow cannot tell it from the app. `--cube` also takes a uint16
-cube, such as `002-04`'s raw cube. `tools\simulators\README.md` lists what the
+cube, such as a capture's raw cube. `tools\simulators\README.md` lists what the
 stand-in assumes about the real app.
 
 ### The cube from the app in HS Cube and Capture (SLIA-036)
 
 **Cube source** chooses the cube HS Cube shows and Capture uses:
 
-- **Cube on disk** (the default): the configured calibrated cube, `002-04`, as
-  before.
+- **Cube on disk** (the default): the calibrated cube of the capture chosen
+  under **Recorded capture**, `S-N-002-04` unless another is chosen.
 - **Last cube from the app**: the last complete cube received on the HS Cube
   port. HS Cube shows it as soon as it completes, with its bands, colour
   preview and pixel spectrum, keeping its received type. Until one arrives the

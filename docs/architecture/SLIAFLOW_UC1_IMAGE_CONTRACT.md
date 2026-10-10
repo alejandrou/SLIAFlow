@@ -10,10 +10,11 @@
 
 ## SLIA-027 in-Slicer UC1 outputs
 
-SLIAFlow runs `stratum.opt.intermediate.exe` on one cube per Capture - IUMA's
-calibrated LCTF cube `002-04` read from disk, or the last cube received from
-IUMA's app, mapped onto the model's 93 bands (`ADR-0004`) - and shows five of the
-images it writes, by exact file name:
+SLIAFlow runs `stratum.opt.intermediate.exe` on one cube per Capture - the
+calibrated LCTF cube of the IUMA capture chosen under Recorded capture, read
+from disk (`ADR-0006`), or the last cube received from IUMA's app, mapped onto
+the model's 93 bands (`ADR-0004`) - and shows five of the images it writes, by
+exact file name, each at the cube's own lines and samples:
 
 | File | Stage |
 | --- | --- |
@@ -77,9 +78,9 @@ exit.
 | --- | --- |
 | `SLIAFlow.Owner` | `Uc1Output` |
 | `SLIAFlow.OutputFile` | the file name |
-| `SLIAFlow.RecordedCase` | the cube's name, `002-04` |
+| `SLIAFlow.RecordedCase` | the cube's name: the capture ID, such as `S-N-002-04`, or `received-from-app` |
 | `SLIAFlow.DataOrigin` | `simulated` |
-| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, recorded IUMA LCTF capture 002-04, calibrated by IUMA (simulated acquisition)` |
+| `SLIAFlow.SimulationDetail` | `real UC1 pipeline, recorded IUMA LCTF capture S-N-002-04, calibrated by IUMA (simulated acquisition)`, with the capture's ID |
 | `SLIAFlow.CaptureId` | one `uuid4().hex` per Capture, shared by its five outputs, never reused |
 
 While a Capture is processing, and after one fails, the previous result stays

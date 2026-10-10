@@ -7,6 +7,11 @@ adopted: the product build and its `parameters.txt` are still the ones
 `uc1_changes.md` describes. Which setting to adopt is the project owner's
 decision (see [Recommendation](#recommendation)).
 
+Since 2026-10-08 `002-04` lies at `input/S-N-002-04/S-N-002-04`, unchanged
+(`ADR-0006`); `measure-uc1.py` reads it there. Most of IUMA's other captures
+are 1080 x 1301, about 20 % more pixels; their UC1 run times are in
+[`capture_compatibility.md`](capture_compatibility.md).
+
 ## In short
 
 - **SLIAFlow's Capture work takes about 2.6 s** in Slicer on `002-04`

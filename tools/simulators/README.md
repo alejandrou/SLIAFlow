@@ -65,9 +65,11 @@ cd tools\simulators
 | P + 2 | `HsCube` | while a client is connected, the cube band by band, one single-component IMAGE every `--band-interval` s (default 0.1), again every `--cube-interval` s (default 30). Each IMAGE declares the whole cube and carries its band as the sub-volume at offset (0, 0, band - 1), as the app sends it (`SLIA-036`) |
 
 - `--cube <header>` sends another ENVI BSQ cube, float32 or uint16; the default
-  is `input\002-04\LCTF_Calibrated_Cube_Single.hdr`, read into memory whole
-  (about 0.5 GB) and never written. A uint16 cube, such as
-  `input\002-04\raw_data.hdr` (1.93 GB), is sent as uint16, as the app sends
+  is `input\S-N-002-04\S-N-002-04\LCTF_Calibrated_Cube_Single.hdr` (the cube
+  called `002-04` below, before 2026-10-08), read into memory whole (about
+  0.5 GB) and never written. Any capture under `input\` can be given; most are
+  1080 x 1301 (`ADR-0006`). A uint16 cube, such as
+  `input\S-N-002-04\S-N-002-04\raw_data.hdr` (1.93 GB), is sent as uint16, as the app sends
   its raw cube today; its LiveView preview is scaled to its brightest count.
 - `--app-header` sends `HsCube` exactly as the app does: header version 1, no
   metadata, timestamp 0. Its data is then not marked simulated on the wire, so
@@ -153,7 +155,7 @@ name and would hide lost or doubled bands).
 
 ```powershell
 cd tools\simulators
-..\..\.venv\Scripts\python.exe -m stratum_sim.igtl_recorder --compare-cube ..\..\input\002-04\raw_data.hdr
+..\..\.venv\Scripts\python.exe -m stratum_sim.igtl_recorder --compare-cube ..\..\input\S-N-002-04\S-N-002-04\raw_data.hdr
 ```
 
 - `--ports` (default `18944,18945,18946`), `--host` (default `127.0.0.1`),

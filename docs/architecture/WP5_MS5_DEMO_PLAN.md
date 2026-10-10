@@ -53,7 +53,7 @@ provenance vocabulary rather than reusing it unchanged.
 | Stand-ins and transport | `tools/simulators/stratum_sim/` | 110 tests, pyigtl 0.3.4 |
 | Laptop camera in Slicer | SLIAFlow, `SLIA-005` | Verified |
 | Recorded data | none since `SLIA-039` | The HSI Human Brain Database cases (93 bands) were archived in `SLIA-031` and removed from `input/` in `SLIA-039` (`ADR-0005`) |
-| IUMA LCTF capture | `input/002-04/` | `ADR-0004`'s reference cube, float32, 109 bands; read from `SLIA-032` on |
+| IUMA LCTF captures | `input/S-N-PPP-CC/S-N-PPP-CC/` | 16 captures of 5 patients, float32, 109 bands, 1080 x 1301 or 1080 x 1080, chosen under Recorded capture (`ADR-0006`, `SLIA-040`); `S-N-002-04` is `ADR-0004`'s reference cube `002-04`, read from `SLIA-032` on |
 
 The case paths quoted below (`input/bin/bin/...`) are those of their date;
 `SLIA-031` moved the cases on 2026-09-24, and `SLIA-039` removed them.

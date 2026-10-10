@@ -12,6 +12,12 @@ The model was trained on another camera's spectral response, so an output on
 `002-04` shows that the pipeline runs and what it produces. It says nothing
 about accuracy.
 
+Since 2026-10-08 (`ADR-0006`, `SLIA-040`) the cube called `002-04` here lies at
+`input/S-N-002-04/S-N-002-04`, byte for byte the same, among IUMA's other
+captures; every run below that names `002-04` was made on it, and
+`check-uc1.py` now reads it there with the same recorded hashes. Which other
+captures run through UC1 is in [`capture_compatibility.md`](capture_compatibility.md).
+
 ## How the patches are applied
 
 `scripts/development/build-uc1.ps1`:

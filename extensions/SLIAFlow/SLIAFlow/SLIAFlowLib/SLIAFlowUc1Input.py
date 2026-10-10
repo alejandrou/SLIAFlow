@@ -29,7 +29,7 @@ from .SLIAFlowCalibratedCube import (
     ENVI_DATA_TYPE_FLOAT32,
     CalibratedCube,
     CalibratedCubeError,
-    loadCalibratedCube,
+    reloadCalibratedCube,
 )
 
 try:
@@ -108,14 +108,31 @@ def fileStamps(cube: CalibratedCube) -> tuple:
     by a file of the same size: the write time when it is written in place, the
     file ID when another file is moved over it. The values themselves are not
     hashed: that would read the whole cube once more at every Capture.
+
+    A file that can no longer be read, because it was removed or locked after
+    the cube was loaded, is refused with that reason as loading refuses it, so
+    Capture's check before freezing reports it like any other refusal.
     """
-    return tuple((stat.st_size, stat.st_mtime_ns, stat.st_ino)
-                 for stat in (cube.headerPath.stat(), cube.dataPath.stat()))
+    stamps = []
+    for path in (cube.headerPath, cube.dataPath):
+        try:
+            stat = path.stat()
+        except OSError as error:
+            raise CalibratedCubeError(_("{file} could not be read: {reason}").format(
+                file=path.name, reason=error.strerror or error)) from error
+        stamps.append((stat.st_size, stat.st_mtime_ns, stat.st_ino))
+    return tuple(stamps)
 
 
 def describeUc1Input(cube: CalibratedCube, inputRoot) -> Uc1Input:
     """Describe the run input for a calibrated cube, or refuse a cube off the grid."""
     sources = modelBandSources(cube.wavelengths, cube.headerPath.name)
+    if not cube.name.isascii():
+        # Refused here, before Capture freezes anything, not when the header is written.
+        raise CalibratedCubeError(_(
+            "Its name {cube} has characters other than ASCII. UC1's header and the paths UC1 "
+            "and UC2 are given are built from it and must be ASCII. Rename its folder."
+        ).format(cube=cube.name))
     folder = (Path(inputRoot) / cube.name).resolve()
     return Uc1Input(cube.name, folder, cube.samples, cube.lines, len(sources), cube, sources,
                     fileStamps(cube))
@@ -132,7 +149,7 @@ def assertUc1InputUnchanged(uc1Input: Uc1Input) -> None:
     described.
     """
     described = uc1Input.cube
-    current = loadCalibratedCube(described.headerPath)
+    current = reloadCalibratedCube(described)
     if (current.samples, current.lines, current.bands) != (
             described.samples, described.lines, described.bands):
         raise CalibratedCubeError(_(

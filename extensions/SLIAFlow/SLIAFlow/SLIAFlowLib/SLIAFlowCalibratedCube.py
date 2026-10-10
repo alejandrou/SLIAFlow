@@ -2,23 +2,25 @@
 
 The HS Cube panel shows the calibrated cube IUMA's acquisition app will send
 (ADR-0004 decision 1): reflectance as ENVI float32, band sequential, one
-wavelength per band. It is read from the configured header under `input/`,
-where `002-04` lies; a cube received from the app is written in the same form
-for UC1 and UC2 (SLIA-036, `SLIAFlowLogic.writeReceivedCubeForRun`). Nothing
-here writes to it.
+wavelength per band. It is read from the header of the recorded capture chosen
+under `input/` (ADR-0006, `SLIAFlowCaptures`); a cube received from the app is
+written in the same form for UC1 and UC2 (SLIA-036,
+`SLIAFlowLogic.writeReceivedCubeForRun`). Nothing here writes to it.
 
 The checks are the ones ADR-0004 decision 6 lists for a float32 cube: the header
 and data file agree (data type 4, bsq, byte order 0, no header offset, size),
-and the wavelengths are present, one per band. The 109 -> 93 band mapping of
-decision 4 is applied to the same cube for UC1 by `SLIAFlowUc1Input`.
+and the wavelengths are present, one per band. A header at a path Slicer cannot
+open, 260 characters or more, is refused with that reason. The 109 -> 93 band
+mapping of decision 4 is applied to the same cube for UC1 by `SLIAFlowUc1Input`.
 
 The values are handed back as stored: no resampling, smoothing or rescaling.
 """
 
 import math
+import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -35,12 +37,15 @@ except ImportError:  # Outside Slicer, messages stay in English.
 ENVI_DATA_TYPE_FLOAT32 = "4"
 BYTES_PER_SAMPLE = 4
 # The data file is the header's stem with one of these, tried in this order:
-# 002-04 uses .dat, the acquisition app writes .raw (section 3.4 of
+# IUMA's captures use .dat, the acquisition app writes .raw (section 3.4 of
 # docs/hardware/acquisition_app_and_hardware.md).
 DATA_FILE_SUFFIXES = (".dat", ".raw")
 # `wavelength units` may be absent (the acquisition app does not write it) or
 # say nanometres; any other unit would put the spectrum on the wrong axis.
 NANOMETRE_UNITS = ("nanometers", "nanometres", "nm")
+# Windows' MAX_PATH, the terminating NUL included. Slicer's Python is not
+# long-path aware, so a header at a longer path cannot be opened here.
+WINDOWS_MAX_PATH = 260
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,12 @@ _WAVELENGTH_BLOCK = re.compile(r"^\s*wavelength\s*=\s*\{([^}]*)\}", re.IGNORECAS
 def loadCalibratedCube(headerPath) -> CalibratedCube:
     """Describe the calibrated cube a header names, or say why it cannot be shown."""
     headerPath = Path(headerPath)
+    length = len(os.path.abspath(headerPath))
+    if length >= WINDOWS_MAX_PATH:
+        raise CalibratedCubeError(_(
+            "The path to {file} is {length} characters, over the {limit} Slicer can open. "
+            "Shorten the capture's name or move its folder."
+        ).format(file=headerPath.name, length=length, limit=WINDOWS_MAX_PATH - 1))
     if not headerPath.is_file():
         raise CalibratedCubeError(_("{file} is missing.").format(file=headerPath.name))
     text = headerPath.read_text(encoding="ascii", errors="replace")
@@ -149,6 +160,16 @@ def loadCalibratedCube(headerPath) -> CalibratedCube:
                           samples, lines, bands, wavelengths)
     _assertDataSize(cube)
     return cube
+
+
+def reloadCalibratedCube(cube: CalibratedCube) -> CalibratedCube:
+    """Describe `cube` again as it is now on disk, under the name it was described with.
+
+    Its paths are resolved, so a capture folder that links to a folder of
+    another name would come back under that folder's name and look changed
+    when nothing was.
+    """
+    return replace(loadCalibratedCube(cube.headerPath), name=cube.name)
 
 
 def _assertDataSize(cube: CalibratedCube) -> None:

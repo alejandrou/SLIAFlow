@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .SLIAFlowCalibratedCube import CalibratedCubeError, loadCalibratedCube
+from .SLIAFlowCalibratedCube import CalibratedCubeError, reloadCalibratedCube
 from .SLIAFlowUc1Run import OwnedProcess, ProcessOutcome
 
 try:
@@ -79,7 +79,8 @@ ERROR_MARKERS = (
     "Failed to save the image.",
 )
 
-# UC2 reads three bands and wrote its map in about 0.3 s on 002-04 (SLIA-021).
+# UC2 reads three bands and wrote its map in about 0.3 s on 002-04, now
+# S-N-002-04 (SLIA-021).
 RUN_TIMEOUT_SEC = 30
 PNG_COMPONENTS = 3
 
@@ -149,7 +150,16 @@ class Uc2Build:
         return self.root / LOCK_FILE_NAME
 
     def outputPath(self, cube) -> Path:
-        return self.runDirectory / f"{cube.name}{OUTPUT_FILE_SUFFIX}"
+        return self.runDirectory / self.outputFileName(cube)
+
+    @classmethod
+    def outputFileName(cls, cube) -> str:
+        """The map's name: UC2 names it after the folder it is given.
+
+        That is the cube's folder as found on disk, which differs from the
+        capture's ID when the capture's folder links to one of another name.
+        """
+        return f"{Path(cls.argument(cube)).name}{OUTPUT_FILE_SUFFIX}"
 
     @staticmethod
     def argument(cube) -> str:
@@ -161,7 +171,7 @@ class Uc2Build:
         # The cube was described when Capture was pressed. Describe it again
         # now, so a cube edited or truncated since is refused, not run on.
         try:
-            current = loadCalibratedCube(cube.headerPath)
+            current = reloadCalibratedCube(cube)
         except (CalibratedCubeError, OSError) as error:
             raise Uc2RunError(str(error)) from error
         if current != cube:
@@ -193,7 +203,7 @@ class Uc2Build:
             ).format(dll=RUNTIME_DLL_NAME, executable=EXECUTABLE_NAME,
                      directory=self.sourceDirectory, script=BUILD_SCRIPT_HINT))
         inputPath = f"{self.argument(cube)}/{CALIBRATED_HEADER_NAME}"
-        outputPath = f"./{cube.name}{OUTPUT_FILE_SUFFIX}"
+        outputPath = f"./{self.outputFileName(cube)}"
         for path, limit in ((inputPath, MAX_PATH_LENGTH), (outputPath, MAX_OUTPUT_PATH_LENGTH)):
             if len(path) >= limit:
                 raise Uc2RunError(_(

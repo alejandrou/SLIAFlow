@@ -9,6 +9,13 @@ that was run and what came out. The vendored copy is never written to, and
 `BV_enhancement.c`, `png_writer.c` and `hdr_reader.c` are not changed: the
 enhancement itself is UC2's, as delivered.
 
+Since 2026-10-08 (`ADR-0006`, `SLIA-040`) the cube called `002-04` here lies at
+`input/S-N-002-04/S-N-002-04`, byte for byte the same, among IUMA's other
+captures; every run below that names `002-04` was made on it. UC2 names its PNG
+after the folder, so the map is now `S-N-002-04-BVMap.png`, with the same
+recorded SHA-256. Which other captures run through UC2 is in
+[`capture_compatibility.md`](capture_compatibility.md).
+
 The two patches are the three changes the project owner made and tested in a
 standalone copy of UC2 on 2026-10-05, transcribed here unchanged, comments
 included. They exist so the map can be shown in Slicer now. If UC2's authors

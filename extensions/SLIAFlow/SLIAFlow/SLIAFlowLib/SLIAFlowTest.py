@@ -957,10 +957,13 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         # SLIA-032: what the HS Cube panel shows, bands or the colour preview.
         # SLIA-036: which cube HS Cube shows and Capture uses.
         # SLIA-037: which source the live pane shows.
+        # SLIA-040: which recorded capture Cube on disk reads, and reading the
+        # list again.
         self.assertEqual(
             sorted(control.objectName for control in interactive),
             sorted(("liveSourceSelector", "startButton", "stopButton", "captureButton",
-                    "resultOutputSelector", "cubeDisplaySelector", "cubeSourceSelector")),
+                    "resultOutputSelector", "cubeDisplaySelector", "cubeSourceSelector",
+                    "captureSelector", "captureRefreshButton")),
         )
         for control in interactive:
             with self.subTest(control=control.objectName):
@@ -999,7 +1002,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     STALE_STATUS_FRAGMENT = "not from the current capture"
     # ADR-0004 decision 7: the UC1 pipeline's producer name, then the cube's own
     # detail, in the wording the SLIA-032 card fixes for the cube.
-    UC1_RESULT_DETAIL = ("real UC1 pipeline, recorded IUMA LCTF capture 002-04, calibrated by "
+    UC1_RESULT_DETAIL = ("real UC1 pipeline, recorded IUMA LCTF capture S-N-002-04, calibrated by "
                          "IUMA (simulated acquisition)")
     RESULT_STATUS_FORMAT = "Recorded cube {case} - simulated acquisition"
     # ADR-0004 decision 5: results on the LCTF cube are behavioural only.
@@ -1016,14 +1019,16 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         return importlib.import_module(f".{name}", __package__)
 
     # The calibrated LCTF cube (SLIA-032). The layout, names and wavelength grid
-    # are those of IUMA's LCTF_Calibrated_Cube_Single.hdr in input/002-04: ENVI
-    # data type 4, bsq, byte order 0, 460-1000 nm in 5 nm steps.
-    CALIBRATED_CUBE_NAME = "002-04"
+    # are those of IUMA's LCTF_Calibrated_Cube_Single.hdr in the captures under
+    # input/: ENVI data type 4, bsq, byte order 0, 460-1000 nm in 5 nm steps.
+    # S-N-002-04 is the capture every session starts on (ADR-0006, SLIA-040
+    # owner decision 1), in the nested folder IUMA delivers: input/<ID>/<ID>/.
+    CALIBRATED_CUBE_NAME = "S-N-002-04"
     CALIBRATED_CUBE_STEM = "LCTF_Calibrated_Cube_Single"
     LCTF_WAVELENGTHS_NM = tuple(range(460, 1001, 5))
     # ADR-0004 decision 7, in the wording the SLIA-032 card fixes.
     CALIBRATED_DETAIL = (
-        "recorded IUMA LCTF capture 002-04, calibrated by IUMA (simulated acquisition)"
+        "recorded IUMA LCTF capture S-N-002-04, calibrated by IUMA (simulated acquisition)"
     )
     # The SLIA-032 card: the bands nearest 650, 550 and 470 nm, as R, G and B,
     # on one fixed scale where reflectance 1.0 is full brightness.
@@ -1078,12 +1083,12 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     def _makeFixtureRepository(self, root: Path, *, cube=True) -> dict:
         """A repository-shaped placeholder tree: markers, the calibrated cube, staged build.
 
-        The cube lies where the configured one does, input/002-04; `cube=False`
-        writes no cube.
+        The cube lies where the default capture does, input/S-N-002-04/S-N-002-04;
+        `cube=False` writes no cube.
         """
         (root / "AGENTS.md").write_text("test fixture\n", encoding="ascii")
         (root / "extensions" / "SLIAFlow").mkdir(parents=True)
-        cubeFolder = root / "input" / self.CALIBRATED_CUBE_NAME
+        cubeFolder = root / "input" / self.CALIBRATED_CUBE_NAME / self.CALIBRATED_CUBE_NAME
         calibratedHeader = cubeFolder / f"{self.CALIBRATED_CUBE_STEM}.hdr"
         calibratedValues = None
         if cube:
@@ -1438,12 +1443,14 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
         The cube is the one the HS Cube panel shows (ADR-0004 decision 1),
         handed to UC1 as the mapped copy in the staged build's input folder.
+        With nothing chosen it is S-N-002-04, in the nested folder IUMA
+        delivers (ADR-0006, SLIA-040 owner decision 1).
         """
         with self._captureSession() as session:
             widget = session["widget"]
             root = session["root"]
             self.assertEqual(widget.logic.calibratedCubeHeader,
-                             root / "input" / self.CALIBRATED_CUBE_NAME
+                             root / "input" / self.DEFAULT_CAPTURE_ID / self.DEFAULT_CAPTURE_ID
                              / f"{self.CALIBRATED_CUBE_STEM}.hdr")
             other, _values = self._writeFixtureCalibratedCube(root / "input" / "other-cube")
             self._startFakeCamera(session)
@@ -1462,21 +1469,53 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             self.assertEqual(len(session["processes"]), 4)
 
     def test_configuredCubeIsRefusedWithItsReason(self) -> None:
-        """A cube UC1 cannot run on ends the Capture, naming it and why."""
-        with self._captureSession() as session:
+        """A cube UC1 cannot run on is refused before anything is frozen, saved or started.
+
+        SLIA-040 scripted run of 2026-10-08: only a missing capture was checked
+        before freezing, so a non-ASCII ID froze LiveView, saved a snapshot and
+        ran UC2 before UC1 refused it, and a bad cube saved a snapshot. Project
+        audit of 2026-10-09: a data file that could not be read once the cube
+        was loaded escaped the check as a raw OSError.
+        """
+        with self._captureSession(uc2=True) as session:
             widget = session["widget"]
             self._startFakeCamera(session)
             root = session["root"]
             configured = session["calibratedHeader"]
             offGrid, _values = self._writeFixtureCalibratedCube(
                 root / "input" / "off-grid", wavelengths=tuple(range(440, 901, 5)))
+            nonAscii, _values = self._writeFixtureCalibratedCube(
+                root / "input" / "Z-ñandú-002-04")
+            # UC1 keeps at most 127 characters of build/uc1/UC1/input/<ID>/raw.dat.
+            uc1TooLong, _values = self._writeFixtureCalibratedCube(
+                root / "input" / ("L-" + "x" * 100))
             missing = root / "input" / "absent" / f"{self.CALIBRATED_CUBE_STEM}.hdr"
+            unreadable, _values = self._writeFixtureCalibratedCube(root / "input" / "unreadable")
+            loadConfigured = widget.logic.loadConfiguredCalibratedCube
+
+            def loadThenLoseTheData():
+                # As when the data file is removed or locked between the
+                # check's reads of the cube.
+                cube = loadConfigured()
+                if cube.headerPath == unreadable.resolve():
+                    cube.dataPath.unlink()
+                return cube
+
+            def loseTheDataOnceLoaded():
+                widget.logic.loadConfiguredCalibratedCube = loadThenLoseTheData
+                # The logic outlives this test.
+                self.addCleanup(vars(widget.logic).pop, "loadConfiguredCalibratedCube", None)
+
             for label, prepare, header, reason in (
                 ("missing", lambda: None, missing, "is missing"),
                 ("off the LCTF grid", lambda: None, offGrid, "460"),
+                ("name not ASCII", lambda: None, nonAscii, "ASCII"),
+                ("UC1 path too long", lambda: None, uc1TooLong, "at most 127"),
                 ("inconsistent",
                  lambda: configured.with_suffix(".dat").write_bytes(b"\0" * 10),
                  configured, "is 10 bytes"),
+                ("unreadable once loaded", loseTheDataOnceLoaded, unreadable,
+                 "could not be read"),
             ):
                 with self.subTest(defect=label):
                     prepare()
@@ -1486,28 +1525,449 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                     status = widget.ui.statusLabel.text
                     self.assertIn(str(header), status)
                     self.assertIn(reason, status)
-                    self.assertEqual(session["processes"], [], "UC1 started on a refused cube")
+                    self.assertEqual(session["processes"], [],
+                                     "UC1 or UC2 started on a refused cube")
                     self.assertIsNone(widget.logic.currentRun)
+                    self.assertIsNone(widget.logic.currentUc2Run)
                     self.assertFalse(widget.captureInProgress)
                     self.assertFalse(widget.liveViewFrozen, "LiveView stayed frozen")
+                    self.assertEqual(list(session["captures"].glob("*.png")), [],
+                                     "A snapshot was saved for a refused cube")
 
     def test_runEnvironmentChangeRestoresTheDefaultCube(self) -> None:
-        """A cube chosen in one run environment does not carry into the next."""
+        """A cube or capture chosen in one run environment does not carry into the next.
+
+        The default is S-N-002-04's header, in the nested folder when there is
+        one (ADR-0006 decision 1).
+        """
         logic = SLIAFlowLogic()
+        header = f"{self.CALIBRATED_CUBE_STEM}.hdr"
         with self._fixtureDirectory() as first, self._fixtureDirectory() as second:
+            nested = second / "input" / self.DEFAULT_CAPTURE_ID / self.DEFAULT_CAPTURE_ID / header
+            nested.parent.mkdir(parents=True)
+            nested.write_text("test fixture\n", encoding="ascii")
             try:
                 logic.setRunEnvironment(repositoryRoot=first)
                 logic.calibratedCubeHeader = first / "input" / "elsewhere" / "cube.hdr"
+                logic.captureId = "S-N-007-03"
                 logic.setRunEnvironment(repositoryRoot=second)
-                self.assertEqual(logic.calibratedCubeHeader,
-                                 second / logic.CALIBRATED_CUBE_RELATIVE_PATH)
+                self.assertEqual(logic.captureId, self.DEFAULT_CAPTURE_ID)
+                self.assertEqual(logic.calibratedCubeHeader, nested)
                 logic.calibratedCubeHeader = second / "input" / "elsewhere" / "cube.hdr"
+                logic.captureId = "S-N-007-03"
                 logic.setRunEnvironment()
-                self.assertEqual(logic.calibratedCubeHeader,
-                                 logic.repositoryRoot / logic.CALIBRATED_CUBE_RELATIVE_PATH)
+                self.assertEqual(logic.captureId, self.DEFAULT_CAPTURE_ID)
+                self.assertIn(logic.calibratedCubeHeader, (
+                    logic.repositoryRoot / "input" / self.DEFAULT_CAPTURE_ID / header,
+                    logic.repositoryRoot / "input" / self.DEFAULT_CAPTURE_ID
+                    / self.DEFAULT_CAPTURE_ID / header,
+                ))
             finally:
                 logic.calibratedCubeHeader = None
                 logic.setRunEnvironment()
+
+    # --- The captures under input/ (SLIA-040, ADR-0006) -------------------
+
+    # ADR-0006 decision 1 and SLIA-040 owner decision 1: the capture every
+    # session starts on, the cube that was 002-04.
+    DEFAULT_CAPTURE_ID = "S-N-002-04"
+    # SLIA-040 requirement 3: how a chosen capture that is gone is listed.
+    NOT_FOUND_SUFFIX = " (not found)"
+
+    @staticmethod
+    def _comboTexts(selector) -> list:
+        return [selector.itemText(index) for index in range(selector.count)]
+
+    def _addCapture(self, root: Path, captureId: str, **cubeOptions):
+        """A placeholder capture in the nested layout IUMA delivers: input/<ID>/<ID>/."""
+        return self._writeFixtureCalibratedCube(root / "input" / captureId / captureId,
+                                                **cubeOptions)
+
+    def test_capturesAreFoundInInput(self) -> None:
+        """A capture is a folder of input/ holding the calibrated header, directly or nested.
+
+        ADR-0006 decision 1, restated: the header in the folder itself, or in
+        one nested folder of the same name. Nothing else is a capture, the list
+        is in ID order, and input/ is only read.
+        """
+        captures = self._helperModule("SLIAFlowCaptures")
+        header = f"{self.CALIBRATED_CUBE_STEM}.hdr"
+        self.assertEqual(captures.DEFAULT_CAPTURE_ID, self.DEFAULT_CAPTURE_ID)
+        with self._fixtureDirectory() as root:
+            inputRoot = root / "input"
+            self.assertEqual(tuple(captures.findCaptures(inputRoot)), (),
+                             "A missing input/ is not an error, and holds no capture")
+            expected = {
+                "S-N-007-03": inputRoot / "S-N-007-03" / "S-N-007-03" / header,
+                "S-N-002-01": inputRoot / "S-N-002-01" / "S-N-002-01" / header,
+                "flat-capture": inputRoot / "flat-capture" / header,
+            }
+            notCaptures = (
+                inputRoot / "other-name" / "nested" / header,
+                inputRoot / "no-header" / "raw_data.hdr",
+                inputRoot / "too-deep" / "too-deep" / "too-deep" / header,
+                inputRoot / header,
+                inputRoot / "README.txt",
+            )
+            for path in (*expected.values(), *notCaptures):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("test fixture\n", encoding="ascii")
+            before = sorted((str(path), path.stat().st_mtime_ns) for path in inputRoot.rglob("*"))
+
+            found = captures.findCaptures(inputRoot)
+            self.assertEqual([capture.id for capture in found],
+                             ["S-N-002-01", "S-N-007-03", "flat-capture"])
+            for capture in found:
+                with self.subTest(capture=capture.id):
+                    self.assertEqual(capture.headerPath, expected[capture.id])
+                    self.assertEqual(captures.captureHeader(inputRoot, capture.id),
+                                     expected[capture.id])
+            self.assertEqual(captures.captureHeader(inputRoot, "absent"),
+                             inputRoot / "absent" / header,
+                             "A capture that is not there has the header it would have")
+            self.assertEqual(
+                sorted((str(path), path.stat().st_mtime_ns) for path in inputRoot.rglob("*")),
+                before, "Finding captures changed input/")
+
+    def test_linkedCaptureRunsUnderItsOwnId(self) -> None:
+        """A capture folder that links to a folder of another name runs under the capture's ID.
+
+        Review of 2026-10-08, failure 1: the cube's paths are resolved, so the
+        re-read before each run found the target folder's name and refused UC1
+        and UC2 as "changed on disk" when nothing had changed.
+        """
+        # A directory junction needs no privilege, unlike a symbolic link.
+        import _winapi
+
+        captures = self._helperModule("SLIAFlowCaptures")
+        calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
+        inputModule = self._helperModule("SLIAFlowUc1Input")
+        with self._fixtureDirectory() as root:
+            fixture = self._uc2Fixture(root)
+            target = root / "elsewhere" / "kept-under-another-name"
+            self._writeFixtureCalibratedCube(target)
+            _winapi.CreateJunction(str(target), str(root / "input" / "S-N-008-01"))
+            header = captures.captureHeader(root / "input", "S-N-008-01")
+            self.assertEqual(calibratedModule.loadCalibratedCube(header).name, "S-N-008-01")
+
+            run, case, _build, processes, _results = self._startRun(fixture, header)
+            self.assertEqual(case.name, "S-N-008-01")
+            inputModule.assertUc1InputUnchanged(case)
+            run.start()
+            try:
+                self.assertEqual(len(processes), 1, "UC1 was not started on the linked capture")
+            finally:
+                run.cancel()
+
+            run, cube, build, processes, _results = self._startUc2Run(fixture, header)
+            self.assertEqual(cube.name, "S-N-008-01")
+            run.start()
+            try:
+                self.assertEqual(len(processes), 1, "UC2 was not started on the linked capture")
+                # UC2 names its map after the folder it is given (scripted run
+                # of 2026-10-08: it wrote one name and SLIAFlow looked for another).
+                given = Path(processes[0].arguments[0]).name
+                self.assertEqual(build.outputPath(cube).name, f"{given}-BVMap.png")
+            finally:
+                run.cancel()
+
+    def test_captureWithANonAsciiIdIsRefusedWithItsReason(self) -> None:
+        """A capture ID with other than ASCII characters is refused before anything is written.
+
+        Review of 2026-10-08, failure 2: UC1's header and the paths UC1 and UC2
+        are given are built from the ID, and writing the header raised a raw
+        codec error after the capture had started.
+        """
+        calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
+        captureId = "Z-ñandú-002-04"
+        with self._fixtureDirectory() as root:
+            fixture = self._makeFixtureRepository(root)
+            header, _values = self._writeFixtureCalibratedCube(root / "input" / captureId)
+            self.assertEqual(calibratedModule.loadCalibratedCube(header).name, captureId,
+                             "The HS Cube panel shows the cube; only running it is refused")
+            with self.assertRaises(calibratedModule.CalibratedCubeError) as raised:
+                self._describeUc1Input(header, fixture["buildRoot"])
+            self.assertIn(captureId, str(raised.exception))
+            self.assertIn("ASCII", str(raised.exception))
+            self.assertFalse((root / self.UC1_INPUT_RELATIVE_PATH / captureId).exists(),
+                             "Something was written for UC1")
+
+    def test_cubeUnreadableOnceLoadedIsRefusedWithItsReason(self) -> None:
+        """A cube file that cannot be read after the cube was loaded is refused, saying why.
+
+        Project audit of 2026-10-09: describing UC1's input reads the cube's
+        files once more, for their stamps. A file removed or locked between
+        the two reads raised a raw OSError, which Capture's check before
+        freezing does not catch.
+        """
+        calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
+        inputModule = self._helperModule("SLIAFlowUc1Input")
+        uc1Run = self._helperModule("SLIAFlowUc1Run")
+        with self._fixtureDirectory() as root:
+            fixture = self._makeFixtureRepository(root)
+            cube = calibratedModule.loadCalibratedCube(fixture["calibratedHeader"])
+            cube.dataPath.unlink()
+            with self.assertRaises(calibratedModule.CalibratedCubeError) as raised:
+                inputModule.describeUc1Input(cube, uc1Run.Uc1Build(fixture["buildRoot"])
+                                             .inputDirectory)
+            self.assertIn(f"{cube.dataPath.name} could not be read", str(raised.exception))
+            self.assertFalse(fixture["runFolder"].exists(), "Something was written for UC1")
+
+    def test_captureOnALongPathIsListedAndRefusedWithItsReason(self) -> None:
+        """A capture whose header path passes Windows' 259 characters is listed, then refused.
+
+        Review of 2026-10-08, minor failure: Slicer's Python is not long-path
+        aware, so it left such a capture out of the list without a word, while
+        check-captures.py listed and ran it.
+        """
+        import os
+        import shutil
+
+        captures = self._helperModule("SLIAFlowCaptures")
+        calibratedModule = self._helperModule("SLIAFlowCalibratedCube")
+        with self._fixtureDirectory() as root:
+            inputRoot = root / "input"
+            # The nested header passes 259 characters; the capture's folder does not.
+            captureId = "L-" + "x" * ((260 - len(str(inputRoot))) // 2)
+            folder = inputRoot / captureId
+            # The extended-length prefix lets this Python write past the limit.
+            extended = Path("\\\\?\\" + os.path.abspath(folder))
+            try:
+                self._writeFixtureCalibratedCube(extended / captureId)
+                header = captures.captureHeader(inputRoot, captureId)
+                self.assertGreaterEqual(len(str(header)), 260)
+                self.assertIn(captureId, [capture.id for capture in captures.findCaptures(inputRoot)])
+                with self.assertRaises(calibratedModule.CalibratedCubeError) as raised:
+                    calibratedModule.loadCalibratedCube(header)
+                self.assertIn("259", str(raised.exception))
+                self.assertIn(str(len(str(header))), str(raised.exception))
+            finally:
+                shutil.rmtree(extended, ignore_errors=True)
+
+    def test_chosenCaptureIsTheCubeCaptureUses(self) -> None:
+        """The capture chosen under Recorded capture is the one HS Cube, UC1 and UC2 get.
+
+        The list starts on S-N-002-04 (SLIA-040 owner decision 1); the chosen
+        capture's ID is what the provenance and the status lines name.
+        """
+        with self._captureSession(uc2=True) as session:
+            widget = session["widget"]
+            otherId = "S-N-005-01"
+            otherHeader, otherValues = self._addCapture(session["root"], otherId,
+                                                        samples=6, lines=2)
+            widget.ui.captureRefreshButton.click()
+            selector = widget.ui.captureSelector
+            self.assertEqual(self._comboTexts(selector), [self.DEFAULT_CAPTURE_ID, otherId])
+            self.assertEqual(selector.currentText, self.DEFAULT_CAPTURE_ID)
+            self.assertEqual(widget.logic.captureId, self.DEFAULT_CAPTURE_ID)
+
+            selector.setCurrentIndex(selector.findText(otherId))
+            self.assertEqual(widget.logic.captureId, otherId)
+            self._startFakeCamera(session)
+            self._showFrame(session, 40)
+            widget._onCaptureClicked()
+
+            case = widget.logic.currentRun.case
+            self.assertEqual(case.name, otherId)
+            self.assertEqual(case.cube.headerPath, otherHeader.resolve())
+            self.assertEqual(widget.logic.currentUc2Run.cube.headerPath, otherHeader.resolve())
+            cubeNode = widget.logic.cubeNode()
+            np.testing.assert_array_equal(np.array(slicer.util.arrayFromVolume(cubeNode)),
+                                          otherValues)
+            otherDetail = (f"recorded IUMA LCTF capture {otherId}, calibrated by IUMA "
+                           "(simulated acquisition)")
+            self.assertEqual(cubeNode.GetAttribute("SLIAFlow.RecordedCase"), otherId)
+            self.assertEqual(cubeNode.GetAttribute("SLIAFlow.SimulationDetail"), otherDetail)
+
+            self._finishUc2(session, seed=1)
+            self._finishCapture(session, seed=2)
+            result = widget.logic.outputNode("imageRGB.bmp")
+            self.assertEqual(result.GetAttribute("SLIAFlow.RecordedCase"), otherId)
+            self.assertEqual(result.GetAttribute("SLIAFlow.SimulationDetail"),
+                             f"real UC1 pipeline, {otherDetail}")
+            self.assertEqual(widget.logic.vascularMapNode().GetAttribute("SLIAFlow.RecordedCase"),
+                             otherId)
+            for label in (widget.ui.resultStatusLabel, widget.ui.vascularStatusLabel):
+                with self.subTest(label=label.objectName):
+                    self.assertIn(otherId, label.text)
+                    self.assertNotIn(self.DEFAULT_CAPTURE_ID, label.text)
+
+    def test_captureListRefreshesAndKeepsAMissingChoice(self) -> None:
+        """Refresh and entering the module read input/ again; a vanished choice stays shown.
+
+        Capture on a chosen capture that is no longer there is refused with the
+        missing header named, before LiveView is frozen or a snapshot saved.
+        """
+        import shutil
+
+        with self._captureSession() as session:
+            widget = session["widget"]
+            root = session["root"]
+            selector = widget.ui.captureSelector
+            widget.ui.captureRefreshButton.click()
+            self.assertEqual(self._comboTexts(selector), [self.DEFAULT_CAPTURE_ID])
+
+            addedId = "S-N-007-03"
+            self._addCapture(root, addedId)
+            widget.ui.captureRefreshButton.click()
+            self.assertEqual(self._comboTexts(selector), [self.DEFAULT_CAPTURE_ID, addedId])
+
+            enteredId = "S-N-007-02"
+            self._addCapture(root, enteredId)
+            try:
+                widget.enter()
+                self.assertEqual(self._comboTexts(selector),
+                                 [self.DEFAULT_CAPTURE_ID, enteredId, addedId])
+            finally:
+                widget._deactivatePresentation(restore=True)
+
+            selector.setCurrentIndex(selector.findText(addedId))
+            shutil.rmtree(root / "input" / addedId)
+            widget.ui.captureRefreshButton.click()
+            self.assertEqual(self._comboTexts(selector),
+                             [self.DEFAULT_CAPTURE_ID, enteredId, addedId + self.NOT_FOUND_SUFFIX])
+            self.assertEqual(selector.currentText, addedId + self.NOT_FOUND_SUFFIX)
+            self.assertEqual(widget.logic.captureId, addedId)
+
+            self._startFakeCamera(session)
+            self._showFrame(session, 30)
+            widget._onCaptureClicked()
+            status = widget.ui.statusLabel.text
+            self.assertIn(str(root / "input" / addedId), status)
+            self.assertIn("is missing", status)
+            self.assertFalse(widget.captureInProgress)
+            self.assertFalse(widget.liveViewFrozen, "LiveView was frozen for a missing capture")
+            self.assertEqual(session["processes"], [])
+            self.assertEqual(list(session["captures"].glob("*.png")), [],
+                             "A snapshot was saved for a missing capture")
+
+    def test_captureRowFollowsCubeSourceAndCapture(self) -> None:
+        """Recorded capture is only offered while it is what the next Capture reads."""
+        with self._captureSession() as session:
+            widget = session["widget"]
+            controls = (widget.ui.captureSelector, widget.ui.captureRefreshButton)
+
+            def assertEnabled(expected, message):
+                for control in controls:
+                    with self.subTest(control=control.objectName, message=message):
+                        self.assertEqual(control.enabled, expected, message)
+
+            assertEnabled(True, "Disabled with Cube on disk")
+            widget._parameterNode.cubeSource = self.CUBE_SOURCE_APP
+            assertEnabled(False, "Enabled while Cube source is the app")
+            widget._parameterNode.cubeSource = self.CUBE_SOURCE_DISK
+            assertEnabled(True, "Disabled again after returning to Cube on disk")
+
+            self._startFakeCamera(session)
+            self._showFrame(session, 20)
+            widget._onCaptureClicked()
+            self.assertTrue(widget.captureInProgress)
+            assertEnabled(False, "Enabled while a capture runs")
+            self._finishCapture(session)
+            self.assertFalse(widget.captureInProgress)
+            assertEnabled(True, "Disabled after the capture ended")
+
+    def test_captureListShowsTheCaptureCaptureReads(self) -> None:
+        """The list shows the capture the next Capture reads, however it was chosen.
+
+        A capture chosen from Python moves the list too, so it never names one
+        capture while Capture reads another (SLIA-040 review finding 5).
+        """
+        with self._captureSession() as session:
+            widget = session["widget"]
+            selector = widget.ui.captureSelector
+            otherId = "S-N-005-01"
+            self._addCapture(session["root"], otherId)
+
+            widget.logic.captureId = otherId
+            self.assertEqual(selector.currentText, otherId)
+            self.assertEqual(self._comboTexts(selector), [self.DEFAULT_CAPTURE_ID, otherId],
+                             "A capture added since the list was read is not listed")
+            missingId = "S-N-009-09"
+            widget.logic.captureId = missingId
+            self.assertEqual(selector.currentText, missingId + self.NOT_FOUND_SUFFIX)
+            widget.logic.captureId = self.DEFAULT_CAPTURE_ID
+            self.assertEqual(selector.currentText, self.DEFAULT_CAPTURE_ID)
+            self.assertEqual(self._comboTexts(selector), [self.DEFAULT_CAPTURE_ID, otherId])
+
+            selector.setCurrentIndex(selector.findText(otherId))
+            self.assertEqual(widget.logic.captureId, otherId)
+            self.assertEqual(selector.currentText, otherId)
+
+    def test_chosenCaptureIsNotSavedInTheScene(self) -> None:
+        """A saved scene does not carry the chosen capture into another session.
+
+        SLIA-040 owner decision 1: every session starts on S-N-002-04. The
+        choice lives only as long as the module's logic, so the scene, which
+        a session can save and another load, never names it (SLIA-040 review
+        finding 4).
+        """
+        with self._captureSession() as session:
+            widget = session["widget"]
+            selector = widget.ui.captureSelector
+            otherId = "S-N-007-03"
+            self._addCapture(session["root"], otherId)
+            widget.ui.captureRefreshButton.click()
+            selector.setCurrentIndex(selector.findText(otherId))
+            self.assertEqual(widget.logic.captureId, otherId)
+
+            scene = slicer.mrmlScene
+            scene.SetSaveToXMLString(1)
+            try:
+                scene.Commit()
+                saved = scene.GetSceneXMLString()
+            finally:
+                scene.SetSaveToXMLString(0)
+            self.assertIn(widget._parameterNode.parameterNode.GetID(), saved,
+                          "The parameter node was not saved, so the check proves nothing")
+            self.assertNotIn(otherId, saved)
+            self.assertEqual(SLIAFlowLogic().captureId, self.DEFAULT_CAPTURE_ID)
+
+    def test_captureRunsOnACubeWithPaddedRows(self) -> None:
+        """A whole Capture on a 5 x 3 cube keeps 5 samples by 3 lines everywhere.
+
+        Five samples need one padding byte per BMP row, as IUMA's 1301 do, and
+        lines and samples differ, so a transposed axis cannot pass. The
+        expected shapes are the fixture's own.
+        """
+        cubeModule = self._helperModule("SLIAFlowCube")
+        samples, lines = 5, 3
+        with self._captureSession(uc2=True) as session:
+            widget = session["widget"]
+            captureId = "S-N-005-02"
+            _header, values = self._addCapture(session["root"], captureId,
+                                               samples=samples, lines=lines)
+            widget.logic.captureId = captureId
+            self._startFakeCamera(session)
+            self._showFrame(session, 60)
+            widget._onCaptureClicked()
+
+            case = widget.logic.currentRun.case
+            self.assertEqual((case.name, case.samples, case.lines), (captureId, samples, lines))
+            mapped = cubeModule.parseEnviHeader(
+                (case.folder / "raw.hdr").read_text(encoding="ascii"))
+            self.assertEqual((mapped["samples"], mapped["lines"]), (str(samples), str(lines)))
+
+            cubeNode = widget.logic.cubeNode()
+            cube = np.array(slicer.util.arrayFromVolume(cubeNode))
+            self.assertEqual(cube.shape, (len(self.LCTF_WAVELENGTHS_NM), lines, samples))
+            np.testing.assert_array_equal(cube, values)
+            preview = widget.logic.acceptColourPreview(cubeNode)
+            self.assertEqual(slicer.util.arrayFromVolume(preview).shape, (1, lines, samples, 3))
+            _wavelengths, spectrum = widget.logic.pixelSpectrum(cubeNode, samples - 1, lines - 1)
+            np.testing.assert_array_equal(spectrum, values[:, lines - 1, samples - 1])
+
+            vascular = self._finishUc2(session, seed=4)
+            np.testing.assert_array_equal(
+                slicer.util.arrayFromVolume(widget.logic.vascularMapNode()),
+                vascular[np.newaxis, ...])
+            _case, images = self._finishCapture(session, seed=5)
+            for fileName in self.UC1_OUTPUT_FILE_NAMES:
+                with self.subTest(output=fileName):
+                    node = widget.logic.outputNode(fileName)
+                    self.assertIsNotNone(node, "The 5 x 3 result was not shown")
+                    np.testing.assert_array_equal(slicer.util.arrayFromVolume(node),
+                                                  images[fileName][np.newaxis, ...])
 
     def test_cubeRefusalReasonsAreTranslated(self) -> None:
         """The reason a cube is refused is translated, not only the sentence around it.
@@ -2082,7 +2542,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         """The module widget wired to a fixture repository, a fake camera and fake UC1.
 
         The configured cube is the fixture calibrated cube at its default place,
-        input/002-04. With `cube=False` it is not written, so the configured
+        input/S-N-002-04/S-N-002-04. With `cube=False` it is not written, so the configured
         header does not exist. With `uc2` a placeholder UC2 build is staged too, so Capture starts a fake
         UC2 process before the fake UC1 one; without it UC2 is refused before
         any process is created, and `processes` holds UC1's alone.
@@ -2109,6 +2569,10 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 widget._forgetVascularMap()
                 widget.logic.calibratedCubeHeader = None
                 widget.logic.setRunEnvironment(repositoryRoot=None, processFactory=None)
+                # The list showed the fixture's captures; it shows input/'s again.
+                refresh = getattr(widget, "_refreshCaptureList", None)
+                if refresh is not None:
+                    refresh()
 
     def _startFakeCamera(self, session) -> None:
         widget = session["widget"]
@@ -2935,7 +3399,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     # SLIA-032: the calibrated LCTF cube - bands, colour preview, pixel spectrum
     #
     # Every cube below is a placeholder fixture laid out like IUMA's calibrated
-    # cube, written to a temporary directory. No test reads input/002-04.
+    # cube, written to a temporary directory. No test reads input/.
     # ----------------------------------------------------------------------
 
     def test_calibratedCubeIsReadWithItsValuesUnchanged(self) -> None:
@@ -3004,7 +3468,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
         """R, G and B are the bands nearest 650, 550 and 470 nm, on one fixed scale.
 
         The oracle is the card's rule, computed here from the fixture: the band
-        index is (wavelength - 460) / 5 on the 002-04 grid, reflectance 0 is 0
+        index is (wavelength - 460) / 5 on the LCTF grid, reflectance 0 is 0
         and 1.0 and above is 255, rounded half up.
         """
         with self._captureSession() as session:
@@ -3233,10 +3697,23 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                         self.assertNotIn(word, lowered)
 
     def test_unreadableCubeIsExplainedOnThePanel(self) -> None:
-        """A cube that cannot be read says why on HS Cube, and UC1 is not run on it."""
+        """A cube that cannot be read says why on HS Cube, and UC1 is not run on it.
+
+        Capture refuses a bad cube before freezing (SLIA-040), so the cube is
+        truncated after that check, as when it is written to during Capture.
+        """
         def truncate(session):
-            data = session["calibratedHeader"].with_suffix(".dat")
-            data.write_bytes(data.read_bytes()[:-4])
+            logic = session["widget"].logic
+            saveSnapshot = logic.saveSnapshot
+
+            def truncateThenSave(*arguments, **options):
+                data = session["calibratedHeader"].with_suffix(".dat")
+                data.write_bytes(data.read_bytes()[:-4])
+                return saveSnapshot(*arguments, **options)
+
+            logic.saveSnapshot = truncateThenSave
+            # The logic outlives this test.
+            self.addCleanup(vars(logic).pop, "saveSnapshot", None)
 
         with self._capturedPresentation(finish=False, prepare=truncate) as (session, _layout):
             widget = session["widget"]
@@ -3269,7 +3746,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     STAND_IN_MARK = " (stand-in)"
     # docs/hardware/acquisition_app_and_hardware.md section 4.
     APP_PORTS = {"LiveView": 18944, "Stereo": 18945, "HS Cube": 18946}
-    # The band count of 002-04 (ADR-0004 decision 1).
+    # The band count of IUMA's LCTF captures (ADR-0004 context).
     DEFAULT_EXPECTED_BANDS = 109
     # vtkMRMLIGTLConnectorNode.h at the pinned commit: StateOff, StateWaitConnection,
     # StateConnected; TypeNotDefined, TypeServer, TypeClient.
@@ -5360,7 +5837,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     #
     # As for UC1, every cube, build and PNG below is a placeholder fixture in a
     # temporary directory. No test reads input/ or runs the staged UC2 build;
-    # scripts/development/check-uc2.py runs the real build on 002-04.
+    # scripts/development/check-uc2.py runs the real build on S-N-002-04.
     # ----------------------------------------------------------------------
 
     # Patch 0002's fixed band indices and the wavelengths they must be on the
@@ -5368,9 +5845,9 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
     UC2_BANDS = ((4, 480.0), (16, 540.0), (50, 710.0))
     UC2_RUN_TIMEOUT_SEC = 30
     UC2_EXECUTABLE_NAME = "uc2_bvmap.exe"
-    UC2_MAP_NAME = "002-04-BVMap.png"
+    UC2_MAP_NAME = "S-N-002-04-BVMap.png"
     UC2_DETAIL = (
-        "real UC2 blood-vessel enhancement, recorded IUMA LCTF capture 002-04, calibrated by "
+        "real UC2 blood-vessel enhancement, recorded IUMA LCTF capture S-N-002-04, calibrated by "
         "IUMA (simulated acquisition)"
     )
 
@@ -5610,7 +6087,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
             # UC2 starts first, and UC1 still runs as before.
             self.assertEqual([Path(process.program).name for process in session["processes"]],
                              [self.UC2_EXECUTABLE_NAME, "stratum.opt.intermediate.exe"])
-            self.assertIn("002-04", widget.ui.vascularStatusLabel.text)
+            self.assertIn(self.CALIBRATED_CUBE_NAME, widget.ui.vascularStatusLabel.text)
             captureId = widget._captureId
 
             image = self._finishUc2(session, seed=3)
@@ -5634,7 +6111,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                              "bValue 3"):
                 self.assertIn(fragment, parameters)
             status = widget.ui.vascularStatusLabel.text.lower()
-            for fragment in ("002-04", "simulated acquisition", "high_in 0.15",
+            for fragment in (self.CALIBRATED_CUBE_NAME.lower(), "simulated acquisition", "high_in 0.15",
                              "not comparable between captures", self.NOT_VALIDATED_FRAGMENT):
                 self.assertIn(fragment, status)
 
@@ -5749,7 +6226,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
                 self.assertEqual(widget.panelMessage(widget.VASCULAR_VIEW_NAME), "",
                                  "The waiting text stayed over the map")
                 self.assertEqual(widget.panelCaption(widget.VASCULAR_VIEW_NAME),
-                                 "Enhanced vascularization for recorded cube 002-04")
+                                 "Enhanced vascularization for recorded cube S-N-002-04")
                 for viewName in widget.VIEW_NAMES:
                     if viewName == widget.VASCULAR_VIEW_NAME:
                         continue

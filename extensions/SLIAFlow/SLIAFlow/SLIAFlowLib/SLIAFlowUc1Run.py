@@ -124,6 +124,25 @@ def findRepositoryRoot(start) -> Path:
              markerDirectory=REPOSITORY_MARKER_DIRECTORY))
 
 
+def assertUc1PathsFit(case) -> None:
+    """Refuse a `Uc1Input` whose paths UC1 would truncate.
+
+    They depend on the capture's ID, not on the build, so Capture checks them
+    before freezing anything, and again before the run starts.
+    """
+    # UC1 builds each path as "<argument>/<file>" and "output/<case>/<file>".
+    paths = [f"{case.folder}/{fileName}" for fileName in INPUT_FILE_NAMES]
+    paths.append(f"{OUTPUT_DIRECTORY_NAME}/{case.name}/{LONGEST_OUTPUT_FILE_NAME}")
+    for path in paths:
+        if len(path) >= MAX_PATH_LENGTH:
+            raise Uc1RunError(_(
+                "The path {path} is {length} characters. UC1 keeps at most {limit} "
+                "({bufferSize}-byte buffers) and would read or write a truncated path without "
+                "failing. Move the repository, or give the cube's folder a shorter name."
+            ).format(path=path, length=len(path), limit=MAX_PATH_LENGTH - 1,
+                     bufferSize=MAX_PATH_LENGTH))
+
+
 class Uc1Build:
     """The staged UC1 tree, laid out the way the binary's relative paths require."""
 
@@ -208,17 +227,7 @@ class Uc1Build:
                 "Cube {case} is mapped to {bands} bands, but the staged SVM model is sized for "
                 "{modelBands}."
             ).format(case=case.name, bands=case.bands, modelBands=UC1_MODEL_BAND_COUNT))
-        # UC1 builds each path as "<argument>/<file>" and "output/<case>/<file>".
-        paths = [f"{case.folder}/{fileName}" for fileName in INPUT_FILE_NAMES]
-        paths.append(f"{OUTPUT_DIRECTORY_NAME}/{case.name}/{LONGEST_OUTPUT_FILE_NAME}")
-        for path in paths:
-            if len(path) >= MAX_PATH_LENGTH:
-                raise Uc1RunError(_(
-                    "The path {path} is {length} characters. UC1 keeps at most {limit} "
-                    "({bufferSize}-byte buffers) and would read or write a truncated path without "
-                    "failing. Move the repository, or give the cube's folder a shorter name."
-                ).format(path=path, length=len(path), limit=MAX_PATH_LENGTH - 1,
-                         bufferSize=MAX_PATH_LENGTH))
+        assertUc1PathsFit(case)
 
     def acquireLock(self) -> None:
         """Hold the staged build for this run, or refuse. Never takes over a lock."""

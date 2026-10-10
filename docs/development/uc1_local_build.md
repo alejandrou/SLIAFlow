@@ -8,7 +8,11 @@ is the vendored one plus the versioned patches and nothing else.
 
 Since `SLIA-033` the pipeline runs on IUMA's calibrated LCTF cube `002-04`, mapped
 onto the model's 93 bands. The patches, the band mapping and what each produced
-are recorded in [`uc1_changes.md`](uc1_changes.md).
+are recorded in [`uc1_changes.md`](uc1_changes.md). Since `SLIA-040` it runs on
+the capture chosen in SLIAFlow among IUMA's captures in `input\`; `002-04` is
+now `input\S-N-002-04\S-N-002-04`, byte for byte, and the measurements below
+that name `002-04` were made on that cube.
+[`capture_compatibility.md`](capture_compatibility.md) says which captures run.
 Calibration, PCA, SVM, KNN, K-means and majority voting are the vendored code
 doing real work on the local GPU. The acquisition event is simulated, so a
 result is marked `simulated`, and nothing it produces is a clinical result.
@@ -43,8 +47,8 @@ The script captures the toolchain, stages the sources, applies the patches in
 `scripts/development/uc1-patches/` in name order, pre-creates the output
 directories, builds two binaries, checks each one's expected warnings, and
 asserts the staged tree hashes identically to `workspace/components/` plus the
-patches. Then check the result against the run recorded on `002-04` and each
-patch's own check ([`uc1_changes.md`](uc1_changes.md)):
+patches. Then check the result against the run recorded on `002-04`, now
+`S-N-002-04`, and each patch's own check ([`uc1_changes.md`](uc1_changes.md)):
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\development\check-uc1.py
@@ -73,7 +77,7 @@ build/uc1/
     input/<cube>/             raw.dat and raw.hdr: the mapped cube SLIAFlow
                               writes at every Capture and gives UC1
   expected/                   vendored source plus patches, for the hash check
-  baseline-002-04/            a saved run on 002-04, for check-uc1.py
+  baseline-002-04/            a saved run on 002-04 (S-N-002-04), for check-uc1.py
 ```
 
 The binary is never built or run in place: `main.cu` writes its output into the

@@ -44,7 +44,9 @@ STAND_IN_PREFIX = "[stand-in]"
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 # The reference cube of ADR-0004 decision 1.
-DEFAULT_CUBE_HEADER = REPOSITORY_ROOT / "input" / "002-04" / "LCTF_Calibrated_Cube_Single.hdr"
+# The capture SLIAFlow starts on (ADR-0006), in the nested folder IUMA delivers.
+DEFAULT_CUBE_HEADER = (REPOSITORY_ROOT / "input" / "S-N-002-04" / "S-N-002-04"
+                       / "LCTF_Calibrated_Cube_Single.hdr")
 
 DEFAULT_FRAME_RATE = 10.0
 DEFAULT_BAND_INTERVAL_SEC = 0.1
@@ -131,7 +133,7 @@ def readCube(headerPath) -> StandInCube:
         raise CubeError(f"{dataPath.name} is {dataPath.stat().st_size} bytes but "
                         f"{headerPath.name} describes {expectedBytes}.")
     # Read whole rather than mapped: a mapped file cannot be deleted on Windows
-    # while the mapping lives, and 002-04 is half a gigabyte.
+    # while the mapping lives, and a calibrated capture is over half a gigabyte.
     bands = numpy.fromfile(dataPath, dtype=dtype).reshape(bandCount, lines, samples)
     bands.flags.writeable = False
     return StandInCube(headerPath.parent.name, headerPath.resolve(), bands, wavelengths)
@@ -367,8 +369,8 @@ def _parseArguments(argv):
         description="A stand-in for IUMA's acquisition app: serves its three OpenIGTLink ports "
                     "with a recorded cube. It is not IUMA's app.")
     parser.add_argument("--cube", type=Path, default=DEFAULT_CUBE_HEADER,
-                        help="ENVI header of a float32 or uint16 BSQ cube (default: 002-04's "
-                             "calibrated cube)")
+                        help="ENVI header of a float32 or uint16 BSQ cube (default: "
+                             "S-N-002-04's calibrated cube)")
     parser.add_argument("--base-port", type=int, default=contract.APP_BASE_PORT,
                         help="LiveView port P; Steroscopic is P + 1 and HsCube P + 2")
     parser.add_argument("--frame-rate", type=float, default=DEFAULT_FRAME_RATE,
