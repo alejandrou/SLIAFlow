@@ -1,16 +1,46 @@
 ---
 id: SLIA-041
 title: Send a capture to Slicer from another computer with a portable stand-in for IUMA's app
-status: backlog
-branch:
+status: parked
+branch: feature/SLIA-041-standin-from-another-computer
 priority: medium
-depends_on: SLIA-040
+depends_on: SLIA-040, camera hardware test (not a task; see Parked)
 required_skills: [slicer]
 optional_tools: []
 related_adrs: [ADR-0004, ADR-0006]
 ---
 
 # SLIA-041 - Send a capture to Slicer from another computer with a portable stand-in for IUMA's app
+
+## Parked
+
+**Not eligible for `Start the next task`.** Its dependency "camera hardware
+test" is not complete.
+
+*Parked on 2026-10-13* at the owner's decision.
+
+- **Implemented and verified.** The work was implemented, tested and manually
+  verified without cameras on the branch
+  `feature/SLIA-041-standin-from-another-computer`, in commit `49d3a2a`, a
+  single `WIP:` commit that is not merged.
+- **What the owner checked over a real network,** with a second computer:
+  - The portable stand-in sent recorded calibrated captures to SLIAFlow, and
+    UC1 and UC2 ran on them.
+  - IUMA's real app, installed with its `setup.exe` and with no hardware, sent
+    a raw uint16 cube that SLIAFlow received and showed.
+  - Both sent at about 4-5 bands/s.
+- **Where the details are.** The full specification, the evidence, the guide
+  `docs/development/two_computer_link.md` and the stand-in code are on that
+  branch only.
+- **To resume:**
+  1. Check out the branch and move this card's branch copy (already in
+     `tasks/active/` there) back into the lifecycle. Only one task may be in
+     active or review at a time.
+  2. Repeat the two-computer test with the cameras.
+  3. Then go to review.
+
+  `main` may have moved on by then, so rebase or merge with the owner's
+  authorization.
 
 ## Goal
 
