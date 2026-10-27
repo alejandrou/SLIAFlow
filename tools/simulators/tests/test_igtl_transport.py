@@ -360,8 +360,9 @@ class ClientWatchTest(unittest.TestCase):
         self.assertEqual(output.count("WARNING:"), 1, output)
 
 
-# The port table in `docs/architecture/WP5_MS5_DEMO_PLAN.md` is the authority for
-# these, not the code under test.
+# The two ports the original port plan reserved for producers that do not exist.
+# They are written out here, not read from `contract.RESERVED_PORTS`, so that
+# changing the code under test cannot change what the test expects.
 DOCUMENTED_RESERVED_CHANNELS = {18948: "Stereoscopic", 18949: "UC2_STO2"}
 
 # Where the package the scan below reads lives. A module constant so that a

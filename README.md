@@ -9,7 +9,6 @@ This repository is the active Windows 11 SLIAFlow-related 3D Slicer development 
 - `tasks/`: current task cards, review state, and completion evidence.
 - `docs/development/`: project structure, coding, testing, and local development guidance.
 - `docs/slicer/`: reusable 3D Slicer technical notes for this project.
-- `docs/knowledge/`: curated, non-sensitive, version-controlled reference notes.
 - `extensions/`: SLIAFlow-specific Slicer extension and module development.
 - `source/`: local upstream Slicer source reference.
 - `apps/`: local Slicer application/build outputs.

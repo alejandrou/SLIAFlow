@@ -513,8 +513,7 @@ class SLIAFlowTest(ScriptedLoadableModuleTest):
 
         widget = self._moduleRepresentationAndWidget()[1]
         layoutRoot = ElementTree.fromstring(widget.CUSTOM_LAYOUT_DESCRIPTION)
-        # The WP5 demonstrator screen in docs/architecture/WP5_MS5_DEMO_PLAN.md:
-        # two rows of three named views.
+        # The operator screen: two rows of three named views.
         self.assertEqual(layoutRoot.attrib["type"], "vertical")
         rows = layoutRoot.findall("./item/layout")
         self.assertEqual(

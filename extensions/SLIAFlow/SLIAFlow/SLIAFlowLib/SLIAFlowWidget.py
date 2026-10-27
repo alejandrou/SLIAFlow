@@ -75,7 +75,7 @@ class SLIAFlowWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     STO2_VIEW_LABEL = _("Relative StO2")
     VASCULAR_VIEW_LABEL = _("Enhanced Vascularization")
     RESULT_VIEW_LABEL = _("Tumour Delineation")
-    # The target screen in docs/architecture/WP5_MS5_DEMO_PLAN.md.
+    # The operator screen: two rows of three named views.
     VIEW_ROWS = (
         (
             (LIVE_VIEW_NAME, LIVE_VIEW_LABEL),
